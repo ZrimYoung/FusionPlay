@@ -38,6 +38,7 @@ import java.net.URI
 import java.nio.file.Paths
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -49,6 +50,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.longOrNull
 
 /**
  * Process-scoped owner of the original FusionPlay backend.
@@ -92,8 +97,14 @@ class FusionPlayRuntime(
     private var pendingManualXiaomiStop = false
     private var xiaomiTrackChangeDirection: String? = null
     private var lastMiPlayProgressLogNanos = 0L
+    private val nativeCast = com.fusionplay.android.cast.NativeCastManager(context, scope)
+    private val audioCalibration = context.getSharedPreferences("audio_sync", Context.MODE_PRIVATE)
+    private var miPlayOutputAdvanceMs = audioCalibration.getInt("advance_ms", 0).coerceIn(0, 500)
 
     init {
+        com.airplayreceiver.desktop.nativebridge.FusionPlayNative
+            .nativeSetMiPlayOutputAdvance(miPlayOutputAdvanceMs)
+        scope.launch { nativeCast.state.collect { publishState(viewModel.state.value) } }
         scope.launch {
             viewModel.awaitInitialized()
             runCatching { bridge.initialize() }
@@ -213,6 +224,15 @@ class FusionPlayRuntime(
                     }
                     "setAdvancedEffectsEnabled" ->
                         viewModel.setAdvancedEffectsEnabled(call.boolean("value"))
+                    "setNativeCastPaused" -> nativeCast.setPaused(call.boolean("value"))
+                    "setMiPlayOutputAdvance" -> {
+                        val millis = call.int("value")
+                        require(millis in 0..500) { "补偿范围为 0 至 500 毫秒" }
+                        com.airplayreceiver.desktop.nativebridge.FusionPlayNative.nativeSetMiPlayOutputAdvance(millis)
+                        audioCalibration.edit().putInt("advance_ms", millis).apply()
+                        miPlayOutputAdvanceMs = millis
+                        publishState(viewModel.state.value)
+                    }
                     "setProtocolEnabled" -> viewModel.setProtocolEnabled(
                         ReceiverProtocol.valueOf(call.string("protocol").uppercase()),
                         call.boolean("value"),
@@ -771,7 +791,17 @@ class FusionPlayRuntime(
                     "reason" to reduction.reason,
                     "mutation_count" to reduction.mutations.size,
                     "volume_percent" to event.toVolumePercentOrNull(),
-                ),
+                ) + (event.payload as? JsonObject).orEmpty()
+                    .filterKeys { it in MIPLAY_DIAGNOSTIC_FIELDS }
+                    .mapKeys { (key, _) -> "protocol_$key" }
+                    .mapValues { (_, value) ->
+                        when (value) {
+                            is JsonPrimitive -> if (value.isString) value.content else {
+                                value.booleanOrNull ?: value.longOrNull ?: value.content
+                            }
+                            else -> value.toString()
+                        }
+                    },
             )
         }
         for (mutation in reduction.mutations) {
@@ -1084,13 +1114,20 @@ class FusionPlayRuntime(
                                 bridge.setArtwork(URI.create(artwork))
                             else -> bridge.setArtwork(Paths.get(artwork))
                         }
-                    }.onFailure { reportError("媒体封面更新失败", it) }
+                    }.onFailure {
+                        // A newer cover or session replaces this job normally.
+                        // Preserve cancellation instead of surfacing it as a failed download.
+                        if (it is CancellationException) throw it
+                        reportError("媒体封面更新失败", it)
+                    }
                 }
             }
         }
     }
 
     private fun stateMap(state: AppState): Map<String, Any?> = mapOf(
+        "nativeCast" to nativeCast.state.value.toMap(),
+        "miPlayOutputAdvanceMs" to miPlayOutputAdvanceMs,
         "initialized" to state.initialized,
         "busy" to state.busy,
         "coreRunning" to state.coreRunning,
@@ -1214,11 +1251,14 @@ class FusionPlayRuntime(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        nativeCast.close()
         networkPlayer.close()
         bridge.close()
         viewModel.close()
         scope.cancel()
     }
+
+    fun setAppForeground(value: Boolean) = nativeCast.setForeground(value)
 
     private fun MethodCall.string(name: String): String = argument<String>(name).orEmpty()
     private fun MethodCall.boolean(name: String): Boolean = argument<Boolean>(name) == true
@@ -1252,6 +1292,24 @@ class FusionPlayRuntime(
     )
 
     companion object {
+        // Keep useful discovery outcomes while excluding wire packets,
+        // authentication material and device/account identities. The logger
+        // applies its existing address and secret redaction to these values.
+        private val MIPLAY_DIAGNOSTIC_FIELDS = setOf(
+            "source", "destination", "service", "success", "unicast",
+            "address_family", "profile", "port", "control_port", "code", "message",
+            "stage", "state", "playing", "raw_state", "session_active",
+            "group_target_delay_ms", "queue_delay_ms", "output_latency_ms",
+            "output_callback_frames", "output_sample_rate", "synchronization_mode",
+            "time_offset_us", "clock_synchronized", "server_minus_local_us",
+            "target_server_minus_local_us", "phase_error_us", "frequency_ppm",
+            "round_trip_us", "latency_ms", "arrival_residual_ms", "media_generation",
+            "front_pts_us", "server_now_us", "schedule_error_us", "buffered_frames",
+            "timed_playback_started",
+            "observed_output_latency_ms", "underrun_callbacks",
+            "output_latency_calibrated",
+            "output_advance_ms",
+        )
         private const val METHOD_CHANNEL = "com.fusionplay.android/runtime"
         private const val EVENT_CHANNEL = "com.fusionplay.android/runtime_events"
         private const val XIAOMI_PROTOCOL = "小米妙播"

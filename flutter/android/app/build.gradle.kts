@@ -10,6 +10,13 @@ plugins {
 
 val repositoryRoot = layout.projectDirectory.dir("../../..")
 val generatedNativeLibs = layout.buildDirectory.dir("generated/fusionPlayJniLibs")
+val supportedNativeAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
+val nativeAbis = providers.gradleProperty("fusionPlayAbis").orNull
+    ?.split(',')?.map(String::trim)
+    ?: supportedNativeAbis
+require(nativeAbis.isNotEmpty() && nativeAbis.all { it in supportedNativeAbis }) {
+    "fusionPlayAbis must contain supported Android ABIs: $supportedNativeAbis"
+}
 
 android {
     namespace = "com.fusionplay.android"
@@ -23,13 +30,16 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.fusionplay.android"
-        minSdk = flutter.minSdkVersion
+        applicationId = providers.gradleProperty("fusionPlayApplicationId")
+            .getOrElse("com.fusionplay.android")
+        resValue("string", "fusionplay_launcher_label",
+            if (applicationId == "com.fusionplay.android.portfix") "FusionPlay 修复版" else "FusionPlay")
+        minSdk = maxOf(flutter.minSdkVersion, 24) // Shizuku API 13.1.5 requires Android 7.
         targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         ndk {
-            abiFilters += setOf("armeabi-v7a", "arm64-v8a", "x86_64")
+            abiFilters += nativeAbis
         }
     }
 
@@ -49,6 +59,7 @@ android {
 
     buildFeatures {
         buildConfig = true
+        aidl = true
     }
 
     lint {
@@ -89,6 +100,8 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.8.0")
     implementation("androidx.media3:media3-exoplayer-hls:1.8.0")
     implementation("androidx.media:media:1.7.0")
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     testImplementation("junit:junit:4.13.2")
 }
 
@@ -98,7 +111,6 @@ tasks.withType<Test>().configureEach {
     jvmArgs("-XX:+UseSerialGC")
 }
 
-val nativeAbis = listOf("armeabi-v7a", "arm64-v8a", "x86_64")
 val nativeTriples = mapOf(
     "armeabi-v7a" to "arm-linux-androideabi",
     "arm64-v8a" to "aarch64-linux-android",

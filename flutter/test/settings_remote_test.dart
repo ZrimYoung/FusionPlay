@@ -7,6 +7,166 @@ import 'package:fusionplay_android_flutter/models/app_state.dart';
 import 'package:fusionplay_android_flutter/ui/settings_view.dart';
 
 void main() {
+  testWidgets('audio calibration respects limits and can return to zero', (
+    tester,
+  ) async {
+    final initial = FocusNode();
+    addTearDown(initial.dispose);
+    tester.view.physicalSize = const Size(600, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final values = <int>[];
+    Widget screen(int value) => MaterialApp(
+      home: Scaffold(
+        body: SettingsView(
+          state: AppState(initialized: true, miPlayOutputAdvanceMs: value),
+          initialFocusNode: initial,
+          onClose: () {},
+          onReceiverName: (_) {},
+          onStartup: (_) {},
+          onAutoWake: (_) {},
+          onAdvancedEffects: (_) {},
+          onMiPlay: (_) {},
+          onMiPlayIdentity: (_) {},
+          onAirPlay: (_) {},
+          onDlna: (_) {},
+          onExportLogs: () async {},
+          onMiPlayOutputAdvance: values.add,
+        ),
+      ),
+    );
+    await tester.pumpWidget(screen(0));
+    await tester.ensureVisible(find.text('+10'));
+    await tester.tap(find.text('−10'));
+    await tester.tap(find.text('+10'));
+    await tester.pump();
+    expect(values, [10]);
+    await tester.pumpWidget(screen(500));
+    await tester.ensureVisible(find.text('+10'));
+    await tester.tap(find.text('+10'));
+    await tester.tap(find.text('−10'));
+    await tester.tap(find.text('归零'));
+    await tester.pump();
+    expect(values, [10, 490, 0]);
+    final parsed = AppState.fromMap({'miPlayOutputAdvanceMs': 100});
+    expect(parsed.copyWith(lastError: 'test').miPlayOutputAdvanceMs, 100);
+  });
+
+  testWidgets(
+    'remote name editor cancellation preserves name and completion only edits draft',
+    (tester) async {
+      final initial = FocusNode();
+      addTearDown(initial.dispose);
+      tester.view.physicalSize = const Size(600, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      String? result;
+      var opened = 0;
+      final saved = <String>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SettingsView(
+              state: const AppState(
+                initialized: true,
+                settings: AppSettings(receiverName: 'Original'),
+              ),
+              initialFocusNode: initial,
+              onClose: () {},
+              onReceiverName: saved.add,
+              onStartup: (_) {},
+              onAutoWake: (_) {},
+              onAdvancedEffects: (_) {},
+              onMiPlay: (_) {},
+              onMiPlayIdentity: (_) {},
+              onAirPlay: (_) {},
+              onDlna: (_) {},
+              onExportLogs: () async {},
+              onEditReceiverName: (value, hint) async {
+                opened++;
+                return result;
+              },
+            ),
+          ),
+        ),
+      );
+      initial.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      expect(opened, 1);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'Original',
+      );
+      expect(saved, isEmpty);
+      result = 'New name';
+      await tester.sendKeyEvent(LogicalKeyboardKey.select);
+      await tester.pump();
+      expect(opened, 2);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'New name',
+      );
+      expect(saved, isEmpty);
+      await tester.tap(find.text('应用'));
+      await tester.pump();
+      expect(saved, ['New name']);
+    },
+  );
+
+  testWidgets(
+    'native cast pause is separate from MiPlay and blocks duplicate operations',
+    (tester) async {
+      final initial = FocusNode();
+      addTearDown(initial.dispose);
+      tester.view.physicalSize = const Size(600, 1800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final changes = <bool>[];
+      var miPlayChanges = 0;
+      Widget screen(bool busy) => MaterialApp(
+        home: Scaffold(
+          body: SettingsView(
+            state: AppState(
+              initialized: true,
+              nativeCast: NativeCastState(supported: true, busy: busy),
+            ),
+            initialFocusNode: initial,
+            onClose: () {},
+            onReceiverName: (_) {},
+            onStartup: (_) {},
+            onAutoWake: (_) {},
+            onAdvancedEffects: (_) {},
+            onMiPlay: (_) {
+              miPlayChanges++;
+            },
+            onMiPlayIdentity: (_) {},
+            onAirPlay: (_) {},
+            onDlna: (_) {},
+            onExportLogs: () async {},
+            onNativeCast: changes.add,
+          ),
+        ),
+      );
+      await tester.pumpWidget(screen(false));
+      await tester.ensureVisible(find.text('暂停原生投屏'));
+      await tester.tap(find.text('暂停原生投屏'));
+      await tester.pump();
+      expect(changes, [true]);
+      expect(miPlayChanges, 0);
+      await tester.pumpWidget(screen(true));
+      await tester.tap(find.text('暂停原生投屏'));
+      await tester.pump();
+      expect(changes, [true]);
+    },
+  );
+
   testWidgets('menu toggles settings and remote back closes it', (
     tester,
   ) async {

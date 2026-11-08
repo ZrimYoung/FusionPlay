@@ -34,6 +34,16 @@ use symphonia::default::codecs::AacDecoder;
 
 pub type EventEmitter = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
+#[cfg(target_os = "macos")]
+#[path = "macos_audio.rs"]
+mod macos_audio;
+#[cfg(target_os = "macos")]
+use macos_audio::open_native_audio_output;
+#[cfg(target_os = "macos")]
+type DecoderQueue = Arc<macos_audio::PcmRing>;
+#[cfg(not(target_os = "macos"))]
+type DecoderQueue = Arc<Mutex<PcmQueue>>;
+
 const POSITION_RESUME_SETTLING_WINDOW: StdDuration = StdDuration::from_millis(1_500);
 
 /**
@@ -1874,6 +1884,62 @@ fn normalized_output_latency_millis(
         .min(MIPLAY_MAX_OUTPUT_LATENCY_MILLIS)
 }
 
+#[cfg(any(target_os = "android", test))]
+#[derive(Default)]
+struct OutputLatencyEstimator {
+    millis: f64,
+    measured: bool,
+    stable_samples: u8,
+}
+
+#[cfg(target_os = "android")]
+static ANDROID_OUTPUT_ADVANCE_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Compensate a downstream sink whose acoustic latency is absent from Android
+/// timestamps (for example a television processing HDMI PCM).
+#[cfg(target_os = "android")]
+pub fn set_android_output_advance_millis(millis: u32) {
+    ANDROID_OUTPUT_ADVANCE_MS.store(millis.min(500), Ordering::Release);
+}
+
+#[cfg(any(target_os = "android", test))]
+fn fade_calibration_boundary(output: &mut [(f32, f32)], fade_in: bool) {
+    let denominator = output.len().saturating_sub(1).max(1) as f32;
+    for (index, (left, right)) in output.iter_mut().enumerate() {
+        let gain = index as f32 / denominator;
+        let gain = if fade_in { gain } else { 1.0 - gain };
+        *left *= gain;
+        *right *= gain;
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+impl OutputLatencyEstimator {
+    fn observe(&mut self, observed: Option<f64>, fallback: f64) {
+        if let Some(value) = observed.filter(|value| value.is_finite() && *value >= 0.0) {
+            let value = value.min(MIPLAY_MAX_OUTPUT_LATENCY_MILLIS);
+            self.stable_samples = if self.measured && (value - self.millis).abs() <= 2.0 {
+                self.stable_samples.saturating_add(1)
+            } else { 1 };
+            // A callback-duration fallback is not a hardware measurement.
+            // Blending it into the first timestamp preserves a false offset.
+            self.millis = if self.measured {
+                self.millis * (1.0 - MIPLAY_OUTPUT_LATENCY_SMOOTHING)
+                    + value * MIPLAY_OUTPUT_LATENCY_SMOOTHING
+            } else { value };
+            self.measured = true;
+        } else if !self.measured {
+            self.millis = fallback;
+        }
+    }
+
+    fn calibrated(&self) -> bool { self.measured && self.stable_samples >= 2 }
+
+    fn waiting(&self, elapsed: StdDuration) -> bool {
+        !self.calibrated() && elapsed < StdDuration::from_secs(1)
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 fn output_latency_millis(
     info: &cpal::OutputCallbackInfo,
@@ -1975,7 +2041,7 @@ const MIPLAY_OUTPUT_LATENCY_SMOOTHING: f64 = 0.2;
 
 struct AacPlayer {
     decoder: AacDecoder,
-    queue: Arc<Mutex<PcmQueue>>,
+    queue: DecoderQueue,
     _stream: NativeAudioStream,
     adts_framer: AdtsFramer,
     timestamp: i64,
@@ -1988,8 +2054,11 @@ struct AacPlayer {
     events: EventEmitter,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
 type NativeAudioStream = cpal::Stream;
+
+#[cfg(target_os = "macos")]
+type NativeAudioStream = macos_audio::MacAudioStream;
 
 #[cfg(target_os = "android")]
 type NativeAudioStream = AndroidMiPlayAudioOutput;
@@ -2144,6 +2213,12 @@ impl AacPlayer {
                 }));
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.queue.push_timed(&self.decoded_samples, media_pts_micros);
+            self.latency_telemetry.update_buffered_frames(self.queue.buffered_frames());
+        }
+        #[cfg(not(target_os = "macos"))]
         if let Ok(mut queue) = self.queue.lock() {
             queue.push_timed(&self.decoded_samples, media_pts_micros);
             self.latency_telemetry
@@ -2239,7 +2314,7 @@ impl AdtsFramer {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
 fn open_native_audio_output(
     requested_device: Option<&str>,
     paused: Arc<AtomicBool>,
@@ -2383,10 +2458,15 @@ struct AndroidMiPlayAudioCallback {
     callback_started: bool,
     signal_started: bool,
     synchronization_started: bool,
-    endpoint_latency_millis: f64,
-    endpoint_latency_initialized: bool,
+    endpoint_latency: OutputLatencyEstimator,
+    output_started_at: Instant,
     latency_refresh_countdown: u32,
     timed_playback_started: bool,
+    last_schedule_diagnostic: Option<Instant>,
+    observed_output_latency_millis: Option<f64>,
+    underrun_callbacks: u64,
+    output_advance_ms: u32,
+    calibration_fade_in: bool,
 }
 
 #[cfg(target_os = "android")]
@@ -2401,26 +2481,24 @@ impl AudioOutputCallback for AndroidMiPlayAudioCallback {
         let callback_frames = output.len();
         let output_sample_rate = self.output_sample_rate.load(Ordering::Acquire).max(1);
         let route_playback_rate = f64::from(MIPLAY_SAMPLE_RATE_HZ) / f64::from(output_sample_rate);
-        if !self.endpoint_latency_initialized || self.latency_refresh_countdown == 0 {
+        if self.latency_refresh_countdown == 0 {
             let observed_latency = stream.calculate_latency_millis().ok();
-            let measured_latency = normalized_output_latency_millis(
-                observed_latency,
+            self.observed_output_latency_millis = observed_latency;
+            let fallback_latency = normalized_output_latency_millis(
+                None,
                 output_sample_rate,
                 callback_frames,
             );
-            self.endpoint_latency_millis = if self.endpoint_latency_initialized {
-                self.endpoint_latency_millis * (1.0 - MIPLAY_OUTPUT_LATENCY_SMOOTHING)
-                    + measured_latency * MIPLAY_OUTPUT_LATENCY_SMOOTHING
-            } else {
-                measured_latency
-            };
-            self.endpoint_latency_initialized = true;
-            self.latency_refresh_countdown = MIPLAY_OUTPUT_LATENCY_REFRESH_CALLBACKS;
+            self.endpoint_latency.observe(observed_latency, fallback_latency);
+            self.latency_refresh_countdown = if self.endpoint_latency.calibrated() {
+                MIPLAY_OUTPUT_LATENCY_REFRESH_CALLBACKS
+            } else { 16 };
         } else {
             self.latency_refresh_countdown -= 1;
         }
+        let compensated_latency_millis = self.endpoint_latency.millis + f64::from(self.output_advance_ms);
         self.latency_telemetry
-            .update_output_latency(self.endpoint_latency_millis);
+            .update_output_latency(compensated_latency_millis);
         if !self.callback_started {
             self.callback_started = true;
             (self.events)(json!({
@@ -2439,6 +2517,14 @@ impl AudioOutputCallback for AndroidMiPlayAudioCallback {
             output.fill((0.0, 0.0));
             return DataCallbackResult::Continue;
         }
+        // Timestamp availability lags stream startup. Establish the initial
+        // alignment with measured output latency, rather than permanently
+        // aligning to one callback (8 ms on TVs whose actual latency is 35 ms).
+        // Devices without timestamps still start after the bounded warm-up.
+        if self.endpoint_latency.waiting(self.output_started_at.elapsed()) {
+            output.fill((0.0, 0.0));
+            return DataCallbackResult::Continue;
+        }
         // The decoder holds this lock only while appending one already-decoded
         // AAC frame. Skipping a callback on contention inserts a 4 ms block of
         // silence roughly at the AAC cadence, which is much more audible than
@@ -2449,7 +2535,34 @@ impl AudioOutputCallback for AndroidMiPlayAudioCallback {
         };
         self.latency_telemetry
             .update_buffered_frames(queue.buffered_frames());
-        let synchronized_frames = synchronized_buffer_frames(self.endpoint_latency_millis);
+        let synchronized_frames = synchronized_buffer_frames(compensated_latency_millis);
+        if self.last_schedule_diagnostic.is_none_or(|last| last.elapsed() >= StdDuration::from_secs(5))
+            && self.presentation_clock.synchronization_ready() {
+            if let (Some(pts), Some(now)) = (
+                queue.front_pts_micros(),
+                self.presentation_clock.synchronized_server_now_micros(),
+            ) {
+                let offset = self
+                    .presentation_clock
+                    .presentation_offset_micros
+                    .load(Ordering::Acquire);
+                (self.events)(json!({
+                    "event": "audio_presentation_schedule",
+                    "front_pts_us": pts,
+                    "time_offset_us": offset,
+                    "server_now_us": now,
+                    "schedule_error_us": presentation_schedule_error_micros(pts, offset, now, compensated_latency_millis),
+                    "buffered_frames": queue.buffered_frames(),
+                    "timed_playback_started": self.timed_playback_started,
+                    "output_latency_ms": self.endpoint_latency.millis,
+                    "output_advance_ms": self.output_advance_ms,
+                    "output_latency_calibrated": self.endpoint_latency.calibrated(),
+                    "observed_output_latency_ms": self.observed_output_latency_millis,
+                    "underrun_callbacks": self.underrun_callbacks,
+                }));
+                self.last_schedule_diagnostic = Some(Instant::now());
+            }
+        }
         let mut leading_silence_frames = 0_usize;
         let mut synchronization_mode = "buffer_window";
         let playback_rate = if self.presentation_clock.synchronization_ready()
@@ -2461,14 +2574,13 @@ impl AudioOutputCallback for AndroidMiPlayAudioCallback {
                     .presentation_offset_micros
                     .load(Ordering::Acquire),
                 server_now,
-                self.endpoint_latency_millis,
+                compensated_latency_millis,
             ) {
             synchronization_mode = "sender_clock";
             // Align an already-late stream before the first audible frame, but
             // never splice PCM at an arbitrary waveform position once playback
-            // is running. Stable playback catches clock drift through the
-            // continuous rate controller below; hard drops here produce clicks
-            // even when Android's output track itself has no underruns.
+            // is running. Hard drops here produce clicks even when Android's
+            // output track itself has no underruns.
             if should_hard_drop_late_frames(self.timed_playback_started, schedule_error, false) {
                 let late_frames = ((-schedule_error) * MIPLAY_SOURCE_SAMPLE_RATE as f64
                     / 1_000_000.0)
@@ -2510,15 +2622,36 @@ impl AudioOutputCallback for AndroidMiPlayAudioCallback {
                 "protocol": "xiaomi_miplay",
                 "group_target_delay_ms": MIPLAY_GROUP_PLAY_DELAY_MILLIS,
                 "queue_delay_ms": queue_delay_millis,
-                "output_latency_ms": self.endpoint_latency_millis,
+                "output_latency_ms": self.endpoint_latency.millis,
+                "output_advance_ms": self.output_advance_ms,
+                "output_latency_calibrated": self.endpoint_latency.calibrated(),
                 "output_callback_frames": callback_frames,
                 "output_sample_rate": output_sample_rate,
                 "synchronization_mode": synchronization_mode,
             }));
         }
         output[..leading_silence_frames].fill((0.0, 0.0));
+        let needed_frames = ((output.len() - leading_silence_frames) as f64 * playback_rate)
+            .ceil() as usize + 1;
+        if queue.buffered_frames() < needed_frames {
+            self.underrun_callbacks = self.underrun_callbacks.saturating_add(1);
+        }
         let callback_peak =
             queue.render_stereo_block(&mut output[leading_silence_frames..], playback_rate);
+        let requested_advance = ANDROID_OUTPUT_ADVANCE_MS.load(Ordering::Acquire);
+        if requested_advance != self.output_advance_ms {
+            // Finish the old timeline at zero gain. The next callback aligns
+            // the new timeline while silent, then fades in. No sample-rate
+            // correction is applied to the steady music stream.
+            fade_calibration_boundary(output, false);
+            self.output_advance_ms = requested_advance;
+            self.timed_playback_started = false;
+            self.calibration_fade_in = true;
+            self.last_schedule_diagnostic = None;
+        } else if self.calibration_fade_in {
+            fade_calibration_boundary(&mut output[leading_silence_frames..], true);
+            self.calibration_fade_in = false;
+        }
         self.latency_telemetry
             .update_buffered_frames(queue.buffered_frames());
         drop(queue);
@@ -2619,10 +2752,15 @@ fn open_android_miplay_stream(
         callback_started: false,
         signal_started: false,
         synchronization_started: false,
-        endpoint_latency_millis: 0.0,
-        endpoint_latency_initialized: false,
+        endpoint_latency: OutputLatencyEstimator::default(),
+        output_started_at: Instant::now(),
         latency_refresh_countdown: 0,
         timed_playback_started: false,
+        last_schedule_diagnostic: None,
+        observed_output_latency_millis: None,
+        underrun_callbacks: 0,
+        output_advance_ms: ANDROID_OUTPUT_ADVANCE_MS.load(Ordering::Acquire),
+        calibration_fade_in: false,
     };
     let mut stream = AudioStreamBuilder::default()
         .set_usage(Usage::Media)
@@ -2711,7 +2849,7 @@ fn manage_android_miplay_output(
 #[cfg(target_os = "android")]
 const ANDROID_MIPLAY_AUDIO_RESTART_DELAYS_MILLIS: [u64; 6] = [50, 100, 200, 400, 800, 1_600];
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "macos")))]
 fn build_output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -3048,6 +3186,7 @@ mod tests {
     use super::{
         AdtsFramer, ClockFitPoint, MAX_RTSP_MESSAGE_BYTES, MIPLAY_RTP_CLOCK_HZ,
         MIPLAY_SAMPLE_RATE_HZ, MIPLAY_SOURCE_CHANNELS, MiPlayLatencyTelemetry, PcmQueue,
+        OutputLatencyEstimator, fade_calibration_boundary,
         StreamKeys, TsDemuxer, adts_bitrate, adts_sample_rate, decode_timer_sample,
         extend_wrapping_counter, fit_clock_line, is_adts, normalized_output_latency_millis,
         parse_rtp_packet, parse_timer_server, pes_private_data_iv, pes_pts_micros,
@@ -3340,6 +3479,83 @@ mod tests {
             normalized_output_latency_millis(Some(400.0), 48_000, 240),
             250.0
         );
+    }
+
+    #[test]
+    fn android_waits_for_real_latency_before_establishing_playout_alignment() {
+        let mut latency = OutputLatencyEstimator::default();
+        latency.observe(None, 8.0);
+        assert!(latency.waiting(StdDuration::from_millis(100)));
+        latency.observe(Some(34.75), 8.0);
+        // The first real timestamp replaces the fallback, without averaging.
+        assert_eq!(latency.millis, 34.75);
+        assert!(latency.waiting(StdDuration::from_millis(250)));
+        latency.observe(Some(34.75), 8.0);
+        assert!(!latency.waiting(StdDuration::from_millis(400)));
+        let front_pts = 1_000_000.0;
+        let server_now = 1_000_000;
+        let aligned_offset = 34_750;
+        assert_eq!(presentation_schedule_error_micros(
+            front_pts, aligned_offset, server_now, latency.millis,
+        ), 0.0);
+        // Aligning with the old 8 ms fallback leaves exactly the observed lag.
+        assert_eq!(presentation_schedule_error_micros(
+            front_pts, 8_000, server_now, latency.millis,
+        ), -26_750.0);
+    }
+
+    #[test]
+    fn android_keeps_measured_latency_when_timestamp_temporarily_unavailable() {
+        let mut latency = OutputLatencyEstimator::default();
+        latency.observe(Some(35.0), 8.0);
+        latency.observe(Some(35.0), 8.0);
+        for invalid in [None, Some(f64::NAN), Some(-1.0), Some(f64::INFINITY)] {
+            latency.observe(invalid, 8.0);
+            assert_eq!(latency.millis, 35.0);
+            assert!(latency.calibrated());
+        }
+    }
+
+    #[test]
+    fn android_without_hardware_timestamps_does_not_wait_forever() {
+        let mut latency = OutputLatencyEstimator::default();
+        latency.observe(None, 8.0);
+        assert!(latency.waiting(StdDuration::from_millis(999)));
+        assert!(!latency.waiting(StdDuration::from_secs(1)));
+        assert!(!latency.calibrated());
+    }
+
+    #[test]
+    fn downstream_latency_compensation_advances_pcm_and_preserves_total_latency_report() {
+        let mut queue = PcmQueue::new();
+        queue.push_timed(&vec![0.5; 48_000 * MIPLAY_SOURCE_CHANNELS], Some(1_000_000.0));
+        let hardware_latency = 34.75;
+        let server_now = 965_250;
+        let before = presentation_schedule_error_micros(queue.front_pts_micros().unwrap(), 0,
+            server_now, hardware_latency);
+        assert_eq!(before, 0.0);
+        let error = presentation_schedule_error_micros(queue.front_pts_micros().unwrap(), 0,
+            server_now, hardware_latency + 100.0);
+        assert_eq!(error, -100_000.0);
+        assert!(should_hard_drop_late_frames(false, error, false));
+        queue.drop_frames(4_800);
+        assert_eq!(presentation_schedule_error_micros(queue.front_pts_micros().unwrap(), 0,
+            server_now, hardware_latency + 100.0), 0.0);
+        assert_eq!(queue.buffered_frames() as f64 / 48.0 + hardware_latency + 100.0,
+            1_000.0 + hardware_latency);
+    }
+
+    #[test]
+    fn calibration_changes_cross_zero_gain_without_changing_stereo_balance() {
+        let mut out = [(0.5, -0.25); 384];
+        fade_calibration_boundary(&mut out, false);
+        assert_eq!(out[0], (0.5, -0.25));
+        assert_eq!(out[383], (0.0, 0.0));
+        let mut next = [(0.5, -0.25); 384];
+        fade_calibration_boundary(&mut next, true);
+        assert_eq!(next[0], (0.0, 0.0));
+        assert_eq!(next[383], (0.5, -0.25));
+        assert!(next.iter().all(|(left, right)| *left >= 0.0 && *left <= 0.5 && *right == -*left / 2.0));
     }
 
     #[test]

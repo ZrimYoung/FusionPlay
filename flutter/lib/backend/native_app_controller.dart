@@ -44,6 +44,12 @@ class NativeAppController extends ChangeNotifier {
   Future<void> setAdvancedEffectsEnabled(bool value) =>
       _invoke('setAdvancedEffectsEnabled', {'value': value});
 
+  Future<void> setNativeCastPaused(bool value) =>
+      _invoke('setNativeCastPaused', {'value': value});
+
+  Future<void> setMiPlayOutputAdvance(int value) =>
+      _invoke('setMiPlayOutputAdvance', {'value': value});
+
   Future<void> setProtocolEnabled(String protocol, bool value) =>
       _invoke('setProtocolEnabled', {'protocol': protocol, 'value': value});
 

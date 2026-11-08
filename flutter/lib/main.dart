@@ -366,6 +366,11 @@ class _FusionPlayHomeState extends State<FusionPlayHome> {
                     initialFocusNode: _settingsInitialFocus,
                     onClose: _closeSettings,
                     onReceiverName: widget.controller.setReceiverName,
+                    onEditReceiverName: (value, hint) =>
+                        _navigationKeyChannel.invokeMethod<String>(
+                          'editReceiverName',
+                          {'value': value, 'hint': hint},
+                        ),
                     onStartup: widget.controller.setStartupEnabled,
                     onAutoWake: widget.controller.setAutoWakeEnabled,
                     onAdvancedEffects:
@@ -373,6 +378,9 @@ class _FusionPlayHomeState extends State<FusionPlayHome> {
                     onMiPlay: (value) =>
                         widget.controller.setProtocolEnabled('miplay', value),
                     onMiPlayIdentity: widget.controller.setMiPlayDeviceIdentity,
+                    onNativeCast: widget.controller.setNativeCastPaused,
+                    onMiPlayOutputAdvance:
+                        widget.controller.setMiPlayOutputAdvance,
                     onAirPlay: (value) =>
                         widget.controller.setProtocolEnabled('airplay', value),
                     onDlna: (value) =>

@@ -137,6 +137,9 @@ pub struct ReceiverConfig {
     /// Enables local multicast delivery only for an explicit diagnostic
     /// probe. Production receivers keep this disabled to avoid self-traffic.
     pub diagnostic_multicast_loopback: bool,
+    /// Last successfully advertised control port, retained by the host to
+    /// keep sender-side device caches usable across receiver restarts.
+    pub preferred_control_port: Option<u16>,
 }
 
 impl ReceiverConfig {
@@ -158,6 +161,7 @@ impl ReceiverConfig {
             output_device: None,
             initial_volume_percent: 50,
             diagnostic_multicast_loopback: false,
+            preferred_control_port: None,
         }
     }
 
@@ -184,6 +188,11 @@ impl ReceiverConfig {
 
     pub fn with_diagnostic_multicast_loopback(mut self, enabled: bool) -> Self {
         self.diagnostic_multicast_loopback = enabled;
+        self
+    }
+
+    pub fn with_preferred_control_port(mut self, port: Option<u16>) -> Self {
+        self.preferred_control_port = port.filter(|port| *port != 0);
         self
     }
 }
@@ -236,6 +245,7 @@ pub struct MiPlayReceiver {
     advertisement: MiPlayAdvertisement,
     lyra_control: LyraControlServer,
     controller: ReceiverController,
+    control_port: u16,
 }
 
 impl MiPlayReceiver {
@@ -254,16 +264,18 @@ impl MiPlayReceiver {
             platform: config.platform.clone(),
             device_type: config.device_type,
         };
-        let hub = start_control_server(
+        let (hub, control_port) = start_control_server(
             config.local_ip,
             identity,
             config.output_device.clone(),
             Arc::clone(&volume_percent),
             Arc::clone(&shutdown),
             Arc::clone(&events),
+            config.preferred_control_port,
         )?;
         let lyra_control = match start_lyra_server(
             config.local_ip,
+            control_port,
             config.identity.lyra_instance_id.clone(),
             config.name.clone(),
             config.platform.clone(),
@@ -300,6 +312,7 @@ impl MiPlayReceiver {
             &config.interface_name,
             config.diagnostic_multicast_loopback,
             Arc::clone(&events),
+            control_port,
         ) {
             Ok(advertisement) => advertisement,
             Err(error) => {
@@ -314,6 +327,7 @@ impl MiPlayReceiver {
             "name": config.name,
             "address": config.local_ip.to_string(),
             "port": lyra_control.port(),
+            "control_port": control_port,
             "interface": config.interface_name,
             "platform": config.platform,
             "device_type": config.device_type.protocol_value(),
@@ -334,6 +348,7 @@ impl MiPlayReceiver {
             advertisement,
             lyra_control,
             controller,
+            control_port,
         })
     }
 
@@ -343,6 +358,10 @@ impl MiPlayReceiver {
 
     pub fn service_name(&self) -> &str {
         self.advertisement.fullname()
+    }
+
+    pub const fn control_port(&self) -> u16 {
+        self.control_port
     }
 
     pub const fn lyra_command_port(&self) -> u16 {

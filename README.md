@@ -4,6 +4,8 @@ FusionPlay 是一个面向全平台的局域网音乐投放接收器，支持 Mi
 
 FusionPlay Android 最低支持 Android 5.0（API 21） 并对 Android TV 做了遥控器适配
 
+Mac 原生 MiPlay 接收器目前在独立开发分支验证，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。Android 构建入口保持原样。
+
 ## 目录结构
 
 ```text
@@ -62,6 +64,14 @@ Rust 模块可分别运行 `cargo test` 和 `cargo clippy`。Android 原生库�
 脚本读取根目录 `VERSION`，计算 Android `versionCode`，构建包含 32 位 ARM、64 位 ARM 与 x86_64 的单一 APK，并将 APK 与 Dart 混淆符号保存到 `artifacts/releases/`。该目录不进入版本控制。
 
 当前 Release 配置在没有私有签名配置时使用 Android 调试签名，公开发布商店版本前应替换为自己的安全签名流程，且不得提交密钥文件。
+
+## 小米电视端口冲突修复
+
+部分小米电视的系统接收器已经监听 TCP 8899。FusionPlay 现在优先使用该端口；仅当端口被占用时，由系统分配空闲端口，并在 Lyra 的 PeerPort 握手响应及 Mi Connect 的 appsData 发现记录中返回实际监听端口。原有系统接收器无需停用。Android 会保存成功使用的控制端口，并在下次启动时优先复用。HyperOS 可能按 MAC 缓存旧端口和能力；若此前误连了盒子系统的 8899 接口，即使更新发现记录，手机仍可能保留仅视频能力。调试时需备份后更新 FusionPlay 的独立身份以重新获取能力，无需清除手机数据。
+
+`fix/miplay-port-conflict` 分支提供 GitHub Actions 自动构建，也可在 Actions 中手动运行 **Build Android port fix**。成功后可下载 `FusionPlay-1.2.4-portfix-debug` APK 构建产物，保留 30 天。测试版包名为 `com.fusionplay.android.portfix`，可与原版同时安装；验证时请关闭原版 FusionPlay，避免 AirPlay 和 DLNA 端口冲突。
+
+默认构建仍包含全部三种 ABI。定向调试时可通过 Gradle 属性 `fusionPlayAbis` 指定逗号分隔的 ABI，并通过 `fusionPlayApplicationId` 指定独立测试包名。
 
 ## 协议与商标说明
 
