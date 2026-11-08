@@ -1,12 +1,12 @@
-# FusionPlay Android
+# FusionPlay
 
 FusionPlay 是一个面向全平台的局域网音乐投放接收器，支持 MiPlay AirPlay DLNA
 
 FusionPlay Android 最低支持 Android 5.0（API 21） 并对 Android TV 做了遥控器适配
 
-Mac 原生 MiPlay 接收器目前在独立开发分支验证，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。Android 构建入口保持原样。
+项目同时维护 Android 接收器与 SwiftUI + Rust 原生 macOS MiPlay 接收器。Mac 当前为测试版，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。Android 构建入口保持原样。
 
-Windows 原生 MiPlay 接收器在 `feat/windows-receiver` 分支开发，使用 C# / WinUI 3 与共享 Rust 核心，提供便携测试包。构建和使用见 [windows/README.zh-CN.md](windows/README.zh-CN.md)，实际验证范围见 [windows/VALIDATION.md](windows/VALIDATION.md)。
+仓库也包含 C# / WinUI 3 与共享 Rust 核心实现的 Windows 原生 MiPlay 接收器，提供便携测试包和手动声音同步校准。构建和使用见 [windows/README.zh-CN.md](windows/README.zh-CN.md)，实际验证范围见 [windows/VALIDATION.md](windows/VALIDATION.md)。
 
 ## 目录结构
 
@@ -15,7 +15,10 @@ flutter/
   lib/                  Flutter 界面与状态模型
   android/app/          Android 宿主、Kotlin 后端和 Rust 构建任务
   test/                 Flutter 与界面交互测试
+macos/                  macOS 原生应用、构建脚本与测试
+windows/                Windows 原生应用、便携打包与测试
 src/
+  FusionPlay.Host/       macOS UniFFI / Windows C ABI 与共享接收器生命周期
   AirPlayReceiver.Core/ AirPlay、DLNA、音频和 JNI 核心
   FusionPlay.MiPlaySdk/ 小米妙播协议与媒体接收
   FusionPlay.AndroidIfAddrs/ Android 5 网络接口适配

@@ -2,7 +2,7 @@ name: Mac receiver and shared SDK compatibility
 on:
   workflow_dispatch:
   push:
-    branches: [feat/macos-receiver]
+    branches: [main, feat/macos-receiver, integrate/macos-main]
   pull_request:
     paths: ['macos/**', 'src/FusionPlay.Host/**', 'src/FusionPlay.MiPlaySdk/**', 'src/FusionPlay.AndroidIfAddrs/**', '.github/workflows/macos-receiver.yml']
 permissions:
@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   mac:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4

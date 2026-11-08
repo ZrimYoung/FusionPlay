@@ -2,7 +2,7 @@ name: Windows native receiver
 on:
   workflow_dispatch:
   push:
-    branches: [feat/windows-receiver]
+    branches: [main, feat/windows-receiver]
   pull_request:
     paths: ['windows/**', 'src/FusionPlay.Host/**', 'src/FusionPlay.MiPlaySdk/**', '.github/workflows/windows-receiver.yml']
 permissions:
@@ -35,7 +35,7 @@ jobs:
             artifacts/FusionPlay-Windows-0.1.0-test-x64.zip.sha256
           if-no-files-found: error
   mac-regression:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4

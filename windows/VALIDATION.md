@@ -26,6 +26,12 @@
 - 托盘隐藏/恢复/退出、睡眠唤醒、切换网卡和声音端点、多个音乐应用的媒体卡片共存。
 - Windows 10 22H2 实机；Mac 与 Android 回归。已提供 CI 定义，但本轮未在对应平台运行，不记为通过。
 
+## 主线集成检查（2026-11-08）
+
+合并以最新主线 608aff3550fe6ca518d86226caa7954eb29d9889 为基础，保留已合入的 Mac 接收器、仓库改名与 CI 更新。再次运行 Windows 验证：SDK 106 项、Host 12 项、C# / 原生接口 16 项通过；两个需显式运行的硬件/网络测试在默认套件中跳过，另见上面的单独实测记录。
+
+[远程检查 42465115610](https://github.com/ZrimYoung/FusionPlay/actions/runs/42465115610) 没有执行测试步骤：Windows / Android 作业被 GitHub 账户账单限制阻止，Mac 作业的旧运行器标签被拒绝。Windows 工作流已与最新主线对齐，使用 [GitHub 当前支持的 macos-15 标签](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)，并覆盖 main 分支；应用最低部署目标仍按各平台现有配置。本轮不把 Mac / Android 重新构建记为通过。
+
 ## 声学测量方法
 
 使用另一台录音设备采集同组音箱与电脑同时播放的清晰短音或鼓点，录音位置与两个发声点尽量等距，记录两者距离和电脑实际输出设备。保持妙播手机持续投放，避免在投放手机上启用会中断播放的录音功能。

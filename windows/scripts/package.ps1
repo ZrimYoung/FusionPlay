@@ -22,7 +22,7 @@ try {
     $taskCommit = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
     [ordered]@{
         version=$Version; architecture='x64'; source_commit=$taskCommit
-        source_url="https://github.com/ZrimYoung/FusionPlay-Android/tree/$taskCommit"
+        source_url="https://github.com/ZrimYoung/FusionPlay/tree/$taskCommit"
         branch=(& git -C $RepositoryRoot branch --show-current).Trim()
         dirty=[bool](& git -C $RepositoryRoot status --porcelain)
         acoustic_sync='not_verified'
