@@ -100,3 +100,10 @@
 本地日志均在独立项目 `logs`：`baseline-test.log`、`mac-core-test.log`、`host-test.log`、`bridge-smoke.log`、`android-check.log`、`android-armv7-check.log`、`build-app.log`。
 
 新增工作流 `.github/workflows/macos-receiver.yml`；远端结果以对应提交的 GitHub Actions 为准。源码分成共享生命周期修复、Mac 平台适配、宿主绑定、原生 UI 与交付四组提交，方便 Android 分支选择性合入。
+
+## Unified main integration (2026-11-08)
+
+- Integrated Mac branch a9453b4 with main b43fe11 without conflicts; repository renamed to ZrimYoung/FusionPlay.
+- Local validation: SDK 105 tests passed; host 8 passed, 1 existing network test ignored; cleanup 2 passed; Swift volume and brand smoke tests passed.
+- CI attempt could not run: GitHub account billing restriction; macos-14 runner also rejected. Updated Mac runner to macos-15; deployment target remains macOS 14. Remote Mac build and Android compilation remain unverified for this integration.
+- Later Android branch commits remain on fix/miplay-port-conflict and are not included in this integration. No new phone casting acceptance performed.
