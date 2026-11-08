@@ -3,10 +3,8 @@
 use fusionplay_miplay_sdk::{MediaAction, MiPlayReceiver, ReceiverConfig, ReceiverIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::os::unix::{
-    fs::{OpenOptionsExt, PermissionsExt},
-    io::AsRawFd,
-};
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
@@ -22,6 +20,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod network_identity;
+#[cfg(windows)]
+mod windows_calibration;
+#[cfg(windows)]
+mod windows_ffi;
 uniffi::setup_scaffolding!();
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -57,14 +59,19 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            name: "FusionPlay-Mac".into(),
+            name: if cfg!(windows) {
+                "FusionPlay-Windows"
+            } else {
+                "FusionPlay-Mac"
+            }
+            .into(),
             interface_name: String::new(),
             output_device: String::new(),
             volume: 50,
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum Phase {
     Stopped,
     Starting,
@@ -74,7 +81,7 @@ pub enum Phase {
     Paused,
     Failed,
 }
-#[derive(Clone, Copy, Debug, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, uniffi::Enum)]
 pub enum PlaybackCommand {
     Play,
     Pause,
@@ -91,12 +98,12 @@ impl From<PlaybackCommand> for MediaAction {
         }
     }
 }
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
 pub struct CommandOutcome {
     pub dispatched: bool,
     pub confirmed: bool,
 }
-#[derive(Clone, Debug, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Serialize, uniffi::Record)]
 pub struct Snapshot {
     pub phase: Phase,
     pub title: String,
@@ -143,12 +150,12 @@ impl Default for Snapshot {
         }
     }
 }
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
 pub struct NetworkInterface {
     pub name: String,
     pub address: String,
 }
-#[derive(Clone, Debug, uniffi::Record)]
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
 pub struct AudioDevice {
     pub id: String,
     pub name: String,
@@ -169,12 +176,30 @@ pub fn network_interfaces() -> Result<Vec<NetworkInterface>> {
             _ => None,
         })
         .collect();
+    #[cfg(not(windows))]
     interfaces.sort_by_key(|i| (!i.name.starts_with("en"), i.name.clone(), i.address.clone()));
+    #[cfg(windows)]
+    {
+        let gateways: std::collections::HashSet<_> = getifs::gateway_ipv4_addrs()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|g| g.name().ok().map(|n| n.to_string()))
+            .collect();
+        interfaces.sort_by_key(|i| {
+            (
+                !network_identity::physical_lan_interface(&i.name),
+                !gateways.contains(&i.name),
+                network_identity::interface_hardware_address(&i.name).is_none(),
+                i.name.clone(),
+                i.address.clone(),
+            )
+        });
+    }
     Ok(interfaces)
 }
 #[uniffi::export]
 pub fn audio_devices() -> Result<Vec<AudioDevice>> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
         use cpal::traits::{DeviceTrait, HostTrait};
         let host = cpal::default_host();
@@ -194,7 +219,7 @@ pub fn audio_devices() -> Result<Vec<AudioDevice>> {
             })
             .collect()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Ok(Vec::new())
     }
@@ -224,13 +249,22 @@ fn load_identity(dir: &Path) -> Result<Identity> {
     save_json(&path, &identity)?;
     Ok(identity)
 }
+fn private_options() -> OpenOptions {
+    #[cfg(unix)]
+    let mut options = OpenOptions::new();
+    #[cfg(not(unix))]
+    let options = OpenOptions::new();
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
 fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let tmp = path.with_extension("tmp");
-    let mut file = OpenOptions::new()
+    let mut file = private_options()
         .create(true)
         .truncate(true)
         .write(true)
-        .mode(0o600)
         .open(&tmp)
         .map_err(storage)?;
     file.write_all(&serde_json::to_vec_pretty(value).map_err(storage)?)
@@ -240,6 +274,7 @@ fn save_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 struct Shared {
     state: Mutex<Snapshot>,
+    revision: AtomicU64,
     listeners: Mutex<BTreeMap<u64, Arc<dyn StateListener>>>,
     generation: AtomicU64,
     shutdown: AtomicBool,
@@ -272,17 +307,17 @@ impl Receiver {
             });
         }
         fs::create_dir_all(&data).map_err(storage)?;
+        #[cfg(unix)]
         fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).map_err(storage)?;
-        let lock = OpenOptions::new()
+        let lock = private_options()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .mode(0o600)
             .open(data.join("receiver.lock"))
             .map_err(storage)?;
-        // flock owns only this project's lock file; it never addresses another app's PID.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // The OS releases this portable data-directory lock on process exit.
+        if lock.try_lock().is_err() {
             return Err(HostError::AlreadyRunning);
         }
         load_identity(&data)?;
@@ -297,6 +332,7 @@ impl Receiver {
                 volume: settings.volume,
                 ..Snapshot::default()
             }),
+            revision: AtomicU64::new(1),
             listeners: Mutex::new(BTreeMap::new()),
             generation: AtomicU64::new(0),
             shutdown: AtomicBool::new(false),
@@ -308,11 +344,20 @@ impl Receiver {
         let worker = thread::Builder::new()
             .name("fusionplay-events".into())
             .spawn(move || {
+                let mut receiver_generation = 0;
+                let mut media_generation = 0;
                 while !worker_shared.shutdown.load(Ordering::Acquire) {
                     match rx.recv_timeout(Duration::from_millis(100)) {
                         Ok(event) => {
                             if event.generation != worker_shared.generation.load(Ordering::Acquire)
                             {
+                                continue;
+                            }
+                            if receiver_generation != event.generation {
+                                receiver_generation = event.generation;
+                                media_generation = 0;
+                            }
+                            if !accept_media_generation(&mut media_generation, &event.value) {
                                 continue;
                             }
                             let (snapshot, changed) = {
@@ -324,7 +369,11 @@ impl Receiver {
                                 }
                                 let previous = state.clone();
                                 reduce(&mut state, &event.value);
-                                (state.clone(), *state != previous)
+                                let changed = *state != previous;
+                                if changed {
+                                    worker_shared.revision.fetch_add(1, Ordering::Release);
+                                }
+                                (state.clone(), changed)
                             };
                             write_diagnostic(&log_dir, &event.value);
                             if !changed && event.value["event"] != "host_stopped" {
@@ -468,6 +517,8 @@ impl Receiver {
             });
         }
         let identity = load_identity(&self.data)?;
+        #[cfg(windows)]
+        windows_calibration::apply(&self.data, &settings)?;
         let hardware_address = network_identity::interface_hardware_address(&interface.name);
         let config = ReceiverConfig::new(
             settings.name.trim(),
@@ -483,9 +534,20 @@ impl Receiver {
         )
         .with_initial_volume_percent(settings.volume)
         .with_hardware_address(hardware_address);
+        #[cfg(windows)]
+        let config = config.with_preferred_control_port(
+            fs::read(self.data.join("control-port.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<u16>(&bytes).ok())
+                // Isolate this app from the vendor's well-known 8899 route,
+                // even when the vendor receiver is temporarily not listening.
+                .filter(|port| *port > 0 && *port != 8899)
+                .or(Some(18899)),
+        );
         save_json(&self.data.join("settings.json"), &settings)?;
         *self.settings.lock().unwrap() = settings;
         self.shared.state.lock().unwrap().phase = Phase::Starting;
+        self.shared.revision.fetch_add(1, Ordering::Release);
         let tx = self.tx.clone();
         let generation = self.shared.generation.load(Ordering::Acquire);
         let core = MiPlayReceiver::start(
@@ -495,6 +557,8 @@ impl Receiver {
             }),
         )
         .map_err(receiver_error)?;
+        #[cfg(windows)]
+        save_json(&self.data.join("control-port.json"), &core.control_port())?;
         *self.core.lock().unwrap() = Some(core);
         Ok(())
     }
@@ -515,6 +579,7 @@ impl Receiver {
             volume,
             ..Snapshot::default()
         };
+        self.shared.revision.fetch_add(1, Ordering::Release);
         self.emit(serde_json::json!({"event":"host_stopped"}));
     }
 }
@@ -552,6 +617,19 @@ fn control_error_hint(value: &Value) -> &'static str {
     } else {
         "unclassified"
     }
+}
+
+fn accept_media_generation(active: &mut u64, value: &Value) -> bool {
+    let Some(generation) = value["media_generation"].as_u64().filter(|v| *v > 0) else {
+        return true;
+    };
+    if generation < *active {
+        return false;
+    }
+    if value["event"] == "interconnect_stage" && value["stage"] == "media_session_established" {
+        *active = generation;
+    }
+    true
 }
 
 fn reduce(state: &mut Snapshot, value: &Value) {
@@ -615,7 +693,7 @@ fn reduce(state: &mut Snapshot, value: &Value) {
             state.message = if value["confirmed"] == true {
                 "已暂停"
             } else {
-                "Mac 输出已暂停，手机状态待确认"
+                "本机输出已暂停，手机状态待确认"
             }
             .into();
         }
@@ -698,6 +776,11 @@ fn write_diagnostic(dir: &Path, event: &Value) {
             | "host_error"
             | "stream_started"
             | "stream_stopped"
+            | "interconnect_stage"
+            | "media_channel_closed"
+            | "playback_state"
+            | "volume"
+            | "audio_pcm_decoded"
     ) {
         return;
     }
@@ -742,17 +825,23 @@ fn write_diagnostic(dir: &Path, event: &Value) {
         "network_rtt_us",
         "sample_rate",
         "code",
+        "stage",
+        "media_generation",
+        "playing",
+        "session_active",
+        "percent",
+        "output_peak",
+        "output_advance_ms",
+        "receiver_volume",
+        "peak",
+        "rms",
+        "non_silent",
     ] {
         if let Some(value) = event.get(key) {
             record[key] = value.clone();
         }
     }
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path)
-    {
+    if let Ok(mut file) = private_options().create(true).append(true).open(path) {
         let _ = writeln!(file, "{record}");
     }
 }
@@ -760,6 +849,29 @@ fn write_diagnostic(dir: &Path, event: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closing_an_old_media_generation_cannot_clear_the_new_track() {
+        let mut active = 0;
+        let open = |generation| serde_json::json!({"event":"interconnect_stage","stage":"media_session_established","media_generation":generation});
+        assert!(accept_media_generation(&mut active, &open(1)));
+        assert!(accept_media_generation(&mut active, &open(2)));
+        assert!(!accept_media_generation(
+            &mut active,
+            &serde_json::json!({"event":"media_channel_closed","media_generation":1})
+        ));
+        assert!(!accept_media_generation(
+            &mut active,
+            &serde_json::json!({"event":"stream_stopped","media_generation":1})
+        ));
+        assert!(accept_media_generation(
+            &mut active,
+            &serde_json::json!({"event":"media_channel_closed","media_generation":2})
+        ));
+        assert!(accept_media_generation(
+            &mut active,
+            &serde_json::json!({"event":"volume","percent":50})
+        ));
+    }
     #[test]
     #[ignore = "requires local LAN sockets; run explicitly with the app stopped"]
     fn malformed_control_probe_keeps_live_listener_and_redacts_diagnostic() {

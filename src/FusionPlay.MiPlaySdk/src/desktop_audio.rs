@@ -1,5 +1,5 @@
-//! Mac-only timed SPSC PCM transport and real-time output. The decoder is the
-//! sole producer; one CoreAudio stream is the sole consumer. Slots are published
+//! Desktop timed SPSC PCM transport and real-time output. The decoder is the
+//! sole producer; one CoreAudio/WASAPI stream is the sole consumer. Slots are published
 //! with release/acquire ordering and never overwritten until consumed.
 //! No locks, allocation, file IO, JSON or foreign callbacks on the audio thread.
 use super::*;
@@ -9,6 +9,17 @@ const CAPACITY: usize = MIPLAY_SOURCE_SAMPLE_RATE * MIPLAY_MAX_BUFFER_MILLIS / 1
 const NO_PTS: i64 = i64::MIN;
 const FADE_SECONDS: f64 = 0.005;
 const RESYNC_US: f64 = 100_000.0;
+
+fn output_advance_ms() -> u32 {
+    #[cfg(windows)]
+    {
+        super::WINDOWS_OUTPUT_ADVANCE_MS.load(Ordering::Acquire)
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
 
 struct Slot {
     left: AtomicU32,
@@ -98,6 +109,7 @@ impl PcmRing {
 
 #[derive(Default)]
 struct Health {
+    output_peak_bits: AtomicU32,
     underruns: AtomicU64,
     resyncs: AtomicU64,
     output_frames: AtomicU64,
@@ -108,12 +120,12 @@ struct Health {
     failed: AtomicBool,
     stop: AtomicBool,
 }
-pub(super) struct MacAudioStream {
+pub(super) struct DesktopAudioStream {
     stream: Option<cpal::Stream>,
     health: Arc<Health>,
     reporter: Option<thread::JoinHandle<()>>,
 }
-impl Drop for MacAudioStream {
+impl Drop for DesktopAudioStream {
     fn drop(&mut self) {
         self.stream.take();
         self.health.stop.store(true, Ordering::Release);
@@ -176,6 +188,17 @@ impl Renderer {
         self.last.0 *= scale;
         self.last.1 *= scale;
         self.last
+    }
+    fn realign(&mut self) {
+        // Leave the old timeline at zero gain before selecting a new deadline.
+        if self.gain > 0.0 {
+            self.rebuffer = true;
+        } else {
+            self.running = false;
+            self.phase = 0.0;
+            self.expected_pts = None;
+            self.rebuffer = false;
+        }
     }
     fn next(
         &mut self,
@@ -254,10 +277,18 @@ fn build<T: SizedSample + FromSample<f32>>(
     let mut renderer = Renderer::new(nominal);
     let failure_health = health.clone();
     let mut latency = 0.0;
+    let mut applied_advance = output_advance_ms();
+    let mut calibration_pending = false;
     Ok(device.build_output_stream(
         config,
         move |output: &mut [T], info| {
             let frames = output.len() / channels;
+            let requested_advance = output_advance_ms();
+            if requested_advance != applied_advance {
+                renderer.realign();
+                applied_advance = requested_advance;
+                calibration_pending = true;
+            }
             health.callback_frames.store(frames, Ordering::Relaxed);
             let measured = output_latency_millis(info, sample_rate, frames);
             latency = if latency == 0.0 {
@@ -268,7 +299,8 @@ fn build<T: SizedSample + FromSample<f32>>(
             health
                 .latency_us
                 .store((latency * 1000.0) as u64, Ordering::Relaxed);
-            telemetry.update_output_latency(latency);
+            let effective_latency = latency + f64::from(applied_advance);
+            telemetry.update_output_latency(effective_latency);
             let is_paused = paused.load(Ordering::Acquire);
             let buffered = queue.buffered_frames();
             let mut leading = 0;
@@ -287,7 +319,7 @@ fn build<T: SizedSample + FromSample<f32>>(
                             pts + renderer.phase * 1_000_000.0 / MIPLAY_SOURCE_SAMPLE_RATE as f64,
                             clock.presentation_offset_micros.load(Ordering::Acquire),
                             now,
-                            latency,
+                            effective_latency,
                         )
                     });
                 if let Some(mut error) = schedule {
@@ -317,13 +349,25 @@ fn build<T: SizedSample + FromSample<f32>>(
                             .min(frames);
                         renderer.running = leading < frames && queue.buffered_frames() >= 2;
                         renderer.rate = nominal;
+                        if renderer.running {
+                            calibration_pending = false;
+                        }
                     }
                 } else if !renderer.running && renderer.gain == 0.0 {
-                    renderer.running = buffered >= synchronized_buffer_frames(latency);
+                    let target = synchronized_buffer_frames(effective_latency);
+                    renderer.running = buffered >= target;
+                    if renderer.running && calibration_pending {
+                        // An untimed stream still needs its queue shortened when
+                        // advance increases; decreasing advance waits to refill.
+                        let dropped = queue.consume(buffered.saturating_sub(target));
+                        queue.dropped.fetch_add(dropped as u64, Ordering::Relaxed);
+                        calibration_pending = false;
+                    }
                     renderer.rate = nominal;
                 }
             }
             let gain = volume.load(Ordering::Relaxed).min(100) as f32 / 100.0;
+            let mut peak = 0.0_f32;
             for (index, frame) in output.chunks_mut(channels).enumerate() {
                 let pair = if is_paused || !renderer.running || index < leading {
                     health.silence_frames.fetch_add(1, Ordering::Relaxed);
@@ -331,6 +375,7 @@ fn build<T: SizedSample + FromSample<f32>>(
                 } else {
                     renderer.next(&queue, renderer.rate, gain, step, &health)
                 };
+                peak = peak.max(pair.0.abs()).max(pair.1.abs());
                 for (channel, sample) in frame.iter_mut().enumerate() {
                     let value = match channel {
                         0 if channels == 1 => (pair.0 + pair.1) * 0.5,
@@ -341,6 +386,9 @@ fn build<T: SizedSample + FromSample<f32>>(
                     *sample = T::from_sample(value);
                 }
             }
+            health
+                .output_peak_bits
+                .fetch_max(peak.to_bits(), Ordering::Relaxed);
             telemetry.update_buffered_frames(queue.buffered_frames());
         },
         move |_| {
@@ -357,7 +405,7 @@ pub(super) fn open_native_audio_output(
     clock: Arc<MiPlayPresentationClock>,
     telemetry: Arc<MiPlayLatencyTelemetry>,
     events: EventEmitter,
-) -> Result<(Arc<PcmRing>, MacAudioStream)> {
+) -> Result<(Arc<PcmRing>, DesktopAudioStream)> {
     let host = cpal::default_host();
     let device = match requested {
         Some(id) => host
@@ -393,6 +441,7 @@ pub(super) fn open_native_audio_output(
     let config = supported.config();
     let queue = Arc::new(PcmRing::new(CAPACITY));
     let health = Arc::new(Health::default());
+    let report_volume = volume.clone();
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(
             &device,
@@ -442,6 +491,9 @@ pub(super) fn open_native_audio_output(
                 "schedule_error_ms": report_health.error_us.load(Ordering::Relaxed) as f64 / 1000.0,
                 "underruns":report_health.underruns.load(Ordering::Relaxed), "dropped_frames":report_queue.dropped.load(Ordering::Relaxed),
                 "resyncs":report_health.resyncs.load(Ordering::Relaxed), "callback_frames":report_health.callback_frames.load(Ordering::Relaxed),
+                "output_peak":f32::from_bits(report_health.output_peak_bits.swap(0, Ordering::Relaxed)),
+                "receiver_volume":report_volume.load(Ordering::Relaxed),
+                "output_advance_ms":output_advance_ms(),
                 "silence_frames":report_health.silence_frames.load(Ordering::Relaxed), "lock_contentions":0, "rendering": rendered > last}));
             last = rendered;
             if report_health.failed.swap(false, Ordering::AcqRel) {
@@ -449,7 +501,7 @@ pub(super) fn open_native_audio_output(
             }
         }
     })?;
-    let managed = MacAudioStream {
+    let managed = DesktopAudioStream {
         stream: Some(stream),
         health,
         reporter: Some(reporter),
@@ -461,6 +513,57 @@ pub(super) fn open_native_audio_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "opens the default real audio endpoint; run explicitly without active phone playback"]
+    fn silent_native_endpoint_renders_and_pauses() {
+        let events = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = events.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let (queue, stream) = open_native_audio_output(
+            None,
+            paused.clone(),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(MiPlayPresentationClock::new()),
+            Arc::new(MiPlayLatencyTelemetry::new()),
+            Arc::new(move |event| captured.lock().unwrap().push(event)),
+        )
+        .expect("a real default output endpoint is required");
+        let silent = vec![0.0; 960];
+        for index in 0..220 {
+            #[cfg(windows)]
+            match index {
+                160 => super::super::set_windows_output_advance_millis(50),
+                190 => super::super::set_windows_output_advance_millis(0),
+                _ => {}
+            }
+            #[cfg(not(windows))]
+            let _ = index;
+            queue.push_timed(&silent, None);
+            thread::sleep(StdDuration::from_millis(10));
+        }
+        assert!(
+            stream.health.output_frames.load(Ordering::Acquire) > 0,
+            "WASAPI/CoreAudio did not render frames"
+        );
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|v| v["event"] == "audio_health" && v["rendering"] == true)
+        );
+        #[cfg(windows)]
+        assert!(
+            stream.health.resyncs.load(Ordering::Acquire) >= 2,
+            "live advance and reset did not realign the existing stream"
+        );
+        paused.store(true, Ordering::Release);
+        thread::sleep(StdDuration::from_millis(100));
+        let before = stream.health.output_frames.load(Ordering::Acquire);
+        thread::sleep(StdDuration::from_millis(100));
+        assert_eq!(before, stream.health.output_frames.load(Ordering::Acquire));
+        drop(stream);
+    }
     #[test]
     fn ring_is_bounded_and_preserves_timestamps() {
         let q = PcmRing::new(4);
@@ -496,6 +599,44 @@ mod tests {
         assert!(max_delta < 0.004);
         assert_eq!(previous, 0.0);
         assert_eq!(h.underruns.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn live_calibration_fades_to_zero_before_realigning_the_timeline() {
+        let q = PcmRing::new(2048);
+        let signal: Vec<f32> = (0..2000).flat_map(|_| [0.8, 0.4]).collect();
+        q.push_timed(&signal, Some(0.));
+        let h = Health::default();
+        let mut r = Renderer::new(1.);
+        r.running = true;
+        for _ in 0..300 {
+            r.next(&q, 1., 1., 1. / 240., &h);
+        }
+        let before = q.buffered_frames();
+        let mut previous = r.last.0;
+        r.realign();
+        for _ in 0..241 {
+            let pair = if r.running {
+                r.next(&q, 1., 1., 1. / 240., &h)
+            } else {
+                r.silence(1. / 240.)
+            };
+            assert!((pair.0 - previous).abs() < 0.004);
+            assert!((pair.0 - pair.1 * 2.0).abs() < 0.00001);
+            previous = pair.0;
+        }
+        assert_eq!(previous, 0.0);
+        assert!(!r.running);
+        assert_eq!(
+            q.buffered_frames(),
+            before,
+            "old timeline consumed during calibration fade"
+        );
+        assert_eq!(h.resyncs.load(Ordering::Relaxed), 1);
+        // The new timeline can now be aligned while silent and fade in.
+        q.consume(480);
+        r.running = true;
+        let resumed = r.next(&q, 1., 1., 1. / 240., &h);
+        assert!(resumed.0 > 0.0 && resumed.0 < 0.004);
     }
     #[test]
     fn resampling_retains_phase_and_duration() {

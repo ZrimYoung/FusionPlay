@@ -6,6 +6,8 @@ FusionPlay Android 最低支持 Android 5.0（API 21） 并对 Android TV 做了
 
 Mac 原生 MiPlay 接收器目前在独立开发分支验证，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。Android 构建入口保持原样。
 
+Windows 原生 MiPlay 接收器在 `feat/windows-receiver` 分支开发，使用 C# / WinUI 3 与共享 Rust 核心，提供便携测试包。构建和使用见 [windows/README.zh-CN.md](windows/README.zh-CN.md)，实际验证范围见 [windows/VALIDATION.md](windows/VALIDATION.md)。
+
 ## 目录结构
 
 ```text
