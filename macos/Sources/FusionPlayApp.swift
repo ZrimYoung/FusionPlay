@@ -209,6 +209,12 @@ struct PlayerView: View {
         if model.snapshot?.controlsAvailable == true { return "" }
         return model.wantsReceiving ? "在手机妙播中选择这台 Mac" : "可在菜单栏开启接收"
     }
+    private var album: String {
+        model.snapshot?.album.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+    private var subtitle: String {
+        [artist, album].filter { !$0.isEmpty }.joined(separator: " - ")
+    }
     private func time(_ milliseconds: UInt64?) -> String {
         guard let milliseconds else { return "–:––" }
         let seconds = milliseconds / 1000
@@ -237,11 +243,11 @@ struct PlayerView: View {
             cover(side: side)
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 9) {
-                    Text(title).font(.system(size: 25, weight: .semibold))
+                    Text(title).font(.system(size: 28, weight: .semibold))
                         .lineLimit(2).textSelection(.enabled).help(title)
-                    if !artist.isEmpty {
-                        Text(artist).font(.system(size: 14)).foregroundStyle(.white.opacity(0.72))
-                            .lineLimit(2).help(artist)
+                    if !subtitle.isEmpty {
+                        Text(subtitle).font(.system(size: 14)).foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(1).help(subtitle)
                     }
                 }.frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
                 Spacer(minLength: 18)
@@ -265,7 +271,7 @@ struct PlayerView: View {
                         .help(playing ? "暂停" : "播放").accessibilityLabel(playing ? "暂停" : "播放")
                     transport("forward.end.fill", label: "下一曲") { model.control(.next) }
                     Spacer(minLength: 0)
-                }.padding(.top, 16)
+                }.padding(.top, 6)
             }.frame(maxWidth: 440).frame(height: side)
         }.padding(.horizontal, 28)
             .frame(width: size.width, height: size.height, alignment: .center)
@@ -284,26 +290,32 @@ struct PlayerView: View {
             }
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 8) {
-                    Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
+                    Text(title).font(.system(size: 19, weight: .semibold)).lineLimit(2)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     Button { pinned.toggle() } label: {
                         Image(systemName: pinned ? "pin.fill" : "pin")
-                            .font(.system(size: 14, weight: .medium)).frame(width: 28, height: 28)
+                            .font(.system(size: 12, weight: .regular))
+                            .rotationEffect(.degrees(35))
+                            .foregroundStyle(.white.opacity(pinned ? 1 : 0.65))
+                            .frame(width: 28, height: 28)
                     }.buttonStyle(PlayerTransportStyle())
                         .help(pinned ? "取消置顶" : "置顶窗口")
                         .accessibilityLabel(pinned ? "取消置顶" : "置顶窗口")
                         .accessibilityValue(pinned ? "已开启" : "已关闭")
                 }
-                if !artist.isEmpty {
-                    Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+                        .lineLimit(1).help(subtitle)
                 }
-                progress.padding(.top, 4)
-                HStack {
-                    Spacer(minLength: 0)
-                    transport("backward.end.fill", label: "上一曲") { model.control(.previous) }
-                    transport(playing ? "pause.fill" : "play.fill", label: playing ? "暂停" : "播放") { model.togglePlayback() }
-                    transport("forward.end.fill", label: "下一曲") { model.control(.next) }
-                    Spacer(minLength: 0)
+                VStack(spacing: 2) {
+                    progress.padding(.top, 4)
+                    HStack {
+                        Spacer(minLength: 0)
+                        transport("backward.end.fill", label: "上一曲") { model.control(.previous) }
+                        transport(playing ? "pause.fill" : "play.fill", label: playing ? "暂停" : "播放") { model.togglePlayback() }
+                        transport("forward.end.fill", label: "下一曲") { model.control(.next) }
+                        Spacer(minLength: 0)
+                    }
                 }
             }.padding(16)
                 .background {
@@ -323,23 +335,30 @@ struct PlayerView: View {
     private func miniBackdrop(size: CGSize, controlsHeight: CGFloat) -> some View {
         // The background uses the same container geometry as the controls.
         // Its full-cover image is bottom-aligned to preserve artwork coordinates.
-        let fadeEnd = max(0, 1 - (controlsHeight - 16) / max(size.height, 1))
-        let fadeStart = max(0, fadeEnd - 24 / max(size.height, 1))
+        let backdropHeight = min(size.height, controlsHeight * 1.35)
+        let fadeStart = max(0, 1 - backdropHeight / max(size.height, 1))
+        let fadeMiddle = fadeStart + (1 - fadeStart) * 0.55
         return ZStack {
             if !reduceTransparency, let artwork = model.artwork {
-                ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
-                    .frame(width: size.width, height: size.height)
-                    .clipped().blur(radius: 24)
-                    .mask(LinearGradient(stops: [
-                        .init(color: .clear, location: fadeStart),
-                        .init(color: .black, location: fadeEnd),
-                        .init(color: .black, location: 1)
-                    ], startPoint: .top, endPoint: .bottom))
+                // Blend successive blur radii over adjacent bands. Below each band
+                // its layer is opaque, so sharp artwork cannot leak through the controls.
+                ForEach(0..<4) { step in
+                    let radii: [CGFloat] = [6, 14, 26, 40]
+                    let start = fadeStart + (1 - fadeStart) * CGFloat(step) / 4
+                    let end = fadeStart + (1 - fadeStart) * CGFloat(step + 1) / 4
+                    ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
+                        .frame(width: size.width, height: size.height)
+                        .clipped().blur(radius: radii[step], opaque: true)
+                        .mask(LinearGradient(stops: [
+                            .init(color: .clear, location: start),
+                            .init(color: .black, location: end)
+                        ], startPoint: .top, endPoint: .bottom))
+                }
             }
             LinearGradient(stops: [
                 .init(color: .clear, location: fadeStart),
-                .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: fadeEnd),
-                .init(color: .black.opacity(0.75), location: 1)
+                .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.20), location: fadeMiddle),
+                .init(color: .black.opacity(0.65), location: 1)
             ], startPoint: .top, endPoint: .bottom)
         }.frame(width: size.width, height: size.height).clipped()
     }

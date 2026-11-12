@@ -146,3 +146,9 @@
 
 - Fixed mini backdrop geometry by attaching the full-cover blur directly behind the measured controls container; removed asynchronous preference-height state and duplicate top padding. Synthetic high-contrast renders at 260/440 pt showed a visible blur aligned above controls.
 - Artwork loading now retains the previous image until replacement succeeds, with a 0.35 s crossfade and blur-to-clear transition. Disconnection/missing source/terminal failure clear stale artwork; system media does not publish old artwork while loading. Build/signature passed and installed app updated. Actual phone track-switch appearance awaits acceptance.
+
+## Accepted mini-player refinement (2026-11-12)
+
+- User accepted the installed progressive-blur appearance and authorized integration into main. Blur blends 6/14/26/40 pt radii across adjacent bands; coverage follows 1.35 times measured controls height. Dimming remains unchanged from the preceding installed revision.
+- Larger track title, single-line artist - album metadata (omitting empty fields), tighter progress/transport spacing, and a small angled pin icon complete this UI revision.
+- Native build, strict signature verification, and synthetic renders at 260/440 pt passed before installation. UI acceptance does not establish new audio, sleep/wake, or output-switching results.
