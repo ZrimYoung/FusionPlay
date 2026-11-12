@@ -12,6 +12,7 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 @MainActor
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
+    @Published var miniPlayerRequest = 0
     @Published var snapshot: Snapshot?
     @Published var name = "FusionPlay-Mac"
     @Published var interfaceName = ""
@@ -26,6 +27,9 @@ final class ReceiverModel: ObservableObject {
     @Published var outputs: [AudioDevice] = []
     @Published var error = ""
     @Published var busy = false
+    @Published var syncAdjustment = 0.0
+    @Published var syncAdjustmentBusy = false
+    @Published var syncAdjustmentError = ""
     @Published var initialized = false
     @Published var wantsReceiving = false
     @Published var controlBusy = false
@@ -49,22 +53,20 @@ final class ReceiverModel: ObservableObject {
     private var terminating = false
 
     private init() {
-        root = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/FusionPlay", isDirectory: true)
         let data = root.appendingPathComponent("data").path
-        let marker = root.appendingPathComponent(".fusionplay-mac").path
-        guard FileManager.default.fileExists(atPath: marker) else {
-            error = "请从项目 artifacts 目录打开应用；未找到独立项目标记。"
-            return
-        }
         backend.async { [weak self] in
             do {
                 let receiver = try Receiver(dataDirectory: data)
                 let settings = receiver.settings()
+                let syncAdjustment = try receiver.syncAdjustment()
                 let networks = try networkInterfaces()
                 let outputs = try audioDevices()
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !self.terminating else { return }
                     self.receiver = receiver
+                    self.syncAdjustment = Double(syncAdjustment)
                     self.name = settings.name; self.interfaceName = settings.interfaceName
                     self.outputDevice = settings.outputDevice
                     self.volumeInteraction.observe(Double(settings.volume))
@@ -114,15 +116,15 @@ final class ReceiverModel: ObservableObject {
         if !state.controlsAvailable { controlMessage = "" }
         updateArtwork(state)
         if busy || sleeping { systemMedia.clear() }
-        else { systemMedia.update(state, busy: controlBusy, artwork: artwork) }
+        else { systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork) }
         if state.phase == .failed { error = state.message }
     }
-    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy }
+    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
     func control(_ command: PlaybackCommand) {
         guard let receiver, canControl, !terminating else { return }
         controlBusy = true; controlMessage = "正在发送到手机…"
-        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artwork) }
+        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artworkLoading ? nil : artwork) }
         backend.async { [weak self] in
             do {
                 let outcome = try receiver.control(command: command)
@@ -144,13 +146,26 @@ final class ReceiverModel: ObservableObject {
     private func updateArtwork(_ state: Snapshot) {
         let key = state.controlsAvailable ? "\(state.trackId)|\(state.artworkUrl)" : ""
         guard key != artworkKey else { return }
-        artworkKey = key; artworkTask?.cancel(); artwork = nil; artworkLoading = false
-        guard state.controlsAvailable else { artworkStatus = "尚未连接"; return }
+        artworkKey = key; artworkTask?.cancel(); artworkLoading = false
+        guard state.controlsAvailable else { artwork = nil; artworkStatus = "尚未连接"; return }
         let source = state.artworkUrl
         let kind = ArtworkLoader.kind(of: source)
         guard kind != "missing" else {
-            artworkStatus = "手机未提供封面"
+            artworkStatus = "等待手机提供封面"
+            artworkLoading = artwork != nil
             recordArtwork(kind: kind, result: "source_missing", attempt: 0)
+            // Track metadata and artwork arrive separately. Keep the old cover through
+            // the brief empty update, but do not retain it forever for coverless tracks.
+            artworkTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                catch { return }
+                guard !Task.isCancelled, let self, self.artworkKey == key, !self.terminating else { return }
+                self.artwork = nil; self.artworkLoading = false
+                self.artworkStatus = "手机未提供封面"
+                if let state = self.snapshot, !self.busy, !self.sleeping {
+                    self.systemMedia.update(state, busy: self.controlBusy, artwork: nil, force: true)
+                }
+            }
             return
         }
         artworkLoading = true; artworkStatus = "正在加载封面"
@@ -173,7 +188,7 @@ final class ReceiverModel: ObservableObject {
                     self.recordArtwork(kind: kind, result: code, attempt: attempt)
                     let retry = attempt < 3 && (known?.retryable ?? (error is URLError))
                     self.artworkStatus = retry ? "加载失败，正在重试" : "封面加载失败（\(code)）"
-                    if !retry { self.artworkLoading = false; return }
+                    if !retry { self.artwork = nil; self.artworkLoading = false; return }
                     do { try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
                     catch { return }
                 }
@@ -184,7 +199,7 @@ final class ReceiverModel: ObservableObject {
         guard let snapshot, snapshot.controlsAvailable, !artworkLoading else { return }
         artworkKey = "\0"
         updateArtwork(snapshot)
-        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artwork, force: true)
+        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artworkLoading ? nil : artwork, force: true)
     }
     private func recordArtwork(kind: String, result: String, attempt: Int) {
         let directory = root.appendingPathComponent("logs")
@@ -208,6 +223,25 @@ final class ReceiverModel: ObservableObject {
             guard let handle = try? FileHandle(forWritingTo: path) else { return }
             defer { try? handle.close() }
             _ = try? handle.seekToEnd(); try? handle.write(contentsOf: data)
+        }
+    }
+    func saveSyncAdjustment() {
+        guard let receiver, initialized, !syncAdjustmentBusy, !terminating else { return }
+        let value = Int32(syncAdjustment.rounded())
+        syncAdjustmentBusy = true; syncAdjustmentError = ""
+        backend.async { [weak self] in
+            do {
+                try receiver.setSyncAdjustment(millis: value)
+                DispatchQueue.main.async { [weak self] in self?.syncAdjustmentBusy = false }
+            } catch {
+                let stored = try? receiver.syncAdjustment()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if let stored { self.syncAdjustment = Double(stored) }
+                    self.syncAdjustmentBusy = false
+                    self.syncAdjustmentError = String(describing: error)
+                }
+            }
         }
     }
     func start() {
@@ -245,7 +279,9 @@ final class ReceiverModel: ObservableObject {
         backend.async { [weak self] in
             receiver.stop()
             let state = receiver.snapshot()
-            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state) }
+            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state)
+                if let self, self.wantsReceiving, !self.sleeping, !self.terminating { self.restartApplied() }
+            }
         }
     }
     func volumeEditingChanged(_ editing: Bool) {
@@ -283,7 +319,7 @@ final class ReceiverModel: ObservableObject {
             do {
                 let nets = try networkInterfaces(); let audio = try audioDevices()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, !self.busy, !self.sleeping, !self.terminating else { return }
                     self.networks = nets; self.outputs = audio
                     guard self.wantsReceiving, let settings = self.appliedSettings else { return }
                     let current = self.deviceSignature(settings: settings)

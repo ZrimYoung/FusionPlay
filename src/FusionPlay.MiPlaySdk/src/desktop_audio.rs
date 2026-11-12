@@ -21,6 +21,21 @@ fn output_advance_ms() -> u32 {
     }
 }
 
+fn sync_adjustment_ms() -> i64 {
+    #[cfg(target_os = "macos")]
+    {
+        super::MACOS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
+fn adjusted_presentation_offset(offset: i64, adjustment: i64) -> i64 {
+    offset.saturating_add(adjustment.saturating_mul(1_000))
+}
+
 struct Slot {
     left: AtomicU32,
     right: AtomicU32,
@@ -278,15 +293,18 @@ fn build<T: SizedSample + FromSample<f32>>(
     let failure_health = health.clone();
     let mut latency = 0.0;
     let mut applied_advance = output_advance_ms();
+    let mut applied_adjustment = sync_adjustment_ms();
     let mut calibration_pending = false;
     Ok(device.build_output_stream(
         config,
         move |output: &mut [T], info| {
             let frames = output.len() / channels;
             let requested_advance = output_advance_ms();
-            if requested_advance != applied_advance {
+            let requested_adjustment = sync_adjustment_ms();
+            if requested_advance != applied_advance || requested_adjustment != applied_adjustment {
                 renderer.realign();
                 applied_advance = requested_advance;
+                applied_adjustment = requested_adjustment;
                 calibration_pending = true;
             }
             health.callback_frames.store(frames, Ordering::Relaxed);
@@ -317,7 +335,10 @@ fn build<T: SizedSample + FromSample<f32>>(
                     .and_then(|(pts, now)| {
                         usable_presentation_schedule_error_micros(
                             pts + renderer.phase * 1_000_000.0 / MIPLAY_SOURCE_SAMPLE_RATE as f64,
-                            clock.presentation_offset_micros.load(Ordering::Acquire),
+                            adjusted_presentation_offset(
+                                clock.presentation_offset_micros.load(Ordering::Acquire),
+                                applied_adjustment,
+                            ),
                             now,
                             effective_latency,
                         )
@@ -354,7 +375,8 @@ fn build<T: SizedSample + FromSample<f32>>(
                         }
                     }
                 } else if !renderer.running && renderer.gain == 0.0 {
-                    let target = synchronized_buffer_frames(effective_latency);
+                    let target =
+                        synchronized_buffer_frames(effective_latency - applied_adjustment as f64);
                     renderer.running = buffered >= target;
                     if renderer.running && calibration_pending {
                         // An untimed stream still needs its queue shortened when
@@ -493,7 +515,7 @@ pub(super) fn open_native_audio_output(
                 "resyncs":report_health.resyncs.load(Ordering::Relaxed), "callback_frames":report_health.callback_frames.load(Ordering::Relaxed),
                 "output_peak":f32::from_bits(report_health.output_peak_bits.swap(0, Ordering::Relaxed)),
                 "receiver_volume":report_volume.load(Ordering::Relaxed),
-                "output_advance_ms":output_advance_ms(),
+                "output_advance_ms":output_advance_ms(), "sync_adjustment_ms":sync_adjustment_ms(),
                 "silence_frames":report_health.silence_frames.load(Ordering::Relaxed), "lock_contentions":0, "rendering": rendered > last}));
             last = rendered;
             if report_health.failed.swap(false, Ordering::AcqRel) {
@@ -564,6 +586,24 @@ mod tests {
         assert_eq!(before, stream.health.output_frames.load(Ordering::Acquire));
         drop(stream);
     }
+    #[test]
+    fn signed_sync_adjustment_moves_schedule_in_both_directions() {
+        let error = |ms| {
+            presentation_schedule_error_micros(
+                1_000_000.0,
+                adjusted_presentation_offset(10_000, ms),
+                900_000,
+                10.0,
+            )
+        };
+        assert_eq!(error(0), 100_000.0);
+        assert_eq!(error(25), 125_000.0);
+        assert_eq!(error(-25), 75_000.0);
+        assert!(synchronized_buffer_frames(10.0 - 200.0) < CAPACITY);
+        assert!(synchronized_buffer_frames(10.0 + 200.0) >= 2);
+        assert_eq!(adjusted_presentation_offset(i64::MAX, 200), i64::MAX);
+    }
+
     #[test]
     fn ring_is_bounded_and_preserves_timestamps() {
         let q = PcmRing::new(4);

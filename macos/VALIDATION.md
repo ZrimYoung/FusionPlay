@@ -107,3 +107,70 @@
 - Local validation: SDK 105 tests passed; host 8 passed, 1 existing network test ignored; cleanup 2 passed; Swift volume and brand smoke tests passed.
 - CI attempt could not run: GitHub account billing restriction; macos-14 runner also rejected. Updated Mac runner to macos-15; deployment target remains macOS 14. Remote Mac build and Android compilation remain unverified for this integration.
 - Later Android branch commits remain on fix/miplay-port-conflict and are not included in this integration. No new phone casting acceptance performed.
+
+## 0.2.6 recovery and device identity (2026-11-12)
+
+- Mac host migrates legacy identity files without changing device identifiers, chooses a private-range preferred control port, and persists the actual bound port for subsequent starts (including port-conflict fallback). Existing stale phone records are not removed.
+- Sleep-stop completion now reconciles a wake/start request that arrived while the backend was busy. Device enumeration callbacks arriving after sleep/stop/termination cannot restart the receiver. Media commands are rejected during sleep and termination.
+- Long-run audio and objective whole-house synchronization measurement are excluded from this round at the user's request.
+- Physical sleep/wake, output removal, phone media keys and control-center behavior require live acceptance; automated checks do not establish these results.
+
+- Validation this round: 9 ordinary host tests passed; the new live port-conflict/missing-output recovery test passed when run serially. Swift bridge passed three start/stop cycles with persisted port checks and native MediaPlayer publication/pause/cleanup. Application build and strict signature verification passed.
+- Existing malformed-control probe did not observe its expected diagnostic in this environment (also failed on a serial retry); it is not marked passed. Concurrent network tests contend for fixed Lyra ports and must run serially.
+
+- User feedback on 2026-11-12: keyboard/media control checks reported normal and receiver currently normal. User subsequently reported a missing menu-bar entry; whether this is FusionPlay's double-ring item or the system Now Playing item remains to be clarified. Menu-bar visibility is not accepted yet. Physical sleep/wake and output switching remain unverified.
+
+- User confirmed keyboard play/pause/previous/next and system control-center media behavior normal. Missing menu-bar entries were caused by Thaw hiding them; user changed Thaw settings and confirmed visibility normal. Receiver currently normal.
+- Compact menu revision adds a 56 pt cover with title/artist, a 190 pt volume row, and three footer actions (player/settings/quit). Receiver stop and logs remain available in settings; routine command acknowledgements are omitted but failures remain visible.
+
+- Resizable player/hover mini mode: native build and strict signature checks passed. Minimum 260 × 260, expanded layout from 600 × 360; physical resize/hover appearance awaits user confirmation.
+
+- Player refinement: expanded cover and information panel share one height and are centered as a unit; controls are bottom-aligned and title top-aligned. Mini hover overlay now includes source-reported progress/time and a blurred artwork layer fading in toward the bottom. Reduce Transparency skips artwork blur. Native build/signature checks passed; visual resize behavior awaits user feedback.
+
+## 0.3.0 installed app (2026-11-12)
+
+- Installed in /Applications; runtime data is ~/Library/Application Support/FusionPlay. Copied files/signature verified, identity and settings compared equal after launch, installed process reported receiver_ready. External source/build caches retained. Legacy external data/logs and previous binary remain as backups; deletion was not performed. Root launch/uninstall entries target installed app.
+- Five cleanup/installation tests passed. Uninstaller syntax checked, destructive uninstall not executed on real installation.
+- Mini native content aspect ratio is 1:1 and remains resizable. Keyboard focus ring disabled following user report; hover info and controls preserved.
+
+- Final installed revision: native transparent full-size title area, no player keyboard-focus outline, ordinary hover controls hidden on pointer exit; mini window buttons fade to 22% opacity and overlays fade over 0.35 seconds (disabled with Reduce Motion). Installer tests and build/signature passed. Installed app launched from /Applications; identity/settings unchanged during update; cancellation of uninstall tested without deletion. Visual hover/window behavior still requires user confirmation.
+
+- User acceptance on 2026-11-12: after reducing mini-player blur/dimming to the bottom third, user confirmed the result acceptable and requested GitHub publication. This confirms the current UI revision; it does not close the separately unverified sleep/wake, physical output-switching or malformed-control diagnostic checks. Long-run/synchronization measurement remains excluded by user request.
+
+## Main integration with Windows receiver (2026-11-12)
+
+- Resolved host conflicts against main 4f927e1: Mac identity control-port migration/persistence is macOS-only; Windows retains control-port.json and calibration. Both sets of regression tests preserved.
+- Merged host tests: 11 passed, 2 explicit network tests ignored. Shared SDK: 106 passed, 1 ignored. Cleanup/install: 5 passed. Mac app build and strict signature verification passed. Windows/Android binaries not rebuilt on this Mac; prior live acceptance does not cover this combined revision.
+
+- Post-merge UI: added a native floating/normal window-level toggle to the mini overlay. Blur mask is derived from measured controls height plus 24 pt. Native build and strict signature verification passed; installed app updated without changing runtime configuration. Pin and adaptive-blur appearance require user confirmation.
+
+- Fixed mini backdrop geometry by attaching the full-cover blur directly behind the measured controls container; removed asynchronous preference-height state and duplicate top padding. Synthetic high-contrast renders at 260/440 pt showed a visible blur aligned above controls.
+- Artwork loading now retains the previous image until replacement succeeds, with a 0.35 s crossfade and blur-to-clear transition. Disconnection/missing source/terminal failure clear stale artwork; system media does not publish old artwork while loading. Build/signature passed and installed app updated. Actual phone track-switch appearance awaits acceptance.
+
+## Accepted mini-player refinement (2026-11-12)
+
+- User accepted the installed progressive-blur appearance and authorized integration into main. Blur blends 6/14/26/40 pt radii across adjacent bands; coverage follows 1.35 times measured controls height. Dimming remains unchanged from the preceding installed revision.
+- Larger track title, single-line artist - album metadata (omitting empty fields), tighter progress/transport spacing, and a small angled pin icon complete this UI revision.
+- Native build, strict signature verification, and synthetic renders at 260/440 pt passed before installation. UI acceptance does not establish new audio, sleep/wake, or output-switching results.
+
+## Settings pages and Mac sync adjustment (2026-11-12)
+
+- Receiver / Appearance / Advanced / About pages; immediate Chinese/English UI preference, persistent playback-control visibility (default on), and collapsed diagnostics. Sync adjustment remains visible in Advanced.
+- Mac-only signed adjustment (-200..200 ms) shifts presentation scheduling without falsifying measured hardware latency. Untimed playback retains the existing minimum safety queue. Live changes reuse the fade/realign path. Zero leaves the prior scheduling unchanged; Windows calibration and Android policy remain separate.
+- Host tests: 12 passed, 2 network tests ignored. SDK tests: 107 passed, 1 ignored. Android arm64 SDK compilation passed. Native build and strict signature passed. Isolated real Swift/Rust bridge check passed default/range/persistence/reset and runtime Chinese/English resource switching.
+- UI layout, audible offsets, and switching settings during actual phone casting still require user acceptance; no new long-run or objective synchronization claim.
+- The earlier artwork-gap fix retains the preceding cover for up to two seconds while metadata arrives, cancels stale expiry after replacement, and clears on sustained absence/disconnect. Isolated checks passed. The mini pin action now appears at top right.
+
+- Hover/preferences follow-up: always-visible controls, persistent pin state, and pin-button visibility default off. Settings and the mini pin button share the same stored value. Pointer exit delays hiding 0.4 s, then fades over 0.65 s; SwiftUI cancels the pending task on re-entry/disappearance. Build, strict signature, and both language resource validations passed. Visual timing and settings interaction await user acceptance.
+
+- Sync control polish: continuous slider removes 401 native tick marks; numeric field accepts integers within -200..200, while minus/plus changes by 10 ms with bounded endpoints. The combined control was rendered at settings width to inspect layout. About artwork now uses vector SwiftUI paths, inspected at 2x scale; app build/signature passed. Live control input and audible response still require acceptance.
+
+- User feedback on 2026-11-12: accepted the installed settings/control/icon revision and requested commit/push to main. This records UI acceptance; it does not add objective synchronization measurements or close the remaining physical recovery checks.
+
+- App entry visibility: independent persistent Dock/menu-bar switches default on. Dock uses the native regular/accessory activation policy; the menu item uses MenuBarExtra insertion binding. Reopening (including cold launch) with both hidden exposes Settings. Build/signature validation completed; live icon visibility and reopening require user confirmation.
+
+- Compact menu update: transport grouped beside artwork with track info; artwork/text buttons request a square mini player; thin thumb-free volume track reuses volume interaction handling. Footer retains Settings on the left and Quit on the right. Idle/playing/paused menu icons share fixed 20x16 vector-template dimensions; distinct-image and Dock-brand checks passed. Menu layout rendered for inspection; native interactions and status changes await user confirmation.
+
+- Status-icon refinement: idle retains double rings; playing and paused use one centered ring with an internal triangle or bars. The ring uses the same radius/scale and stroke as each default ring, with unchanged 20x16 canvas. Three-state rendering inspected and brand regression passed.
+
+- User accepted the installed single-ring playback-state revision and requested publication to main on 2026-11-12. This round includes the compact menu, thin volume track, artwork/title mini-player entry, and independent Dock/menu visibility preferences. Native build/signature, brand regression and volume-interaction regression passed; no new audio synchronization or physical recovery acceptance is implied.
