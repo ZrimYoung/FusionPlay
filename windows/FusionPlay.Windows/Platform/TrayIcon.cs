@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
 using FusionPlay.Core;
+using Windows.Graphics;
 
 namespace FusionPlay.Windows.Platform;
 
@@ -11,8 +12,16 @@ internal sealed class TrayIcon : IDisposable
     private readonly Native.SubclassProc hook;
     private Native.NotifyIconData data;
     private readonly uint taskbarCreated = Native.RegisterWindowMessage("TaskbarCreated");
-    private readonly nint idleIcon, playingIcon, pausedIcon;
-    private bool visible = true;
+    private nint idleIcon, playingIcon, pausedIcon;
+    private bool visible = true, version4;
+    public RectInt32? Bounds
+    {
+        get
+        {
+            var identifier = new Native.NotifyIconIdentifier { Size = (uint)Marshal.SizeOf<Native.NotifyIconIdentifier>(), Window = window, Id = data.Id };
+            return Native.ShellNotifyIconGetRect(ref identifier, out var rect) == 0 ? new RectInt32(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top) : null;
+        }
+    }
     public bool Visible
     {
         get => visible;
@@ -35,14 +44,20 @@ internal sealed class TrayIcon : IDisposable
         {
             Size = (uint)Marshal.SizeOf<Native.NotifyIconData>(), Window = hwnd, Id = 1,
             Flags = 1 | 2 | 4, Callback = CallbackMessage, Tip = "FusionPlay · 等待连接",
-            Icon = Native.LoadImage(0, iconPath, 1, 0, 0, 0x10),
+            Icon = 0,
             Info = "", InfoTitle = "", Version = 4
         };
-        idleIcon = data.Icon;
-        playingIcon = CreatePlaybackIcon(false); pausedIcon = CreatePlaybackIcon(true);
+        CreateIcons(); data.Icon = idleIcon;
         Add();
     }
-    private void Add() { Native.ShellNotifyIcon(0, ref data); data.Version = 4; Native.ShellNotifyIcon(4, ref data); }
+    private void Add() { Native.ShellNotifyIcon(0, ref data); data.Version = 4; version4 = Native.ShellNotifyIcon(4, ref data); }
+    private void CreateIcons()
+    {
+        int size = Math.Clamp(Native.GetSystemMetricsForDpi(49, Native.GetDpiForWindow(window)), 16, 64);
+        idleIcon = CreatePlaybackIcon(ReceiverPhase.Ready, size);
+        playingIcon = CreatePlaybackIcon(ReceiverPhase.Playing, size);
+        pausedIcon = CreatePlaybackIcon(ReceiverPhase.Paused, size);
+    }
     public void Update(string status, ReceiverPhase phase)
     {
         string tip = "FusionPlay · " + status;
@@ -58,12 +73,20 @@ internal sealed class TrayIcon : IDisposable
         if (message == CallbackMessage)
         {
             uint notification = (uint)(long)lParam & 0xffff;
-            if (notification is 0x400 or 0x401 or 0x202) TogglePanel?.Invoke();
-            if (notification is 0x205 or 0x7b) ShowMenu();
+            if (version4 ? notification is 0x400 or 0x401 : notification == 0x202) TogglePanel?.Invoke();
+            if (version4 ? notification == 0x7b : notification == 0x205) ShowMenu();
             return 0;
         }
         if (message == taskbarCreated && visible) Add();
         if (message is 0x1a or 0x31a) AppearanceChanged?.Invoke();
+        if (message == 0x02E0)
+        {
+            nint[] old = [idleIcon, playingIcon, pausedIcon];
+            int state = data.Icon == playingIcon ? 1 : data.Icon == pausedIcon ? 2 : 0;
+            CreateIcons(); data.Icon = state == 1 ? playingIcon : state == 2 ? pausedIcon : idleIcon;
+            if (visible) Native.ShellNotifyIcon(1, ref data);
+            foreach (nint icon in old) if (icon != 0) Native.DestroyIcon(icon);
+        }
         if (message == 0x218)
         {
             if (wParam == 4) Suspend?.Invoke();
@@ -101,27 +124,33 @@ internal sealed class TrayIcon : IDisposable
         GC.KeepAlive(hook);
     }
     // Small vector status marks, supersampled into a premultiplied BGRA icon.
-    private static nint CreatePlaybackIcon(bool paused)
+    private static nint CreatePlaybackIcon(ReceiverPhase state, int size)
     {
-        const int size = 32, samples = 4;
+        const int samples = 8;
         byte[] pixels = new byte[size * size * 4];
         for (int y = 0; y < size; y++) for (int x = 0; x < size; x++)
         {
             int coverage = 0;
             for (int sy = 0; sy < samples; sy++) for (int sx = 0; sx < samples; sx++)
             {
-                double px = x + (sx + .5) / samples, py = y + (sy + .5) / samples;
-                double radius = Math.Sqrt((px - 16) * (px - 16) + (py - 16) * (py - 16));
-                bool glyph = paused ? py >= 10 && py <= 22 && (px >= 11 && px <= 14 || px >= 18 && px <= 21)
-                    : px >= 12 && px <= 23 && Math.Abs(py - 16) <= (23 - px) * .64;
-                if (radius >= 12 && radius <= 14 || glyph) coverage++;
+                double px = (x + (sx + .5) / samples) * 24 / size, py = (y + (sy + .5) / samples) * 24 / size;
+                bool Ring(double cx, double radius) => Math.Abs(Math.Sqrt((px - cx) * (px - cx) + (py - 12) * (py - 12)) - radius) <= 1.35;
+                bool mark;
+                if (state is not (ReceiverPhase.Playing or ReceiverPhase.Paused)) mark = Ring(8.5, 7) || Ring(15.5, 7);
+                else
+                {
+                    bool glyph = state == ReceiverPhase.Paused ? py >= 7 && py <= 17 && (px >= 8.5 && px <= 11 || px >= 13 && px <= 15.5)
+                        : px >= 9 && px <= 17 && Math.Abs(py - 12) <= (17 - px) * .75;
+                    mark = Ring(12, 9.5) || glyph;
+                }
+                if (mark) coverage++;
             }
             int i = (y * size + x) * 4, alpha = coverage * 255 / (samples * samples);
-            pixels[i] = (byte)alpha; pixels[i + 1] = (byte)(131 * alpha / 255); pixels[i + 2] = (byte)(61 * alpha / 255); pixels[i + 3] = (byte)alpha;
+            pixels[i] = pixels[i + 1] = pixels[i + 2] = pixels[i + 3] = (byte)alpha;
         }
         var header = new Native.BitmapInfoHeader { Size = 40, Width = size, Height = -size, Planes = 1, BitCount = 32, SizeImage = (uint)pixels.Length };
         nint bitmap = Native.CreateDIBSection(0, ref header, 0, out nint bits, 0, 0);
-        nint mask = Native.CreateBitmap(size, size, 1, 1, new byte[size * size / 8]);
+        nint mask = Native.CreateBitmap(size, size, 1, 1, new byte[((size + 15) / 16 * 2) * size]);
         try
         {
             if (bitmap == 0 || mask == 0 || bits == 0) return 0;
@@ -133,6 +162,11 @@ internal sealed class TrayIcon : IDisposable
     }
     internal static class Native
     {
+        [StructLayout(LayoutKind.Sequential)] internal struct NotifyIconIdentifier { public uint Size; public nint Window; public uint Id; public Guid GuidItem; }
+        [StructLayout(LayoutKind.Sequential)] internal struct Rect { public int Left, Top, Right, Bottom; }
+        [DllImport("shell32.dll", EntryPoint = "Shell_NotifyIconGetRect")] internal static extern int ShellNotifyIconGetRect(ref NotifyIconIdentifier identifier, out Rect rect);
+        [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(nint window);
+        [DllImport("user32.dll")] internal static extern int GetSystemMetricsForDpi(int index, uint dpi);
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         internal struct NotifyIconData
         {

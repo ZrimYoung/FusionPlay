@@ -16,7 +16,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private ulong revision;
     private long generation;
     private Task? polling;
-    private CancellationTokenSource? artworkCancellation;
+    private readonly ArtworkRequestScope artworkRequests = new();
     private CancellationTokenSource? volumeDebounce;
     private bool volumeGesture;
     private string artworkKey = "";
@@ -24,6 +24,8 @@ public sealed class ReceiverController : IAsyncDisposable
     private bool sleeping;
     private int retryCount;
     private bool disposed;
+    private bool pollFailed;
+    private const string PollError = "无法读取接收器状态，请停止后重新启动接收。";
     private readonly VolumeInteraction volume = new();
     public PortableStore Store { get; } = new(AppContext.BaseDirectory);
     public UiPreferencesStore Preferences { get; }
@@ -56,7 +58,23 @@ public sealed class ReceiverController : IAsyncDisposable
         Preferences.Changed += PreferencesChanged;
     }
     private void PreferencesChanged() { L.Language = Preferences.Value.Language; Notify(); }
-    private void Notify() => Changed?.Invoke();
+    private void Notify()
+    {
+        // One view failing to refresh must not interrupt cover loading, polling,
+        // or publication to the other windows and system media controls.
+        foreach (Action view in Changed?.GetInvocationList() ?? [])
+        {
+            try { view(); }
+            catch (Exception error)
+            {
+                string frames = string.Join(">", new StackTrace(error).GetFrames()
+                    .Select(frame => frame.GetMethod())
+                    .Where(method => method?.DeclaringType?.Namespace?.StartsWith("FusionPlay", StringComparison.Ordinal) == true)
+                    .Take(4).Select(method => method!.DeclaringType!.Name + "." + method.Name));
+                Store.EventDiagnostic("view_update_failed:" + error.GetType().Name + ":" + frames);
+            }
+        }
+    }
     private Task OnUi(Action action)
     {
         if (ui.HasThreadAccess) { action(); return Task.CompletedTask; }
@@ -151,8 +169,12 @@ public sealed class ReceiverController : IAsyncDisposable
                     await OnUi(() =>
                     {
                         if (disposed || observedGeneration != Interlocked.Read(ref generation)) return;
+                        bool recovered = pollFailed;
+                        pollFailed = false;
+                        if (recovered && Error == PollError) Error = "";
                         revision = result.Item1.Revision;
                         if (result.Item1.Snapshot != null) Accept(result.Item1.Snapshot);
+                        else if (recovered) Notify();
                         if (!devices) return;
                         bool changed = !Networks.SequenceEqual(result.Item2!) || !Outputs.SequenceEqual(result.Item3!);
                         Networks = result.Item2!; Outputs = result.Item3!;
@@ -171,9 +193,12 @@ public sealed class ReceiverController : IAsyncDisposable
                 catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { break; }
                 catch (Exception e)
                 {
-                    string detail = e is System.Text.Json.JsonException json ? "json:" + json.Path : e.GetType().Name + ":" + e.HResult.ToString("X8") + ":" + e.TargetSite?.Name;
+                    string frames = string.Join(">", new StackTrace(e).GetFrames().Select(frame => frame.GetMethod())
+                        .Where(method => method?.DeclaringType?.Namespace?.StartsWith("FusionPlay", StringComparison.Ordinal) == true)
+                        .Take(5).Select(method => method!.DeclaringType!.Name + "." + method.Name));
+                    string detail = e is System.Text.Json.JsonException json ? "json:" + json.Path : e.GetType().Name + ":" + e.HResult.ToString("X8") + ":" + frames;
                     Store.EventDiagnostic("poll_failed:" + detail);
-                    await OnUi(() => { if (!disposed) { Error = "无法读取接收器状态，请停止后重新启动接收。"; Notify(); } });
+                    await OnUi(() => { if (!disposed) { pollFailed = true; Error = PollError; Notify(); } });
                 }
             }
         }
@@ -257,17 +282,20 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         string key = snapshot.ControlsAvailable ? snapshot.TrackId + "|" + snapshot.ArtworkUrl : "";
         if (key == artworkKey) return;
-        artworkKey = key; artworkCancellation?.Cancel(); artworkCancellation?.Dispose();
+        artworkKey = key;
+        // A disconnect must leave an empty slot, rather than retaining a disposed
+        // source that the next connection would try to cancel again.
+        artworkRequests.Cancel();
         ArtworkLoading = false;
         if (key == "") { Artwork = null; ArtworkBytes = null; ArtworkStatus = "尚未连接"; return; }
-        artworkCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        var cancellation = artworkRequests.Start(lifetime.Token);
         if (snapshot.ArtworkUrl.Length == 0)
         {
             ArtworkStatus = "等待手机提供封面"; ArtworkLoading = Artwork != null;
-            _ = ExpireArtworkAsync(key, artworkCancellation.Token); return;
+            _ = ExpireArtworkAsync(key, cancellation); return;
         }
         ArtworkLoading = true;
-        _ = LoadArtworkAsync(key, snapshot.ArtworkUrl, artworkCancellation.Token);
+        _ = LoadArtworkAsync(key, snapshot.ArtworkUrl, cancellation);
     }
     private async Task ExpireArtworkAsync(string key, CancellationToken cancellation)
     {
@@ -339,11 +367,11 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         Preferences.Changed -= PreferencesChanged;
-        artworkCancellation?.Cancel(); lifetime.Cancel();
+        artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();
         if (polling != null) await polling;
         await operations.WaitAsync();
         try { await Task.Run(() => { native?.Stop(); native?.Dispose(); native = null; }); }
-        finally { operations.Release(); artworkCancellation?.Dispose(); lifetime.Dispose(); }
+        finally { operations.Release(); artworkRequests.Dispose(); lifetime.Dispose(); }
     }
 }

@@ -267,6 +267,24 @@ Check("appearance preferences: malformed originals retained and partial older se
     var legacy = new UiPreferencesStore(temporary.Path).Value;
     Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
 });
+Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconnect", () =>
+{
+    using var lifetime = new CancellationTokenSource();
+    using var requests = new ArtworkRequestScope();
+    for (int cycle = 0; cycle < 30; cycle++)
+    {
+        var load = requests.Start(lifetime.Token);
+        Assert(!load.IsCancellationRequested, "new cover request already cancelled");
+        requests.Cancel(); requests.Cancel();
+        Assert(load.IsCancellationRequested, "disconnect did not cancel old cover request");
+        var reconnected = requests.Start(lifetime.Token);
+        var replacement = requests.Start(lifetime.Token);
+        Assert(reconnected.IsCancellationRequested && !replacement.IsCancellationRequested, "new metadata did not replace the old request");
+    }
+    var final = requests.Start(lifetime.Token); lifetime.Cancel();
+    Assert(final.IsCancellationRequested, "application shutdown did not cancel cover loading");
+    requests.Dispose(); requests.Cancel();
+});
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {

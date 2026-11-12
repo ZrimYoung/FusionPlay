@@ -20,9 +20,11 @@ internal sealed class TrayWindow : Window
     private readonly Button artworkButton = new(), trackButton = new(), settingsButton = new(), quitButton = new();
     private readonly Slider volume = new() { Minimum = 0, Maximum = 100, Value = 50, StepFrequency = 1, Height = 24 };
     private bool rendering, visible;
-    public TrayWindow(ReceiverController controller, Action showMiniPlayer, Action showSettings, Action quit)
+    private readonly Func<RectInt32?> anchor;
+    private long closedByTrayClick = long.MinValue / 2;
+    public TrayWindow(ReceiverController controller, Action showMiniPlayer, Action showSettings, Action quit, Func<RectInt32?> trayAnchor)
     {
-        model = controller;
+        model = controller; anchor = trayAnchor;
         var root = new StackPanel { Padding = new Thickness(18), Spacing = 8, Background = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"] };
         var top = new Grid { ColumnSpacing = 12 };
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -38,9 +40,9 @@ internal sealed class TrayWindow : Window
         trackButton.HorizontalAlignment = HorizontalAlignment.Stretch; trackButton.Padding = new Thickness(0);
         trackButton.Click += (_, _) => showMiniPlayer(); right.Children.Add(trackButton);
         var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
-        Setup(previous, "\uE892", () => _ = model.ControlAsync(PlaybackCommand.Previous));
-        Setup(play, "\uE768", () => _ = model.TogglePlaybackAsync());
-        Setup(next, "\uE893", () => _ = model.ControlAsync(PlaybackCommand.Next));
+        Setup(previous, "", () => _ = model.ControlAsync(PlaybackCommand.Previous)); previous.Content = PlaybackIcons.Create(PlaybackCommand.Previous);
+        Setup(play, "", () => _ = model.TogglePlaybackAsync()); play.Content = PlaybackIcons.Create(PlaybackCommand.Play);
+        Setup(next, "", () => _ = model.ControlAsync(PlaybackCommand.Next)); next.Content = PlaybackIcons.Create(PlaybackCommand.Next);
         controls.Children.Add(previous); controls.Children.Add(play); controls.Children.Add(next); right.Children.Add(controls);
         top.Children.Add(right); root.Children.Add(top); root.Children.Add(volume); root.Children.Add(status);
         MainWindow.AttachVolume(volume, model);
@@ -51,8 +53,15 @@ internal sealed class TrayWindow : Window
         footer.Children.Add(settingsButton); footer.Children.Add(quitButton); root.Children.Add(footer);
         foreach (var b in new[] { artworkButton, trackButton }) { b.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent); b.BorderThickness = new Thickness(0); }
         Content = root; WindowSizing.Apply(this, 340, 240); AppWindow.IsShownInSwitchers = false;
-        if (AppWindow.Presenter is OverlappedPresenter presenter) { presenter.SetBorderAndTitleBar(true, false); presenter.IsResizable = false; presenter.IsMaximizable = false; presenter.IsMinimizable = false; }
-        Activated += (_, args) => { if (args.WindowActivationState == WindowActivationState.Deactivated) HidePanel(); };
+        if (AppWindow.Presenter is OverlappedPresenter presenter) { presenter.SetBorderAndTitleBar(true, false); presenter.IsResizable = false; presenter.IsMaximizable = false; presenter.IsMinimizable = false; presenter.IsAlwaysOnTop = true; }
+        Activated += (_, args) =>
+        {
+            if (args.WindowActivationState != WindowActivationState.Deactivated) return;
+            if (visible && anchor() is { } bounds && TrayIcon.Native.GetCursorPos(out var point)
+                && point.X >= bounds.X && point.X < bounds.X + bounds.Width && point.Y >= bounds.Y && point.Y < bounds.Y + bounds.Height)
+                closedByTrayClick = Environment.TickCount64;
+            HidePanel();
+        };
         model.Changed += Render; Closed += (_, _) => model.Changed -= Render; Render();
     }
     private static void Setup(Button button, string glyph, Action action)
@@ -74,7 +83,7 @@ internal sealed class TrayWindow : Window
         artist.Text = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => x.Length > 0));
         if (artist.Text.Length == 0) artist.Text = model.Settings.Name;
         previous.IsEnabled = play.IsEnabled = next.IsEnabled = model.CanControl;
-        ((FontIcon)play.Content).Glyph = state.Phase == ReceiverPhase.Playing ? "\uE769" : "\uE768";
+        PlaybackIcons.Update((PathIcon)play.Content, state.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
         foreach (var b in new[] { artworkButton, trackButton }) Label(b, "迷你播放器");
         Label(previous, "上一曲"); Label(play, state.Phase == ReceiverPhase.Playing ? "暂停" : "播放"); Label(next, "下一曲");
         Label(settingsButton, "设置"); Label(quitButton, "退出"); Label(volume, "接收音量");
@@ -83,9 +92,16 @@ internal sealed class TrayWindow : Window
     public void Toggle()
     {
         if (visible) { HidePanel(); return; }
-        var work = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
-        AppWindow.Move(new PointInt32(work.X + work.Width - AppWindow.Size.Width - 16, work.Y + work.Height - AppWindow.Size.Height - 12));
-        visible = true; Activate();
+        if (Environment.TickCount64 - closedByTrayClick < 600) { closedByTrayClick = long.MinValue / 2; return; }
+        var bounds = anchor();
+        var work = bounds is { } icon ? DisplayArea.GetFromPoint(new PointInt32(icon.X, icon.Y), DisplayAreaFallback.Nearest).WorkArea : DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
+        int x = bounds is { } b ? b.X + b.Width / 2 - AppWindow.Size.Width / 2 : work.X + work.Width - AppWindow.Size.Width - 16;
+        int y = bounds is { } a ? a.Y - AppWindow.Size.Height - 8 : work.Y + work.Height - AppWindow.Size.Height - 12;
+        if (y < work.Y && bounds is { } top) y = top.Y + top.Height + 8;
+        x = Math.Clamp(x, work.X, Math.Max(work.X, work.X + work.Width - AppWindow.Size.Width));
+        y = Math.Clamp(y, work.Y, Math.Max(work.Y, work.Y + work.Height - AppWindow.Size.Height));
+        AppWindow.Move(new PointInt32(x, y));
+        visible = true; AppWindow.Show(); TrayIcon.Native.SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)); Activate();
     }
     public void HidePanel() { visible = false; AppWindow.Hide(); }
 }

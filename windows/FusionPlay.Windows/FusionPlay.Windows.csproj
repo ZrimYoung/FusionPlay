@@ -18,7 +18,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Version>0.2.0-preview1</Version>
+    <Version>0.2.0-preview2</Version>
     <AssemblyName>FusionPlay.Windows</AssemblyName>
     <Product>FusionPlay Windows</Product>
     <Description>Windows 原生 MiPlay 音乐接收器</Description>
@@ -33,7 +33,7 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="..\..\macos\Resources\AppIcon.png" Link="Assets\AppIcon.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIcon.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\THIRD_PARTY_NOTICES.md" Link="THIRD_PARTY_NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\Configure-Firewall.ps1" Link="Configure-Firewall.ps1" CopyToOutputDirectory="PreserveNewest" />

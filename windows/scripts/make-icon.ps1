@@ -1,6 +1,6 @@
 param([string]$OutputPath = (Join-Path $PSScriptRoot '../FusionPlay.Windows/Assets/AppIcon.ico'))
 $ErrorActionPreference = 'Stop'
-$taskSource = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../macos/Resources/AppIcon.png'))
+$taskSource = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../FusionPlay.Windows/Assets/AppIcon.png'))
 $taskDestination = [IO.Path]::GetFullPath($OutputPath)
 if ((Test-Path -LiteralPath $taskDestination) -and (Get-Item -LiteralPath $taskDestination).LastWriteTimeUtc -ge (Get-Item -LiteralPath $taskSource).LastWriteTimeUtc) { return }
 New-Item -ItemType Directory -Path (Split-Path $taskDestination -Parent) -Force | Out-Null
@@ -14,7 +14,10 @@ try {
         $taskGraphics = [Drawing.Graphics]::FromImage($taskBitmap)
         $taskStream = [IO.MemoryStream]::new()
         try {
+            $taskGraphics.Clear([Drawing.Color]::Transparent)
+            $taskGraphics.CompositingMode = [Drawing.Drawing2D.CompositingMode]::SourceCopy
             $taskGraphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $taskGraphics.PixelOffsetMode = [Drawing.Drawing2D.PixelOffsetMode]::HighQuality
             $taskGraphics.DrawImage($taskSourceImage, 0, 0, $taskSize, $taskSize)
             $taskBitmap.Save($taskStream, [Drawing.Imaging.ImageFormat]::Png)
             $taskImages.Add($taskStream.ToArray())

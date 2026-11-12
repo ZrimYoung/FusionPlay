@@ -120,7 +120,7 @@ public partial class App : Application
     private void TogglePanel()
     {
         if (controller == null) return;
-        panel ??= new TrayWindow(controller, ShowMiniPlayer, OpenSettings, () => _ = QuitAsync());
+        panel ??= new TrayWindow(controller, ShowMiniPlayer, OpenSettings, () => _ = QuitAsync(), () => tray?.Bounds);
         panel.Toggle();
     }
     private async Task QuitAsync()
