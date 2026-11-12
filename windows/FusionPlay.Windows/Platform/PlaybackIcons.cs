@@ -11,7 +11,6 @@ internal static class PlaybackIcons
 {
     private sealed class IconState { public PlaybackCommand? Command; }
     private static readonly ConditionalWeakTable<PathIcon, IconState> States = new();
-    private static readonly Dictionary<PlaybackCommand, Geometry> Shapes = [];
 
     public static PathIcon Create(PlaybackCommand command, double size = 18)
     {
@@ -25,11 +24,9 @@ internal static class PlaybackIcons
         ArgumentNullException.ThrowIfNull(icon);
         var state = States.GetValue(icon, static _ => new IconState());
         if (state.Command == command) return;
-        if (!Shapes.TryGetValue(command, out var geometry))
-        {
-            geometry = Draw(command);
-            Shapes.Add(command, geometry);
-        }
+        // Geometry has presentation state in WinUI: every PathIcon owns its own instance.
+        // Cache the command on that icon, rather than sharing one mutable shape across windows.
+        var geometry = Draw(command);
         icon.Data = geometry;
         state.Command = command;
     }
@@ -37,9 +34,6 @@ internal static class PlaybackIcons
     private static PathGeometry Draw(PlaybackCommand command)
     {
         var geometry = new PathGeometry { FillRule = FillRule.Nonzero };
-        // This unfilled diagonal fixes the geometry bounds at 20x20 without drawing a frame.
-        var bounds = new PathFigure { StartPoint = new Point(0, 0), IsFilled = false };
-        Line(bounds, 20, 20); geometry.Figures.Add(bounds);
         switch (command)
         {
             case PlaybackCommand.Play:
@@ -60,22 +54,28 @@ internal static class PlaybackIcons
             case PlaybackCommand.Previous:
             case PlaybackCommand.Next:
             {
-                var triangle = Figure(3.2, 4.7);
-                Curve(triangle, 3.2, 4, 3.85, 3.65, 4.45, 4.05);
-                Line(triangle, 12.4, 9.05);
-                Curve(triangle, 13.15, 9.5, 13.15, 10.5, 12.4, 10.95);
-                Line(triangle, 4.45, 15.95);
-                Curve(triangle, 3.85, 16.35, 3.2, 16, 3.2, 15.3);
-                geometry.Figures.Add(triangle);
-                RoundedBar(geometry, 14.2, 4, 2.8, 12, 0.75);
-                if (command == PlaybackCommand.Previous)
-                    geometry.Transform = new ScaleTransform { ScaleX = -1, CenterX = 10 };
+                Step(geometry, previous: command == PlaybackCommand.Previous);
                 break;
             }
             default:
                 throw new ArgumentOutOfRangeException(nameof(command));
         }
         return geometry;
+    }
+
+    private static void Step(PathGeometry geometry, bool previous)
+    {
+        // Bake the mirror into every point. Both versions use the same filled bounds,
+        // including a generous end bar, with no geometry-level transform or phantom figure.
+        Point At(double x, double y) => new(previous ? 20 - x : x, y);
+        var triangle = new PathFigure { StartPoint = At(3, 4.75), IsClosed = true, IsFilled = true };
+        triangle.Segments.Add(new BezierSegment { Point1 = At(3, 4.05), Point2 = At(3.65, 3.7), Point3 = At(4.3, 4.1) });
+        triangle.Segments.Add(new LineSegment { Point = At(12.25, 9.1) });
+        triangle.Segments.Add(new BezierSegment { Point1 = At(13, 9.55), Point2 = At(13, 10.45), Point3 = At(12.25, 10.9) });
+        triangle.Segments.Add(new LineSegment { Point = At(4.3, 15.9) });
+        triangle.Segments.Add(new BezierSegment { Point1 = At(3.65, 16.3), Point2 = At(3, 15.95), Point3 = At(3, 15.25) });
+        geometry.Figures.Add(triangle);
+        RoundedBar(geometry, previous ? 3 : 14, 4, 3, 12, 0.75);
     }
 
     private static PathFigure Figure(double x, double y) => new() { StartPoint = new Point(x, y), IsClosed = true, IsFilled = true };

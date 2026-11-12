@@ -1,30 +1,33 @@
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Windows.Graphics;
 
 namespace FusionPlay.Windows.Platform;
+
+internal interface ISquareWindow : IDisposable
+{
+    void UpdateInputRegions(RectInt32[] passthrough);
+}
 
 internal static class WindowSizing
 {
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public uint Size; public Rect Monitor, Work; public uint Flags; }
     [StructLayout(LayoutKind.Sequential)] private struct CursorPoint { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] private struct MouseTracking { public uint Size, Flags; public nint Window; public uint HoverTime; }
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [DllImport("user32.dll")] private static extern int GetSystemMetricsForDpi(int index, uint dpi);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsIconic(nint window);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out Rect rect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out Rect rect);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ScreenToClient(nint window, ref CursorPoint point);
     [DllImport("user32.dll")] private static extern nint MonitorFromRect(ref Rect rect, uint flags);
     [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetCursorPos(out CursorPoint point);
     [DllImport("user32.dll")] private static extern nint WindowFromPoint(CursorPoint point);
     [DllImport("user32.dll")] private static extern nint GetAncestor(nint window, uint flags);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool TrackMouseEvent(ref MouseTracking tracking);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint window, int attribute, ref int value, uint size);
     [DllImport("user32.dll", EntryPoint = "SystemParametersInfoW")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SystemParametersInfo(uint action, uint parameter, out int value, uint flags);
     private delegate nint SubclassProc(nint hwnd, uint message, nuint wparam, nint lparam, nuint id, nuint data);
@@ -93,42 +96,45 @@ internal static class WindowSizing
             window.AppWindow.Resize(new SizeInt32(Math.Min(area.Width, (int)Math.Ceiling(width * scale) + frame.Width), Math.Min(area.Height, (int)Math.Ceiling(height * scale) + frame.Height)));
         }
     }
-    public static IDisposable FixedSquare(Window window, Func<double, double, bool> isInteractive, Action<bool> hoverChanged)
-        => new SquareConstraint(window, isInteractive, hoverChanged);
-    private sealed class SquareConstraint : IDisposable
+    public static ISquareWindow FixedSquare(Window window, Action<bool> hoverChanged)
+        => new SquareConstraint(window, hoverChanged);
+    private sealed class SquareConstraint : ISquareWindow
     {
         private readonly Window window;
         private readonly nint hwnd;
         private readonly SubclassProc callback;
-        private readonly Func<double, double, bool> isInteractive;
+        private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
-        private bool disposed, settling, settlementQueued, inMoveSize, hover, trackingClient, trackingNonClient;
+        private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
+        private RectInt32[] passthrough = [];
+        private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
         private uint dpi;
-        public SquareConstraint(Window target, Func<double, double, bool> interactive, Action<bool> changed)
+        public SquareConstraint(Window target, Action<bool> changed)
         {
             window = target; hwnd = WinRT.Interop.WindowNative.GetWindowHandle(target); callback = Process;
-            isInteractive = interactive; hoverChanged = changed; dpi = GetDpiForWindow(hwnd);
+            hoverChanged = changed; dpi = GetDpiForWindow(hwnd);
+            input = InputNonClientPointerSource.GetForWindowId(target.AppWindow.Id);
             if (!SetWindowSubclass(hwnd, callback, 0x4650, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
             // Recalculate once after installing the zero-inset client area. Keep the
             // native thick frame for resizing, while DWM supplies Windows 11 corners.
             int rounded = 2; DwmSetWindowAttribute(hwnd, 33, ref rounded, sizeof(int));
             SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0037);
+            input.PointerEntered += PointerEntered;
+            input.PointerMoved += PointerEntered;
+            input.PointerExited += PointerExited;
+            input.WindowRectChanged += WindowRectChanged;
+            input.EnteredMoveSize += EnteredMoveSize;
+            input.ExitedMoveSize += ExitedMoveSize;
+            RefreshRegions(force: true);
             QueueSettlement(force: true);
         }
         private nint Process(nint handle, uint message, nuint argument, nint pointer, nuint id, nuint data)
         {
             if (message == 0x0083) return 0; // WM_NCCALCSIZE: the whole window is client content.
-            if (message == 0x0084) return HitTest(pointer);
             if (message == 0x0006) SetHover((argument & 0xFFFF) != 0 && CursorIsOverWindow());
             if (message == 0x0018 && argument == 0) SetHover(false);
             if (message == 0x0112 && (argument & 0xFFF0) == 0xF030) return 0;
-            if (message == 0x0200 || message == 0x00A0) TrackHover(message == 0x00A0);
-            if (message == 0x02A3 || message == 0x02A2)
-            {
-                if (message == 0x02A3) trackingClient = false; else trackingNonClient = false;
-                SetHover(CursorIsOverWindow());
-            }
             if (message == 0x0231)
             {
                 inMoveSize = true;
@@ -155,33 +161,81 @@ internal static class WindowSizing
             if (message == 0x0047 && !inMoveSize) QueueSettlement();
             if (message == 0x02E0) QueueSettlement(force: true);
             if (message == 0x0082) Dispose();
-            return DefSubclassProc(handle, message, argument, pointer);
+            nint result = DefSubclassProc(handle, message, argument, pointer);
+            // InputNonClientPointerSource can publish WindowRectChanged before the
+            // WinUI window procedure has updated its client bounds. Refresh input
+            // rectangles after that procedure returns, once per dispatcher turn.
+            // This updates routing only and never resizes or moves the window.
+            if (message is 0x0005 or 0x0047 or 0x02E0) QueueRegionRefresh();
+            return result;
         }
-        private nint HitTest(nint packed)
+        private void PointerEntered(InputNonClientPointerSource sender, NonClientPointerEventArgs args) => SetHover(true);
+        private void PointerExited(InputNonClientPointerSource sender, NonClientPointerEventArgs args) => SetHover(CursorIsOverWindow());
+        private void WindowRectChanged(InputNonClientPointerSource sender, WindowRectChangedEventArgs args)
         {
-            if (!GetWindowRect(hwnd, out var outer)) return 1;
-            long coordinates = packed.ToInt64();
-            var point = new CursorPoint { X = unchecked((short)(coordinates & 0xFFFF)), Y = unchecked((short)((coordinates >> 16) & 0xFFFF)) };
-            if (point.X < outer.Left || point.X >= outer.Right || point.Y < outer.Top || point.Y >= outer.Bottom) return 0;
-            SetHover(true);
+            if (args.NewWindowRect.Width != args.OldWindowRect.Width || args.NewWindowRect.Height != args.OldWindowRect.Height) QueueRegionRefresh(force: true);
+        }
+        private void EnteredMoveSize(InputNonClientPointerSource sender, EnteredMoveSizeEventArgs args)
+        {
+            inMoveSize = true;
+            if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
+        }
+        private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
+        { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
+        public void UpdateInputRegions(RectInt32[] rectangles)
+        {
+            if (disposed) return;
+            bool changed = !passthrough.SequenceEqual(rectangles);
+            if (changed) passthrough = rectangles.ToArray();
+            // Stable controls still need new caption and border bounds on resize.
+            RefreshRegions(force: changed);
+        }
+        private void QueueRegionRefresh(bool force = false)
+        {
+            if (disposed || regionRefreshQueued) return;
+            if (!force && GetClientRect(hwnd, out var client) && Width(client) == regionWidth && Height(client) == regionHeight) return;
+            regionRefreshQueued = true;
+            if (!window.DispatcherQueue.TryEnqueue(() =>
+            {
+                regionRefreshQueued = false;
+                if (!disposed) RefreshRegions();
+            })) regionRefreshQueued = false;
+        }
+        private void RefreshRegions(bool force = false)
+        {
+            if (disposed || IsIconic(hwnd) || !GetClientRect(hwnd, out var client)) return;
+            int width = Width(client), height = Height(client);
+            if (width < 1 || height < 1 || !force && width == regionWidth && height == regionHeight) return;
+            regionWidth = width; regionHeight = height;
             uint currentDpi = Math.Max(96, GetDpiForWindow(hwnd));
-            int border = Math.Max((int)Math.Ceiling(4 * currentDpi / 96.0), GetSystemMetricsForDpi(32, currentDpi) + GetSystemMetricsForDpi(92, currentDpi));
-            bool left = point.X < outer.Left + border, right = point.X >= outer.Right - border;
-            bool top = point.Y < outer.Top + border, bottom = point.Y >= outer.Bottom - border;
-            if (top) return left ? 13 : right ? 14 : 12;
-            if (bottom) return left ? 16 : right ? 17 : 15;
-            if (left) return 10; if (right) return 11;
-            if (!ScreenToClient(hwnd, ref point)) return 1;
-            double scale = currentDpi / 96.0;
-            try { return isInteractive(point.X / scale, point.Y / scale) ? 1 : 2; }
-            catch (Exception error) when (error is COMException or InvalidOperationException or ArgumentException) { return 1; }
+            int border = Math.Min(Math.Min(width, height) / 2, Math.Max((int)Math.Ceiling(4 * currentDpi / 96.0), GetSystemMetricsForDpi(32, currentDpi) + GetSystemMetricsForDpi(92, currentDpi)));
+            var interior = new RectInt32(border, border, width - border * 2, height - border * 2);
+            var holes = passthrough.Select(r => Intersect(r, interior)).Where(r => r.Width > 0 && r.Height > 0).ToArray();
+            var caption = new List<RectInt32> { interior };
+            foreach (var hole in holes) caption = caption.SelectMany(r => Subtract(r, hole)).ToList();
+            // Explicitly partition the regions. Neither controls nor caption overlap
+            // a resize border, so correctness does not depend on undocumented priority.
+            input.SetRegionRects(NonClientRegionKind.TopBorder, [new(0, 0, width, border)]);
+            input.SetRegionRects(NonClientRegionKind.BottomBorder, [new(0, height - border, width, border)]);
+            input.SetRegionRects(NonClientRegionKind.LeftBorder, [new(0, border, border, height - border * 2)]);
+            input.SetRegionRects(NonClientRegionKind.RightBorder, [new(width - border, border, border, height - border * 2)]);
+            input.SetRegionRects(NonClientRegionKind.Caption, caption.Where(r => r.Width > 0 && r.Height > 0).ToArray());
+            input.SetRegionRects(NonClientRegionKind.Passthrough, holes);
         }
-        private void TrackHover(bool nonClient)
+        private static RectInt32 Intersect(RectInt32 a, RectInt32 b)
         {
-            SetHover(true);
-            if (nonClient ? trackingNonClient : trackingClient) return;
-            var tracking = new MouseTracking { Size = (uint)Marshal.SizeOf<MouseTracking>(), Flags = nonClient ? 0x0012u : 0x0002u, Window = hwnd };
-            if (TrackMouseEvent(ref tracking)) { if (nonClient) trackingNonClient = true; else trackingClient = true; }
+            int x = Math.Max(a.X, b.X), y = Math.Max(a.Y, b.Y);
+            return new(x, y, Math.Max(0, Math.Min(a.X + a.Width, b.X + b.Width) - x), Math.Max(0, Math.Min(a.Y + a.Height, b.Y + b.Height) - y));
+        }
+        private static IEnumerable<RectInt32> Subtract(RectInt32 rectangle, RectInt32 hole)
+        {
+            var overlap = Intersect(rectangle, hole);
+            if (overlap.Width <= 0 || overlap.Height <= 0) { yield return rectangle; yield break; }
+            if (overlap.Y > rectangle.Y) yield return new(rectangle.X, rectangle.Y, rectangle.Width, overlap.Y - rectangle.Y);
+            int bottom = overlap.Y + overlap.Height, right = overlap.X + overlap.Width;
+            if (bottom < rectangle.Y + rectangle.Height) yield return new(rectangle.X, bottom, rectangle.Width, rectangle.Y + rectangle.Height - bottom);
+            if (overlap.X > rectangle.X) yield return new(rectangle.X, overlap.Y, overlap.X - rectangle.X, overlap.Height);
+            if (right < rectangle.X + rectangle.Width) yield return new(right, overlap.Y, rectangle.X + rectangle.Width - right, overlap.Height);
         }
         private bool CursorIsOverWindow()
         {
@@ -224,9 +278,14 @@ internal static class WindowSizing
         public void Dispose()
         {
             if (disposed) return; disposed = true;
-            var tracking = new MouseTracking { Size = (uint)Marshal.SizeOf<MouseTracking>(), Flags = 0x80000012, Window = hwnd }; TrackMouseEvent(ref tracking);
-            tracking.Flags = 0x80000002; TrackMouseEvent(ref tracking);
-            RemoveWindowSubclass(hwnd, callback, 0x4650);
+            try
+            {
+                input.PointerEntered -= PointerEntered; input.PointerMoved -= PointerEntered; input.PointerExited -= PointerExited;
+                input.WindowRectChanged -= WindowRectChanged; input.EnteredMoveSize -= EnteredMoveSize; input.ExitedMoveSize -= ExitedMoveSize;
+                input.ClearAllRegionRects();
+            }
+            catch (Exception error) when (error is COMException or InvalidOperationException) { }
+            finally { RemoveWindowSubclass(hwnd, callback, 0x4650); }
         }
     }
 }

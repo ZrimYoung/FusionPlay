@@ -17,7 +17,8 @@ public sealed partial class MainWindow : Window
 {
     private readonly ReceiverController model;
     private readonly Backdrop miniBackdrop, loadingBackdrop;
-    private readonly IDisposable squareSizing;
+    private readonly ISquareWindow squareSizing;
+    private readonly TransportTransition transportTransition;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
     private bool pointerInside, focusInside, controlsShown = true, captionShown = true, closed, enlarged;
@@ -36,7 +37,10 @@ public sealed partial class MainWindow : Window
             presenter.IsResizable = true; presenter.IsMaximizable = false;
         }
         WindowSizing.Apply(this, 420, 420, 260, 260);
-        squareSizing = WindowSizing.FixedSquare(this, IsInteractive, NativeHoverChanged);
+        squareSizing = WindowSizing.FixedSquare(this, NativeHoverChanged);
+        transportTransition = new TransportTransition(MiniTransport);
+        RootGrid.Loaded += (_, _) => UpdateInputRegions();
+        RootGrid.LayoutUpdated += Root_LayoutUpdated;
         WindowSizing.ResizeContent(this, 420, 420);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         AppWindow.Closing += (_, args) =>
@@ -70,7 +74,8 @@ public sealed partial class MainWindow : Window
             closed = true; model.Changed -= Render;
             miniBackdrop.Changed -= Render; loadingBackdrop.Changed -= Render;
             miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
-            hideTimer.Stop(); coverTimer.Stop(); squareSizing.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose();
+            RootGrid.LayoutUpdated -= Root_LayoutUpdated;
+            hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); squareSizing.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose();
         };
         Render(); ScheduleHide();
     }
@@ -98,9 +103,9 @@ public sealed partial class MainWindow : Window
         bool effects = miniBackdrop.SetArtwork(model.ArtworkBytes);
         loadingBackdrop.SetArtwork(model.ArtworkLoading ? model.ArtworkBytes : null);
         Brush solid = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
-        MiniControls.Background = effects ? null : solid;
-        MiniRoot.Background = effects ? new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 21, 33, 54)) : solid;
-        MiniRoot.RequestedTheme = effects ? ElementTheme.Dark : ElementTheme.Default;
+        MiniControls.Background = effects ? null : new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
+        MiniRoot.Background = new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
+        MiniRoot.RequestedTheme = ElementTheme.Dark;
         foreach (var button in new[] { MinimizeButton, ZoomButton, CloseButton, PinButton })
             button.Background = effects ? new SolidColorBrush(global::Windows.UI.Color.FromArgb(100, 20, 20, 20)) : solid;
         MiniShade.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
@@ -115,7 +120,7 @@ public sealed partial class MainWindow : Window
         PinIcon.Opacity = preferences.Pinned ? 1 : 0.6;
         PinButton.Visibility = preferences.ShowPinButton ? Visibility.Visible : Visibility.Collapsed;
         if (AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsAlwaysOnTop = preferences.Pinned;
-        MiniTransport.Visibility = preferences.ShowTransport && !model.MigrationRequired ? Visibility.Visible : Visibility.Collapsed;
+        transportTransition.SetVisible(preferences.ShowTransport && !model.MigrationRequired, Backdrop.AnimationsEnabled);
         AutomationProperties.SetName(MiniCover, L.Text("专辑封面"));
         AutomationProperties.SetName(MiniProgress, L.Text("播放进度，只读"));
         bool progress = state.HasMedia && state.DurationMs is > 0 && state.PositionMs != null;
@@ -132,7 +137,7 @@ public sealed partial class MainWindow : Window
         MiniStatus.Visibility = MiniStatus.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (preferences.AlwaysShowControls || WindowSizing.ScreenReaderActive || focusInside || error.Length > 0 || model.MigrationRequired) ShowControls(true);
         else if (!pointerInside) ScheduleHide();
-        ShowCaption(pointerInside); UpdateBlurCoverage();
+        ShowCaption(pointerInside); UpdateBlurCoverage(); UpdateInputRegions();
     }
     private static void Label(Button button, string label)
     { ToolTipService.SetToolTip(button, label); AutomationProperties.SetName(button, label); }
@@ -146,8 +151,9 @@ public sealed partial class MainWindow : Window
         lastArtwork = model.Artwork;
         if (animate) coverTimer.Start(); else MiniPreviousCover.Source = null;
     }
-    private void Root_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateBlurCoverage();
-    private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateBlurCoverage();
+    private void Root_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); UpdateInputRegions(); }
+    private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); UpdateInputRegions(); }
+    private void Root_LayoutUpdated(object? sender, object e) => UpdateInputRegions();
     private void UpdateBlurCoverage() => miniBackdrop?.SetCoverage(RootGrid.ActualHeight > 0 ? Math.Clamp(MiniControls.ActualHeight * 1.35 / RootGrid.ActualHeight, .1, 1) : .65);
     private void Root_PointerEntered(object sender, PointerRoutedEventArgs e) { pointerInside = true; hideTimer?.Stop(); ShowControls(true); ShowCaption(true); }
     private void Root_PointerExited(object sender, PointerRoutedEventArgs e)
@@ -156,19 +162,25 @@ public sealed partial class MainWindow : Window
         if (point.X >= 0 && point.Y >= 0 && point.X < RootGrid.ActualWidth && point.Y < RootGrid.ActualHeight) return;
         pointerInside = false; ShowCaption(false); ScheduleHide();
     }
-    private bool IsInteractive(double x, double y)
+    private void UpdateInputRegions()
     {
-        if (RootGrid.XamlRoot == null) return true;
-        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(new global::Windows.Foundation.Point(x, y), RootGrid))
+        if (closed || squareSizing == null || RootGrid.XamlRoot == null) return;
+        double scale = RootGrid.XamlRoot.RasterizationScale;
+        var rectangles = new List<global::Windows.Graphics.RectInt32>();
+        void Add(FrameworkElement element)
         {
-            DependencyObject? target = element;
-            while (target != null && target != RootGrid)
-            {
-                if (target is Control { IsHitTestVisible: true } control && control is ButtonBase or Slider or TextBox) return true;
-                target = VisualTreeHelper.GetParent(target);
-            }
+            if (element.Visibility != Visibility.Visible || element.ActualWidth <= 0 || element.ActualHeight <= 0) return;
+            var bounds = element.TransformToVisual(RootGrid).TransformBounds(new global::Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            int x = (int)Math.Floor(bounds.Left * scale), y = (int)Math.Floor(bounds.Top * scale);
+            rectangles.Add(new(x, y, (int)Math.Ceiling(bounds.Right * scale) - x, (int)Math.Ceiling(bounds.Bottom * scale) - y));
         }
-        return false;
+        if (captionShown) { Add(MinimizeButton); Add(ZoomButton); Add(CloseButton); Add(PinButton); }
+        if (controlsShown)
+        {
+            if (MiniTransport.Visibility == Visibility.Visible && MiniTransport.ActualHeight > 0) { Add(MiniPreviousButton); Add(MiniPlayButton); Add(MiniNextButton); }
+            Add(MigrationButton);
+        }
+        squareSizing.UpdateInputRegions(rectangles.ToArray());
     }
     private void NativeHoverChanged(bool inside)
     {
@@ -203,6 +215,7 @@ public sealed partial class MainWindow : Window
         controlsShown = visible;
         foreach (var element in new FrameworkElement[] { MiniControls, MiniBackdropLayer, MiniShade })
         { Fade(element, visible ? 0 : 1, visible ? 1 : 0, Backdrop.AnimationsEnabled ? visible ? .25 : .65 : 0); element.IsHitTestVisible = visible && element == MiniControls; }
+        UpdateInputRegions();
     }
     private void ShowCaption(bool visible)
     {
@@ -212,6 +225,7 @@ public sealed partial class MainWindow : Window
         captionShown = visible;
         Fade(MiniActions, visible ? 0 : 1, visible ? 1 : 0, Backdrop.AnimationsEnabled ? visible ? .2 : .35 : 0);
         MiniActions.IsHitTestVisible = visible;
+        UpdateInputRegions();
     }
     private static void Fade(FrameworkElement element, double from, double to, double seconds)
     {

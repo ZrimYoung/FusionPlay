@@ -39,6 +39,30 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--window-input-check"))
+        {
+            // Hidden, isolated input-registration check: no receiver, shell-media
+            // registration, single-instance notification or visible activation.
+            try
+            {
+                string thumbnailReport = Path.Combine(AppContext.BaseDirectory, "thumbnail-check.json");
+                try
+                {
+                    var thumbnail = await SystemMedia.CheckThumbnailAsync(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.png")));
+                    File.WriteAllText(thumbnailReport, System.Text.Json.JsonSerializer.Serialize(new
+                    { status = "passed", width = thumbnail.Width, height = thumbnail.Height, system_media_session_created = false }));
+                }
+                catch (Exception error)
+                {
+                    File.WriteAllText(thumbnailReport, System.Text.Json.JsonSerializer.Serialize(new
+                    { status = "failed", exception_type = error.GetType().Name, hresult = error.HResult.ToString("X8"), system_media_session_created = false }));
+                }
+                await WindowInputCheck.Run(Path.Combine(AppContext.BaseDirectory, "window-input-check.json"));
+            }
+            catch (Exception error) { StartupRecord("window_input_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         try { await LaunchAsync(); }
         catch (Exception e)
         {
@@ -57,6 +81,8 @@ public partial class App : Application
         StartupRecord("launching");
         instance = new SingleInstance();
         if (!instance.IsPrimary) { await instance.NotifyPrimaryAsync(); instance.Dispose(); Exit(); return; }
+        try { AppIdentity.Initialize(); }
+        catch (Exception error) { StartupRecord("app_identity_failed", error); }
         controller = new ReceiverController(Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread());
         StartupRecord("creating_player");
         player = new MainWindow(controller, OpenSettings);
@@ -76,7 +102,7 @@ public partial class App : Application
             TogglePanel = TogglePanel, Suspend = () => { panel?.HidePanel(); media?.Clear(); controller.Suspend(); },
             Resume = () => controller.Resume(), AppearanceChanged = () => player.RefreshAppearance()
         };
-        try { media = new SystemMedia(hwnd, command => controller.DispatchControl(command)); }
+        try { media = new SystemMedia(hwnd, command => controller.DispatchControl(command), controller.Store.EventDiagnostic); }
         catch (Exception) { controller.Store.EventDiagnostic("system_media_initialization_failed"); }
         controller.Changed += () =>
         {

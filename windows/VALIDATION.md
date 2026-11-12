@@ -2,7 +2,16 @@
 
 状态日期：2026-11-13。分支：feat/windows-receiver；本轮通过 faaba87 合入远程主线 e864dd757bb58d8dcb3bde04ef2999ab9f73042a。当前为测试版，尚未完成全屋同步验收。
 
-## 0.2.0-preview2 修正（2026-11-13）
+## 0.2.0-preview3 输入路由及媒体卡片（2026-11-13）
+
+- 用户在 preview2 反馈窗口无法拖动或缩放。顶层 HWND 的命中结果没有解决 WinUI 内容输入路由；本版改用 InputNonClientPointerSource 注册 Caption、四边框及控件 Passthrough。控件位置按 XamlRoot.RasterizationScale 换算成物理像素，布局及显隐变化时同步更新。
+- 首次隐藏运行检查发现缩小后区域仍为旧尺寸，已将区域刷新延后到客户区更新完成。再次检查通过：150% 缩放下，420/360/520 DIP 分别得到 630/540/780 像素正方形；每个区域均有实际 SDK 登记、互不重叠、没有空缺，控件穿透区域精确匹配。全程窗口隐藏、前台焦点不变、未创建接收器。该检查验证真实 API 登记及隐藏缩放，不代替实际鼠标交互。
+- 深黑底部遮罩保留渐进模糊；播放按钮开关增加 220 ms 淡入淡出及高度收展，尊重系统关闭动画偏好。正常发送/手机确认提示移除，失败信息保留。
+- 上一曲/下一曲使用同一图形的镜像坐标，每个 PathIcon 独立持有 Geometry；按钮清零内边距，避免末端竖线被裁切。共享 Geometry 的限制见 [WinUI 官方问题记录](https://github.com/microsoft/microsoft-ui-xaml/issues/827)。
+- 启动窗口前设置稳定 AUMID，并登记本用户的 FusionPlay 名称与图标；系统媒体使用保留生命周期的原生内存缩略图及真实时长/位置，不启用定位。512 像素 PNG 编码、原生引用重开与像素解码后台检查通过，未创建系统媒体会话。参考 [AUMID](https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_core-setcurrentprocessexplicitappusermodelid)、[SMTC 元数据与时间线](https://learn.microsoft.com/en-us/windows/apps/develop/media-playback/system-media-transport-controls)。
+- 后台构建 0 警告/0 错误，托管及真实原生接口 21 项回归通过。用户继续使用电脑，本版未切换当前运行实例；拖动/缩放手感、按钮动画、系统卡片名称/封面/进度仍需新进程实播验收。远程 CI 保持关闭。
+
+## 0.2.0-preview2 修正（2026-11-13，历史记录）
 
 - 按用户要求只保留 1:1 封面布局；无独立标题栏，窗口按钮置于内容内部并随鼠标进入显示。设置入口位于托盘面板及 Ctrl+,，播放器内移除设置按钮。单击托盘面板按实际托盘图标所在屏幕定位、再次单击或点击外部关闭。
 - 应用图标改为透明四角的圆角矩形；托盘待机/播放/暂停均为透明底白色加粗图形，按 DPI 渲染并提高抗锯齿采样。播放控制改为原生实心矢量图形。

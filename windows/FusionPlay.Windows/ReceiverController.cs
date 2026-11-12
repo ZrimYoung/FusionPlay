@@ -221,13 +221,13 @@ public sealed class ReceiverController : IAsyncDisposable
     public async Task ControlAsync(PlaybackCommand command)
     {
         if (!CanControl || disposed) return;
-        ControlBusy = true; ControlMessage = "正在发送到手机…"; Notify();
+        ControlBusy = true; ControlMessage = ""; Notify();
         long request = Interlocked.Read(ref generation);
         try
         {
             var outcome = await Background(() => native!.Control(command));
             if (request != Interlocked.Read(ref generation) || disposed) return;
-            ControlMessage = outcome.Confirmed ? "手机已确认" : "指令已发送，手机尚未确认";
+            ControlMessage = outcome.Dispatched || outcome.Confirmed ? "" : L.Text("播放控制未发送，请重试。", "Playback command was not sent. Try again.");
         }
         catch (Exception e) { if (!disposed) ControlMessage = "播放控制失败：" + Friendly(e); }
         finally { ControlBusy = false; if (!disposed) Notify(); }
