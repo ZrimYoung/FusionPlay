@@ -30,7 +30,7 @@ struct FusionPlayApp: App {
             PlayerWindowContent(model: model, delegate: delegate)
         }.defaultSize(width: 760, height: 400)
           .windowStyle(.hiddenTitleBar)
-          .windowResizability(.contentSize)
+          .windowResizability(.contentMinSize)
         MenuBarExtra {
             ReceiverPanel(model: model)
         } label: {
@@ -48,12 +48,21 @@ private struct PlayerWindowContent: View {
     let delegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        PlayerView(model: model).onAppear {
+        PlayerView(model: model).background(PlayerWindowBehavior()).onAppear {
             // Keep SwiftUI responsible for recreating a closed player window.
             delegate.showPlayer = {
                 openWindow(id: "player")
                 NSApp.activate(ignoringOtherApps: true)
             }
+        }
+    }
+}
+
+private struct PlayerWindowBehavior: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            view.window?.isMovableByWindowBackground = true
         }
     }
 }
@@ -150,6 +159,9 @@ struct PlaybackControls: View {
 struct PlayerView: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
+    @State private var hovering = false
+    @FocusState private var keyboardFocused: Bool
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
         if let title = model.snapshot?.title, !title.isEmpty { return title }
@@ -166,8 +178,20 @@ struct PlayerView: View {
         return String(format: "%llu:%02llu", seconds / 60, seconds % 60)
     }
     var body: some View {
-        HStack(spacing: 36) {
-            cover
+        GeometryReader { geometry in
+            if geometry.size.width >= 600 && geometry.size.height >= 360 {
+                expanded(size: geometry.size)
+            } else {
+                mini(size: geometry.size)
+            }
+        }.frame(minWidth: 260, minHeight: 260)
+            .foregroundStyle(.white)
+            .background { backdrop.ignoresSafeArea() }
+            .environment(\.colorScheme, .dark)
+    }
+    private func expanded(size: CGSize) -> some View {
+        HStack(spacing: 28) {
+            cover(side: min(360, size.height - 80, size.width * 0.37))
             VStack(alignment: .leading, spacing: 0) {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 9) {
@@ -203,10 +227,42 @@ struct PlayerView: View {
                 Spacer(minLength: 0)
             }.frame(maxWidth: .infinity)
         }.padding(.horizontal, 34).padding(.top, 40).padding(.bottom, 28)
-            .frame(width: 760, height: 400)
-            .foregroundStyle(.white)
-            .background { backdrop.ignoresSafeArea() }
-            .environment(\.colorScheme, .dark)
+            .frame(width: size.width, height: size.height)
+    }
+    private func mini(size: CGSize) -> some View {
+        let showControls = hovering || keyboardFocused || voiceOver
+        return ZStack(alignment: .bottom) {
+            if let artwork = model.artwork {
+                Image(nsImage: artwork).resizable().scaledToFill()
+                    .frame(width: size.width, height: size.height).clipped()
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: "music.note").font(.system(size: 64, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+                .opacity(showControls ? 1 : 0).allowsHitTesting(false)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
+                if !artist.isEmpty {
+                    Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                }
+                HStack {
+                    Spacer(minLength: 0)
+                    transport("backward.end.fill", label: "上一曲") { model.control(.previous) }
+                    transport(playing ? "pause.fill" : "play.fill", label: playing ? "暂停" : "播放") { model.togglePlayback() }
+                    transport("forward.end.fill", label: "下一曲") { model.control(.next) }
+                    Spacer(minLength: 0)
+                }
+            }.padding(16).padding(.top, 28)
+                .opacity(showControls ? 1 : 0)
+                .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+        }.frame(width: size.width, height: size.height).clipped()
+            .contentShape(Rectangle()).onHover { hovering = $0 }
+            .focusable().focused($keyboardFocused)
+            .accessibilityLabel("迷你播放器，\(title)")
+            .animation(.easeInOut(duration: 0.18), value: showControls)
     }
     private var backdrop: some View {
         GeometryReader { geometry in
@@ -226,7 +282,7 @@ struct PlayerView: View {
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
         }.accessibilityHidden(true)
     }
-    private var cover: some View {
+    private func cover(side: CGFloat) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
             if let artwork = model.artwork {
@@ -235,7 +291,7 @@ struct PlayerView: View {
                 Image(systemName: "music.note").font(.system(size: 56, weight: .ultraLight))
                     .foregroundStyle(.white.opacity(0.32))
             }
-        }.frame(width: 280, height: 280).clipShape(RoundedRectangle(cornerRadius: 12))
+        }.frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.28), radius: 20, y: 12)
             .accessibilityLabel(model.artwork == nil ? "暂无专辑封面" : "专辑封面")

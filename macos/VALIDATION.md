@@ -122,3 +122,5 @@
 
 - User confirmed keyboard play/pause/previous/next and system control-center media behavior normal. Missing menu-bar entries were caused by Thaw hiding them; user changed Thaw settings and confirmed visibility normal. Receiver currently normal.
 - Compact menu revision adds a 56 pt cover with title/artist, a 190 pt volume row, and three footer actions (player/settings/quit). Receiver stop and logs remain available in settings; routine command acknowledgements are omitted but failures remain visible.
+
+- Resizable player/hover mini mode: native build and strict signature checks passed. Minimum 260 × 260, expanded layout from 600 × 360; physical resize/hover appearance awaits user confirmation.
