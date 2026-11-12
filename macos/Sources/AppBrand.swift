@@ -56,3 +56,25 @@ enum AppBrand {
         NSApp.dockTile.display()
     }
 }
+
+// Vector artwork for in-app presentation; independent of the Dock's raster asset.
+struct AboutBrandIcon: View {
+    var body: some View {
+        GeometryReader { geometry in
+            let side = min(geometry.size.width, geometry.size.height)
+            ZStack {
+                RoundedRectangle(cornerRadius: side * 0.225, style: .continuous)
+                    .fill(LinearGradient(colors: [.white, Color(white: 0.96)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                DoubleRingMark()
+                    .stroke(LinearGradient(stops: [
+                        .init(color: Color(red: 0.22, green: 0.55, blue: 1), location: 0),
+                        .init(color: Color(red: 0.04, green: 0.32, blue: 1), location: 0.45),
+                        .init(color: Color(red: 0.04, green: 0.22, blue: 0.9), location: 1)
+                    ], startPoint: .topLeading, endPoint: .bottomTrailing),
+                            style: StrokeStyle(lineWidth: side * 0.038, lineCap: .round))
+                    .frame(width: side * 0.65, height: side * 0.49)
+            }.frame(width: side, height: side)
+        }
+    }
+}

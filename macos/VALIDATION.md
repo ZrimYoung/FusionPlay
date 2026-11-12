@@ -152,3 +152,17 @@
 - User accepted the installed progressive-blur appearance and authorized integration into main. Blur blends 6/14/26/40 pt radii across adjacent bands; coverage follows 1.35 times measured controls height. Dimming remains unchanged from the preceding installed revision.
 - Larger track title, single-line artist - album metadata (omitting empty fields), tighter progress/transport spacing, and a small angled pin icon complete this UI revision.
 - Native build, strict signature verification, and synthetic renders at 260/440 pt passed before installation. UI acceptance does not establish new audio, sleep/wake, or output-switching results.
+
+## Settings pages and Mac sync adjustment (2026-11-12)
+
+- Receiver / Appearance / Advanced / About pages; immediate Chinese/English UI preference, persistent playback-control visibility (default on), and collapsed diagnostics. Sync adjustment remains visible in Advanced.
+- Mac-only signed adjustment (-200..200 ms) shifts presentation scheduling without falsifying measured hardware latency. Untimed playback retains the existing minimum safety queue. Live changes reuse the fade/realign path. Zero leaves the prior scheduling unchanged; Windows calibration and Android policy remain separate.
+- Host tests: 12 passed, 2 network tests ignored. SDK tests: 107 passed, 1 ignored. Android arm64 SDK compilation passed. Native build and strict signature passed. Isolated real Swift/Rust bridge check passed default/range/persistence/reset and runtime Chinese/English resource switching.
+- UI layout, audible offsets, and switching settings during actual phone casting still require user acceptance; no new long-run or objective synchronization claim.
+- The earlier artwork-gap fix retains the preceding cover for up to two seconds while metadata arrives, cancels stale expiry after replacement, and clears on sustained absence/disconnect. Isolated checks passed. The mini pin action now appears at top right.
+
+- Hover/preferences follow-up: always-visible controls, persistent pin state, and pin-button visibility default off. Settings and the mini pin button share the same stored value. Pointer exit delays hiding 0.4 s, then fades over 0.65 s; SwiftUI cancels the pending task on re-entry/disappearance. Build, strict signature, and both language resource validations passed. Visual timing and settings interaction await user acceptance.
+
+- Sync control polish: continuous slider removes 401 native tick marks; numeric field accepts integers within -200..200, while minus/plus changes by 10 ms with bounded endpoints. The combined control was rendered at settings width to inspect layout. About artwork now uses vector SwiftUI paths, inspected at 2x scale; app build/signature passed. Live control input and audible response still require acceptance.
+
+- User feedback on 2026-11-12: accepted the installed settings/control/icon revision and requested commit/push to main. This records UI acceptance; it does not add objective synchronization measurements or close the remaining physical recovery checks.

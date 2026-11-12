@@ -19,6 +19,7 @@ xcrun swiftc -swift-version 5 -O -parse-as-library -target arm64-apple-macosx14.
   -framework SwiftUI -framework AppKit -framework MediaPlayer \
   "$GENERATED/FusionPlayBridge.swift" "$REPO"/macos/Sources/*.swift \
   -o "$APP/Contents/MacOS/FusionPlayMac"
+cp -R "$REPO/macos/Resources/"*.lproj "$APP/Contents/Resources/"
 cp "$REPO/LICENSE" "$APP/Contents/Resources/LICENSE"
 bash "$REPO/macos/scripts/build-icon.sh" "$APP/Contents/Resources/AppIcon.icns"
 codesign --force --sign - "$APP/Contents/Frameworks/libfusionplay_host.dylib"

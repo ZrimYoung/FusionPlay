@@ -26,6 +26,9 @@ final class ReceiverModel: ObservableObject {
     @Published var outputs: [AudioDevice] = []
     @Published var error = ""
     @Published var busy = false
+    @Published var syncAdjustment = 0.0
+    @Published var syncAdjustmentBusy = false
+    @Published var syncAdjustmentError = ""
     @Published var initialized = false
     @Published var wantsReceiving = false
     @Published var controlBusy = false
@@ -56,11 +59,13 @@ final class ReceiverModel: ObservableObject {
             do {
                 let receiver = try Receiver(dataDirectory: data)
                 let settings = receiver.settings()
+                let syncAdjustment = try receiver.syncAdjustment()
                 let networks = try networkInterfaces()
                 let outputs = try audioDevices()
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !self.terminating else { return }
                     self.receiver = receiver
+                    self.syncAdjustment = Double(syncAdjustment)
                     self.name = settings.name; self.interfaceName = settings.interfaceName
                     self.outputDevice = settings.outputDevice
                     self.volumeInteraction.observe(Double(settings.volume))
@@ -145,8 +150,21 @@ final class ReceiverModel: ObservableObject {
         let source = state.artworkUrl
         let kind = ArtworkLoader.kind(of: source)
         guard kind != "missing" else {
-            artwork = nil; artworkStatus = "手机未提供封面"
+            artworkStatus = "等待手机提供封面"
+            artworkLoading = artwork != nil
             recordArtwork(kind: kind, result: "source_missing", attempt: 0)
+            // Track metadata and artwork arrive separately. Keep the old cover through
+            // the brief empty update, but do not retain it forever for coverless tracks.
+            artworkTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                catch { return }
+                guard !Task.isCancelled, let self, self.artworkKey == key, !self.terminating else { return }
+                self.artwork = nil; self.artworkLoading = false
+                self.artworkStatus = "手机未提供封面"
+                if let state = self.snapshot, !self.busy, !self.sleeping {
+                    self.systemMedia.update(state, busy: self.controlBusy, artwork: nil, force: true)
+                }
+            }
             return
         }
         artworkLoading = true; artworkStatus = "正在加载封面"
@@ -204,6 +222,25 @@ final class ReceiverModel: ObservableObject {
             guard let handle = try? FileHandle(forWritingTo: path) else { return }
             defer { try? handle.close() }
             _ = try? handle.seekToEnd(); try? handle.write(contentsOf: data)
+        }
+    }
+    func saveSyncAdjustment() {
+        guard let receiver, initialized, !syncAdjustmentBusy, !terminating else { return }
+        let value = Int32(syncAdjustment.rounded())
+        syncAdjustmentBusy = true; syncAdjustmentError = ""
+        backend.async { [weak self] in
+            do {
+                try receiver.setSyncAdjustment(millis: value)
+                DispatchQueue.main.async { [weak self] in self?.syncAdjustmentBusy = false }
+            } catch {
+                let stored = try? receiver.syncAdjustment()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if let stored { self.syncAdjustment = Double(stored) }
+                    self.syncAdjustmentBusy = false
+                    self.syncAdjustmentError = String(describing: error)
+                }
+            }
         }
     }
     func start() {
