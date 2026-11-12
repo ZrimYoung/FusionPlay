@@ -35,7 +35,10 @@ internal static class WindowSizing
     [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(nint hwnd, SubclassProc procedure, nuint id);
     [DllImport("comctl32.dll")] private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wparam, nint lparam);
     public static bool ScreenReaderActive => SystemParametersInfo(0x46, 0, out int active, 0) && active != 0;
+    public static bool IsCompactContent(double widthDips, double heightDips) => widthDips < 600 || heightDips < 360;
     private static double Scale(nint hwnd) => Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+    private static bool IsCompact(nint hwnd, int width, int height)
+        => IsCompactContent(width / Scale(hwnd), height / Scale(hwnd));
     private static int Width(Rect rect) => rect.Right - rect.Left;
     private static int Height(Rect rect) => rect.Bottom - rect.Top;
     private static (int Width, int Height) Frame(nint hwnd)
@@ -96,6 +99,8 @@ internal static class WindowSizing
             window.AppWindow.Resize(new SizeInt32(Math.Min(area.Width, (int)Math.Ceiling(width * scale) + frame.Width), Math.Min(area.Height, (int)Math.Ceiling(height * scale) + frame.Height)));
         }
     }
+    // Existing callers retain this API. Only compact content is constrained to
+    // a square; the expanded player remains freely resizable in both axes.
     public static ISquareWindow FixedSquare(Window window, Action<bool> hoverChanged)
         => new SquareConstraint(window, hoverChanged);
     private sealed class SquareConstraint : ISquareWindow
@@ -146,12 +151,18 @@ internal static class WindowSizing
                 // WINDOWPOS correction, position clamping, or queued resize runs here.
                 var next = Marshal.PtrToStructure<Rect>(pointer); var frame = Frame(handle);
                 int width = Width(next) - frame.Width, height = Height(next) - frame.Height;
+                if (!IsCompact(handle, width, height)) return DefSubclassProc(handle, message, argument, pointer);
                 int startWidth = resizeStartWidth > 0 ? resizeStartWidth : Width(client);
                 int startHeight = resizeStartHeight > 0 ? resizeStartHeight : Height(client);
                 // Compare against the gesture's original size. Comparing with the
                 // last constrained square alternates the dominant corner axis and
                 // makes a steadily moving pointer repeatedly grow/shrink the window.
                 int requested = argument is 1 or 2 ? width : argument is 3 or 6 ? height : Math.Abs(width - startWidth) >= Math.Abs(height - startHeight) ? width : height;
+                // A corner shrink from the expanded layout can cross the height
+                // threshold while the dominant width is still >=600. Select the
+                // smaller extent then, so entering compact mode cannot bounce
+                // immediately back to an expanded square.
+                if (!IsCompact(handle, startWidth, startHeight) && !IsCompact(handle, requested, requested)) requested = Math.Min(width, height);
                 int side = SquareSide(handle, next, requested, frame);
                 if (argument is 1 or 4 or 7) next.Left = next.Right - side - frame.Width; else next.Right = next.Left + side + frame.Width;
                 if (argument is 3 or 4 or 5) next.Top = next.Bottom - side - frame.Height; else next.Bottom = next.Top + side + frame.Height;
@@ -252,7 +263,8 @@ internal static class WindowSizing
         private void QueueSettlement(bool force = false)
         {
             if (disposed || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
-            if (!force && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client) && Width(client) == Height(client)) return;
+            if (!force && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
+                && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client))) return;
             settlementQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
             {
@@ -265,6 +277,7 @@ internal static class WindowSizing
                     int minimum = Math.Min((int)Math.Ceiling(260 * Scale(hwnd)), Math.Max(1, Math.Min(Width(work) - frame.Width, Height(work) - frame.Height)));
                     presenter.PreferredMinimumWidth = minimum + frame.Width; presenter.PreferredMinimumHeight = minimum + frame.Height;
                 }
+                if (!IsCompact(hwnd, Width(client), Height(client))) return;
                 int side = SquareSide(hwnd, outer, Math.Min(Width(client), Height(client)), frame);
                 int width = side + frame.Width, height = side + frame.Height;
                 if (width == Width(outer) && height == Height(outer)) return;

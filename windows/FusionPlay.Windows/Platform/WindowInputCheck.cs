@@ -15,9 +15,10 @@ internal static class WindowInputCheck
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out NativeRect rect);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private sealed class CheckFailure(string code, object? details = null) : Exception { public string Code { get; } = code; public object? Details { get; } = details; }
-    private sealed record Sample(double RequestedDips, int WidthPixels, int HeightPixels, Dictionary<string, int> RegionCounts, long CoveredPixels);
+    private sealed record Sample(double RequestedWidthDips, double RequestedHeightDips, string Mode, int WidthPixels, int HeightPixels, Dictionary<string, int> RegionCounts, long CoveredPixels);
 
     public static async Task Run(string outputFile)
     {
@@ -67,15 +68,25 @@ internal static class WindowInputCheck
             });
             await Drain(queue!);
             step = "initial_region_registration";
-            await OnUi(queue!, () => samples.Add(Inspect(420)));
+            await OnUi(queue!, () => samples.Add(Inspect(420, 420, compact: true)));
             foreach (double size in new[] { 360.0, 520.0 })
             {
                 step = "hidden_resize";
                 await OnUi(queue!, () => { RequireBackground(); WindowSizing.ResizeContent(window!, size, size); RequireBackground(); });
                 await Drain(queue!);
                 step = "resized_region_registration";
-                await OnUi(queue!, () => samples.Add(Inspect(size)));
+                await OnUi(queue!, () => samples.Add(Inspect(size, size, compact: true)));
             }
+            step = "hidden_expanded_resize";
+            await OnUi(queue!, () => { RequireBackground(); WindowSizing.ResizeContent(window!, 820, 480); RequireBackground(); });
+            await Drain(queue!);
+            step = "expanded_region_registration";
+            await OnUi(queue!, () => samples.Add(Inspect(820, 480, compact: false)));
+            step = "hidden_compact_resize";
+            await OnUi(queue!, () => { RequireBackground(); WindowSizing.ResizeContent(window!, 420, 300); RequireBackground(); });
+            await Drain(queue!);
+            step = "compact_region_registration";
+            await OnUi(queue!, () => samples.Add(Inspect(420, 300, compact: true)));
             Require(samples.Select(sample => sample.WidthPixels).Distinct().Count() >= 2, "insufficient_resize_range");
             status = "passed";
         }
@@ -118,18 +129,32 @@ internal static class WindowInputCheck
                     failure_details = failureDetails,
                     window_remained_hidden = visibilityPreserved, foreground_unchanged = foregroundPreserved,
                     receiver_created = false, samples,
-                    scope = "hidden_sdk_region_registration_and_square_resize; physical_pointer_interaction_not_tested"
+                    scope = "hidden_sdk_region_registration_and_responsive_resize; physical_pointer_interaction_not_tested"
                 }, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { }
         }
 
-        Sample Inspect(double requested)
+        Sample Inspect(double requestedWidth, double requestedHeight, bool compact)
         {
             RequireBackground();
             Require(GetClientRect(hwnd, out var client), "client_bounds_unavailable");
             int width = client.Right - client.Left, height = client.Bottom - client.Top;
-            Require(width > 0 && width == height, "client_aspect_not_square");
+            Require(width > 0 && height > 0, "client_bounds_empty");
+            double scale = Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+            Require(WindowSizing.IsCompactContent(width / scale, height / scale) == compact, "unexpected_responsive_mode");
+            if (compact)
+            {
+                Require(width == height, "compact_client_aspect_not_square");
+                int expected = (int)Math.Ceiling(Math.Min(requestedWidth, requestedHeight) * scale);
+                Require(Math.Abs(width - expected) <= 1, "compact_settlement_changed_requested_extent");
+            }
+            else
+            {
+                Require(width != height, "expanded_client_aspect_was_constrained");
+                Require(Math.Abs(width - Math.Ceiling(requestedWidth * scale)) <= 1 && Math.Abs(height - Math.Ceiling(requestedHeight * scale)) <= 1,
+                    "expanded_client_rectangle_changed");
+            }
             var kinds = new[] { NonClientRegionKind.Caption, NonClientRegionKind.TopBorder, NonClientRegionKind.LeftBorder, NonClientRegionKind.BottomBorder, NonClientRegionKind.RightBorder, NonClientRegionKind.Passthrough };
             var all = new List<RectInt32>(); var counts = new Dictionary<string, int>();
             foreach (var kind in kinds)
@@ -152,7 +177,7 @@ internal static class WindowInputCheck
             long area = all.Sum(rect => (long)rect.Width * rect.Height);
             Require(area == (long)width * height, "sdk_regions_leave_gaps");
             RequireBackground();
-            return new(requested, width, height, counts, area);
+            return new(requestedWidth, requestedHeight, compact ? "compact" : "expanded", width, height, counts, area);
         }
     }
     private static bool Overlaps(RectInt32 a, RectInt32 b)
