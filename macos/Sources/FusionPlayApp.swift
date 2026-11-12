@@ -4,7 +4,7 @@ import SwiftUI
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var showPlayer: (() -> Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        applyDockVisibility(UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true)
         AppBrand.applyDockIcon()
         let duplicates = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
         if duplicates.count > 1 { NSApp.terminate(nil) }
@@ -21,8 +21,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+@MainActor
+private func applyDockVisibility(_ visible: Bool) {
+    let policy: NSApplication.ActivationPolicy = visible ? .regular : .accessory
+    guard NSApp.activationPolicy() != policy else { return }
+    NSApp.setActivationPolicy(policy)
+    if visible { AppBrand.applyDockIcon() }
+}
+
 @main
 struct FusionPlayApp: App {
+    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = ReceiverModel.shared
@@ -34,11 +43,14 @@ struct FusionPlayApp: App {
           .windowStyle(.hiddenTitleBar)
           .windowResizability(.contentMinSize)
           .commands { ReceiverSettingsCommands() }
-        MenuBarExtra {
+        MenuBarExtra(isInserted: $showMenuBarIcon) {
             ReceiverPanel(model: model)
                 .environment(\.locale, Locale(identifier: language))
         } label: {
-            Image(nsImage: AppBrand.menuIcon).accessibilityLabel("FusionPlay")
+            Image(nsImage: AppBrand.menuIcon(for: model.snapshot?.phase == .playing ? .playing :
+                                           model.snapshot?.phase == .paused ? .paused : .idle))
+                .accessibilityLabel("FusionPlay · " + L(model.phaseLabel))
+                .help("FusionPlay · " + L(model.phaseLabel))
         }.menuBarExtraStyle(.window)
         Window(L("FusionPlay 设置"), id: "settings") {
             SettingsPanel(model: model)
@@ -69,8 +81,17 @@ private struct PlayerWindowContent: View {
         PlayerView(model: model).onAppear {
             // Keep SwiftUI responsible for recreating a closed player window.
             delegate.showPlayer = {
-                openWindow(id: "player")
+                let defaults = UserDefaults.standard
+                let dockVisible = defaults.object(forKey: "showDockIcon") as? Bool ?? true
+                let menuVisible = defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true
+                openWindow(id: !dockVisible && !menuVisible ? "settings" : "player")
                 NSApp.activate(ignoringOtherApps: true)
+            }
+            // A cold launch must also offer a way back when both entry icons are hidden.
+            let defaults = UserDefaults.standard
+            if defaults.object(forKey: "showDockIcon") as? Bool == false,
+               defaults.object(forKey: "showMenuBarIcon") as? Bool == false {
+                openWindow(id: "settings")
             }
         }
     }
@@ -78,6 +99,9 @@ private struct PlayerWindowContent: View {
 
 private struct PlayerWindowBehavior: NSViewRepresentable {
     let square: Bool
+    let miniRequest: Int
+    final class Coordinator { var lastMiniRequest = 0 }
+    func makeCoordinator() -> Coordinator { Coordinator() }
     let dimButtons: Bool
     let pinned: Bool
     let duration: Double
@@ -96,6 +120,14 @@ private struct PlayerWindowBehavior: NSViewRepresentable {
                     window.standardWindowButton(kind)?.animator().alphaValue = dimButtons ? 0.22 : 1
                 }
             }
+            if miniRequest > 0 && context.coordinator.lastMiniRequest != miniRequest {
+                context.coordinator.lastMiniRequest = miniRequest
+                let side = min(420, max(260, window.contentLayoutRect.width))
+                window.contentAspectRatio = NSSize(width: 1, height: 1)
+                window.setContentSize(NSSize(width: side, height: side))
+                window.makeKeyAndOrderFront(nil)
+                return
+            }
             let desired = square ? NSSize(width: 1, height: 1) : .zero
             guard window.contentAspectRatio != desired else { return }
             window.contentAspectRatio = desired
@@ -112,56 +144,99 @@ struct ReceiverPanel: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 12) {
-                Group {
-                    if let artwork = model.artwork {
-                        ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
-                    } else {
-                        RoundedRectangle(cornerRadius: 10).fill(.quaternary)
-                            .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
-                    }
-                }.frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .accessibilityLabel(model.artwork == nil ? L("暂无专辑封面") : L("专辑封面"))
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(model.snapshot?.title.isEmpty == false ? model.snapshot!.title : "FusionPlay")
-                        .font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                    Text(model.snapshot?.artist.isEmpty == false ? model.snapshot!.artist : L(model.phaseLabel))
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+        VStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                Button(action: openMiniPlayer) {
+                    Group {
+                        if let artwork = model.artwork {
+                            ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
+                        } else {
+                            RoundedRectangle(cornerRadius: 10).fill(.quaternary)
+                                .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
+                        }
+                    }.frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.plain).help(L("打开迷你播放器"))
+                    .accessibilityLabel(L("打开迷你播放器"))
+                VStack(alignment: .leading, spacing: 6) {
+                    Button(action: openMiniPlayer) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(model.snapshot?.title.isEmpty == false ? model.snapshot!.title : "FusionPlay")
+                                .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                            Text(model.snapshot?.artist.isEmpty == false ? model.snapshot!.artist : L(model.phaseLabel))
+                                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(.plain).help(L("打开迷你播放器"))
+                    PlaybackControls(model: model)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            PlaybackControls(model: model)
-            HStack(spacing: 10) {
-                Image(systemName: "speaker.fill").font(.system(size: 10))
-                Slider(value: $model.volume, in: 0...100) { editing in model.volumeEditingChanged(editing) }
-                    .controlSize(.small).accessibilityLabel(L("接收音量"))
-                    .accessibilityValue("\(Int(model.volume.rounded()))%")
-                Image(systemName: "speaker.wave.3.fill").font(.system(size: 11))
-            }.frame(width: 190).foregroundStyle(.secondary).disabled(!model.initialized)
+            MenuVolumeBar(model: model)
             if !model.error.isEmpty {
                 Text(model.error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             } else if model.controlMessage.hasPrefix("播放控制失败") {
                 Text(model.controlMessage).font(.caption).foregroundStyle(.red)
             }
-            Divider()
-            HStack(spacing: 0) {
-                action("play.rectangle", label: L("正在播放")) {
-                    openWindow(id: "player"); NSApp.activate(ignoringOtherApps: true)
-                }
-                Spacer(minLength: 0)
+            HStack {
                 action("gearshape", label: L("设置")) {
                     openWindow(id: "settings"); NSApp.activate(ignoringOtherApps: true)
                 }
-                Spacer(minLength: 0)
+                Spacer()
                 action("power", label: L("退出 FusionPlay")) { NSApp.terminate(nil) }
             }.foregroundStyle(.secondary)
         }.padding(16).frame(width: 280)
     }
+    private func openMiniPlayer() {
+        model.miniPlayerRequest &+= 1
+        openWindow(id: "player")
+        NSApp.activate(ignoringOtherApps: true)
+    }
     private func action(_ symbol: String, label: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
-            Image(systemName: symbol).font(.system(size: 15, weight: .regular)).frame(width: 32, height: 30)
+            Image(systemName: symbol).font(.system(size: 14, weight: .regular)).frame(width: 28, height: 26)
         }.buttonStyle(MenuActionStyle()).help(label).accessibilityLabel(label)
+    }
+}
+
+private struct MenuVolumeBar: View {
+    @ObservedObject var model: ReceiverModel
+    @State private var dragging = false
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.10))
+                Capsule().fill(Color.primary.opacity(0.45))
+                    .frame(width: geometry.size.width * min(1, max(0, model.volume / 100)))
+            }.frame(height: 3).frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !dragging { dragging = true; model.volumeEditingChanged(true) }
+                        setVolume(value.location.x, width: geometry.size.width)
+                    }
+                    .onEnded { value in
+                        setVolume(value.location.x, width: geometry.size.width)
+                        dragging = false; model.volumeEditingChanged(false)
+                    })
+        }.frame(height: 18).allowsHitTesting(model.initialized)
+            .opacity(model.initialized ? 1 : 0.4)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L("接收音量"))
+            .accessibilityValue("\(Int(model.volume.rounded()))%")
+            .accessibilityAdjustableAction { direction in
+                guard model.initialized else { return }
+                let step: Double
+                switch direction { case .increment: step = 5; case .decrement: step = -5; @unknown default: return }
+                model.volumeEditingChanged(true)
+                model.volume = min(100, max(0, model.volume + step))
+                model.volumeEditingChanged(false)
+            }
+            .help(L("接收音量") + " \(Int(model.volume.rounded()))%")
+            .onDisappear {
+                if dragging { dragging = false; model.volumeEditingChanged(false) }
+            }
+    }
+    private func setVolume(_ x: CGFloat, width: CGFloat) {
+        guard width > 0 else { return }
+        model.volume = min(100, max(0, Double(x / width) * 100))
     }
 }
 
@@ -181,18 +256,16 @@ private struct MenuActionStyle: ButtonStyle {
 struct PlaybackControls: View {
     @ObservedObject var model: ReceiverModel
     var body: some View {
-        HStack(spacing: 26) {
-            Spacer()
-            Button { model.control(.previous) } label: { Image(systemName: "backward.end.fill") }
+        HStack(spacing: 12) {
+            Button { model.control(.previous) } label: { Image(systemName: "backward.end.fill").font(.system(size: 13)).frame(width: 26, height: 26) }
                 .help(L("上一曲")).accessibilityLabel(L("上一曲"))
             Button { model.togglePlayback() } label: {
                 Image(systemName: model.snapshot?.phase == .playing ? "pause.fill" : "play.fill")
-                    .font(.title2).frame(width: 32, height: 32)
+                    .font(.system(size: 16)).frame(width: 28, height: 26)
             }.help(model.snapshot?.phase == .playing ? L("暂停") : L("播放"))
                 .accessibilityLabel(model.snapshot?.phase == .playing ? L("暂停") : L("播放"))
-            Button { model.control(.next) } label: { Image(systemName: "forward.end.fill") }
+            Button { model.control(.next) } label: { Image(systemName: "forward.end.fill").font(.system(size: 13)).frame(width: 26, height: 26) }
                 .help(L("下一曲")).accessibilityLabel(L("下一曲"))
-            Spacer()
         }.buttonStyle(MenuActionStyle()).disabled(!model.canControl)
     }
 }
@@ -240,6 +313,7 @@ struct PlayerView: View {
                 mini(size: geometry.size)
             }
             PlayerWindowBehavior(square: geometry.size.width < 600 || geometry.size.height < 360,
+                                 miniRequest: model.miniPlayerRequest,
                                  dimButtons: (geometry.size.width < 600 || geometry.size.height < 360) && !showMiniControls,
                                  pinned: pinned, duration: reduceMotion ? 0 : (showMiniControls ? 0.25 : 0.65))
                 .frame(width: 0, height: 0)
@@ -503,6 +577,8 @@ struct PlayerTransportStyle: ButtonStyle {
 }
 
 struct SettingsPanel: View {
+    @AppStorage("showDockIcon") private var showDockIcon = true
+    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("playerControlsAlwaysVisible") private var controlsAlwaysVisible = false
     @AppStorage("playerWindowPinned") private var pinned = false
     @AppStorage("playerShowsPinButton") private var showPinButton = false
@@ -547,6 +623,15 @@ struct SettingsPanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Toggle(L("显示播放控制"), isOn: $showPlaybackControls)
                     Text(L("显示上一首、播放/暂停和下一首按钮。")).font(.caption).foregroundStyle(.secondary)
+                }
+                Section(L("应用入口")) {
+                    Toggle(L("显示 Dock 图标"), isOn: $showDockIcon)
+                        .onChange(of: showDockIcon) { _, visible in applyDockVisibility(visible) }
+                    Toggle(L("显示菜单栏图标"), isOn: $showMenuBarIcon)
+                    if !showDockIcon && !showMenuBarIcon {
+                        Text(L("两个入口都隐藏时，再次打开应用可进入设置。"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Section(L("窗口")) {
                     Toggle(L("窗口置顶"), isOn: $pinned)

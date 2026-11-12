@@ -166,3 +166,11 @@
 - Sync control polish: continuous slider removes 401 native tick marks; numeric field accepts integers within -200..200, while minus/plus changes by 10 ms with bounded endpoints. The combined control was rendered at settings width to inspect layout. About artwork now uses vector SwiftUI paths, inspected at 2x scale; app build/signature passed. Live control input and audible response still require acceptance.
 
 - User feedback on 2026-11-12: accepted the installed settings/control/icon revision and requested commit/push to main. This records UI acceptance; it does not add objective synchronization measurements or close the remaining physical recovery checks.
+
+- App entry visibility: independent persistent Dock/menu-bar switches default on. Dock uses the native regular/accessory activation policy; the menu item uses MenuBarExtra insertion binding. Reopening (including cold launch) with both hidden exposes Settings. Build/signature validation completed; live icon visibility and reopening require user confirmation.
+
+- Compact menu update: transport grouped beside artwork with track info; artwork/text buttons request a square mini player; thin thumb-free volume track reuses volume interaction handling. Footer retains Settings on the left and Quit on the right. Idle/playing/paused menu icons share fixed 20x16 vector-template dimensions; distinct-image and Dock-brand checks passed. Menu layout rendered for inspection; native interactions and status changes await user confirmation.
+
+- Status-icon refinement: idle retains double rings; playing and paused use one centered ring with an internal triangle or bars. The ring uses the same radius/scale and stroke as each default ring, with unchanged 20x16 canvas. Three-state rendering inspected and brand regression passed.
+
+- User accepted the installed single-ring playback-state revision and requested publication to main on 2026-11-12. This round includes the compact menu, thin volume track, artwork/title mini-player entry, and independent Dock/menu visibility preferences. Native build/signature, brand regression and volume-interaction regression passed; no new audio synchronization or physical recovery acceptance is implied.

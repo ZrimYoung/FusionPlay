@@ -12,6 +12,7 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 @MainActor
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
+    @Published var miniPlayerRequest = 0
     @Published var snapshot: Snapshot?
     @Published var name = "FusionPlay-Mac"
     @Published var interfaceName = ""

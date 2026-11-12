@@ -18,20 +18,52 @@ struct DoubleRingMark: Shape {
     }
 }
 
+enum MenuPlaybackState { case idle, playing, paused }
+
 enum AppBrand {
-    static let menuIcon: NSImage = {
+    static let menuIcon = makeMenuIcon(.idle)
+    private static let playingMenuIcon = makeMenuIcon(.playing)
+    private static let pausedMenuIcon = makeMenuIcon(.paused)
+    static func menuIcon(for state: MenuPlaybackState) -> NSImage {
+        switch state {
+        case .idle: return menuIcon
+        case .playing: return playingMenuIcon
+        case .paused: return pausedMenuIcon
+        }
+    }
+    private static func makeMenuIcon(_ state: MenuPlaybackState) -> NSImage {
         let image = NSImage(size: NSSize(width: 20, height: 16), flipped: true) { rect in
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            context.addPath(DoubleRingMark().path(in: rect).cgPath)
+            switch state {
+            case .idle:
+                context.addPath(DoubleRingMark().path(in: rect).cgPath)
+            case .playing, .paused:
+                // Match one ring in DoubleRingMark, centered in the same status-item canvas.
+                let radius = 6.5 * min(rect.width / 24, rect.height / 18)
+                context.addEllipse(in: CGRect(x: rect.midX - radius, y: rect.midY - radius,
+                                              width: radius * 2, height: radius * 2))
+            }
             context.setStrokeColor(NSColor.black.cgColor)
             context.setLineWidth(1.5)
             context.setLineCap(.butt)
             context.strokePath()
+            context.setFillColor(NSColor.black.cgColor)
+            switch state {
+            case .idle: break
+            case .playing:
+                context.move(to: CGPoint(x: 8.5, y: 5.5))
+                context.addLine(to: CGPoint(x: 12.2, y: 8))
+                context.addLine(to: CGPoint(x: 8.5, y: 10.5))
+                context.closePath(); context.fillPath()
+            case .paused:
+                context.fill(CGRect(x: 7.8, y: 5.5, width: 1.4, height: 5))
+                context.fill(CGRect(x: 10.8, y: 5.5, width: 1.4, height: 5))
+            }
             return true
         }
         image.isTemplate = true
         return image
-    }()
+    }
 
     static func dockImage(from artwork: NSImage) -> NSImage {
         // applicationIconImage is a complete Dock tile, not an asset-catalog
