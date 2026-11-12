@@ -62,26 +62,24 @@ struct ReceiverPanel: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 11) {
-                DoubleRingMark().stroke(style: StrokeStyle(lineWidth: 2.4, lineCap: .butt))
-                    .foregroundStyle(.tint).frame(width: 32, height: 24).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("FusionPlay").font(.system(size: 14, weight: .semibold))
-                    Text(model.phaseLabel).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Circle().fill(model.snapshot?.phase == .playing ? Color.green :
-                              model.wantsReceiving ? Color.accentColor : Color.secondary.opacity(0.4))
-                    .frame(width: 6, height: 6).accessibilityHidden(true)
-            }
-            if let state = model.snapshot, !state.title.isEmpty {
-                VStack(spacing: 4) {
-                    Text(state.title).font(.system(size: 13, weight: .medium)).lineLimit(2).help(state.title)
-                    if !state.artist.isEmpty {
-                        Text(state.artist).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Group {
+                    if let artwork = model.artwork {
+                        Image(nsImage: artwork).resizable().scaledToFill()
+                    } else {
+                        RoundedRectangle(cornerRadius: 10).fill(.quaternary)
+                            .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
                     }
-                }.frame(maxWidth: .infinity).padding(.top, 2)
+                }.frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel(model.artwork == nil ? "暂无专辑封面" : "专辑封面")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(model.snapshot?.title.isEmpty == false ? model.snapshot!.title : "FusionPlay")
+                        .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                    Text(model.snapshot?.artist.isEmpty == false ? model.snapshot!.artist : model.phaseLabel)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
             PlaybackControls(model: model)
             HStack(spacing: 10) {
@@ -90,20 +88,14 @@ struct ReceiverPanel: View {
                     .controlSize(.small).accessibilityLabel("接收音量")
                     .accessibilityValue("\(Int(model.volume.rounded()))%")
                 Image(systemName: "speaker.wave.3.fill").font(.system(size: 11))
-            }.foregroundStyle(.secondary).disabled(!model.initialized)
+            }.frame(width: 190).foregroundStyle(.secondary).disabled(!model.initialized)
             if !model.error.isEmpty {
                 Text(model.error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-            } else if !model.controlMessage.isEmpty {
-                Text(model.controlMessage).font(.caption).foregroundStyle(.secondary)
+            } else if model.controlMessage.hasPrefix("播放控制失败") {
+                Text(model.controlMessage).font(.caption).foregroundStyle(.red)
             }
             Divider()
             HStack(spacing: 0) {
-                action(model.wantsReceiving ? "stop.circle" : "dot.radiowaves.left.and.right",
-                       label: model.wantsReceiving ? "停止接收" : "启动接收") {
-                    if model.wantsReceiving { model.stop() } else { model.start() }
-                }.foregroundStyle(model.wantsReceiving ? Color.accentColor : Color.secondary)
-                    .disabled(model.busy || !model.initialized)
-                Spacer(minLength: 0)
                 action("play.rectangle", label: "正在播放") {
                     openWindow(id: "player"); NSApp.activate(ignoringOtherApps: true)
                 }
@@ -112,11 +104,9 @@ struct ReceiverPanel: View {
                     openWindow(id: "settings"); NSApp.activate(ignoringOtherApps: true)
                 }
                 Spacer(minLength: 0)
-                action("doc.text", label: "打开日志") { model.openLogs() }
-                Spacer(minLength: 0)
                 action("power", label: "退出 FusionPlay") { NSApp.terminate(nil) }
             }.foregroundStyle(.secondary)
-        }.padding(18).frame(width: 296)
+        }.padding(16).frame(width: 280)
     }
     private func action(_ symbol: String, label: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
@@ -336,9 +326,13 @@ struct SettingsPanel: View {
                 }
                 Button(model.wantsReceiving ? "保存并重新连接" : "保存并启动接收") { model.start() }
                     .disabled(model.busy || !model.initialized)
+                if model.wantsReceiving {
+                    Button("停止接收") { model.stop() }.disabled(model.busy)
+                }
                 Text("重新连接后，可能需要在手机上重新选择此设备。全屋播放请在手机中添加 Mac。").font(.caption).foregroundStyle(.secondary)
             }
             Section("同步诊断") {
+                Button("打开日志") { model.openLogs() }
                 LabeledContent("状态", value: model.phaseLabel)
                 LabeledContent("专辑封面", value: model.artworkStatus)
                 if model.snapshot?.controlsAvailable == true && model.artwork == nil {

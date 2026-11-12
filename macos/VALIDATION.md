@@ -117,3 +117,8 @@
 
 - Validation this round: 9 ordinary host tests passed; the new live port-conflict/missing-output recovery test passed when run serially. Swift bridge passed three start/stop cycles with persisted port checks and native MediaPlayer publication/pause/cleanup. Application build and strict signature verification passed.
 - Existing malformed-control probe did not observe its expected diagnostic in this environment (also failed on a serial retry); it is not marked passed. Concurrent network tests contend for fixed Lyra ports and must run serially.
+
+- User feedback on 2026-11-12: keyboard/media control checks reported normal and receiver currently normal. User subsequently reported a missing menu-bar entry; whether this is FusionPlay's double-ring item or the system Now Playing item remains to be clarified. Menu-bar visibility is not accepted yet. Physical sleep/wake and output switching remain unverified.
+
+- User confirmed keyboard play/pause/previous/next and system control-center media behavior normal. Missing menu-bar entries were caused by Thaw hiding them; user changed Thaw settings and confirmed visibility normal. Receiver currently normal.
+- Compact menu revision adds a 56 pt cover with title/artist, a 190 pt volume row, and three footer actions (player/settings/quit). Receiver stop and logs remain available in settings; routine command acknowledgements are omitted but failures remain visible.
