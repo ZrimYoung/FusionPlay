@@ -31,6 +31,7 @@ struct FusionPlayApp: App {
         }.defaultSize(width: 760, height: 400)
           .windowStyle(.hiddenTitleBar)
           .windowResizability(.contentMinSize)
+          .commands { ReceiverSettingsCommands() }
         MenuBarExtra {
             ReceiverPanel(model: model)
         } label: {
@@ -40,6 +41,18 @@ struct FusionPlayApp: App {
             SettingsPanel(model: model)
         }.defaultSize(width: 480, height: 430)
           .windowResizability(.contentSize)
+    }
+}
+
+private struct ReceiverSettingsCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("设置…") {
+                openWindow(id: "settings")
+                NSApp.activate(ignoringOtherApps: true)
+            }.keyboardShortcut(",", modifiers: .command)
+        }
     }
 }
 
