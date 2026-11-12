@@ -1,0 +1,77 @@
+name: Windows native receiver
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/windows-receiver]
+  pull_request:
+    paths: ['windows/**', 'src/FusionPlay.Host/**', 'src/FusionPlay.MiPlaySdk/**', '.github/workflows/windows-receiver.yml']
+permissions:
+  contents: read
+concurrency:
+  group: windows-receiver-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare isolated tools
+        run: ./windows/scripts/setup-tools.ps1
+      - name: Build native app
+        run: ./windows/scripts/build.ps1
+      - name: Test SDK, host and managed native boundary
+        run: ./windows/scripts/test.ps1
+      - name: Package portable test build
+        run: ./windows/scripts/package.ps1 -SkipNative
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FusionPlay-Windows-x64-test-build
+          path: |
+            artifacts/FusionPlay-Windows-0.1.0-test-x64.zip
+            artifacts/FusionPlay-Windows-0.1.0-test-x64.zip.sha256
+          if-no-files-found: error
+  mac-regression:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Shared SDK and host
+        run: |
+          source macos/scripts/env.sh
+          cargo test --locked --manifest-path src/FusionPlay.MiPlaySdk/Cargo.toml
+          cargo test --locked --manifest-path src/FusionPlay.Host/Cargo.toml
+      - name: Native app and existing contracts
+        run: |
+          bash macos/scripts/build.sh
+          bash macos/scripts/test-bridge.sh
+          bash macos/scripts/test-artwork.sh
+          bash macos/scripts/test-volume.sh
+          bash macos/scripts/test-brand.sh
+          python3 -m unittest discover -s macos/Tests
+  android-sdk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi
+      - name: Check Android shared SDK
+        shell: bash
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'ndk;28.2.13676358'
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.2.13676358"
+          toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$toolchain/aarch64-linux-android21-clang"
+          export CXX_aarch64_linux_android="$toolchain/aarch64-linux-android21-clang++"
+          export AR_aarch64_linux_android="$toolchain/llvm-ar"
+          export CC_armv7_linux_androideabi="$toolchain/armv7a-linux-androideabi21-clang"
+          export CXX_armv7_linux_androideabi="$toolchain/armv7a-linux-androideabi21-clang++"
+          export AR_armv7_linux_androideabi="$toolchain/llvm-ar"
+          cargo check --locked --manifest-path src/FusionPlay.MiPlaySdk/Cargo.toml --target aarch64-linux-android
+          cargo check --locked --manifest-path src/FusionPlay.MiPlaySdk/Cargo.toml --target armv7-linux-androideabi

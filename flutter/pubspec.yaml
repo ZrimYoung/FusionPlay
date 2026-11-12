@@ -1,8 +1,8 @@
 name: fusionplay_android_flutter
 description: FusionPlay Android receiver frontend.
-homepage: https://github.com/rosienosiesie/FusionPlay
-repository: https://github.com/rosienosiesie/FusionPlay
-issue_tracker: https://github.com/rosienosiesie/FusionPlay/issues
+homepage: https://github.com/ZrimYoung/FusionPlay
+repository: https://github.com/ZrimYoung/FusionPlay
+issue_tracker: https://github.com/ZrimYoung/FusionPlay/issues
 publish_to: none
 version: 1.2.4+10204
 

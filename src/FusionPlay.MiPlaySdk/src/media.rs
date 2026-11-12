@@ -34,6 +34,35 @@ use symphonia::default::codecs::AacDecoder;
 
 pub type EventEmitter = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
+/// Signed Mac synchronization adjustment: positive delays local playback.
+#[cfg(target_os = "macos")]
+static MACOS_SYNC_ADJUSTMENT_MS: AtomicI64 = AtomicI64::new(0);
+
+#[cfg(target_os = "macos")]
+pub fn set_macos_sync_adjustment_millis(millis: i32) {
+    MACOS_SYNC_ADJUSTMENT_MS.store(i64::from(millis.clamp(-200, 200)), Ordering::Release);
+}
+
+#[cfg(windows)]
+static WINDOWS_OUTPUT_ADVANCE_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Estimated downstream latency not represented by WASAPI's timestamps.
+/// The Windows host saves this manual adjustment separately for each endpoint.
+#[cfg(windows)]
+pub fn set_windows_output_advance_millis(millis: u32) {
+    WINDOWS_OUTPUT_ADVANCE_MS.store(millis.min(500), Ordering::Release);
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+#[path = "desktop_audio.rs"]
+mod desktop_audio;
+#[cfg(any(windows, target_os = "macos"))]
+use desktop_audio::open_native_audio_output;
+#[cfg(any(windows, target_os = "macos"))]
+type DecoderQueue = Arc<desktop_audio::PcmRing>;
+#[cfg(not(any(windows, target_os = "macos")))]
+type DecoderQueue = Arc<Mutex<PcmQueue>>;
+
 const POSITION_RESUME_SETTLING_WINDOW: StdDuration = StdDuration::from_millis(1_500);
 
 /**
@@ -2031,7 +2060,7 @@ const MIPLAY_OUTPUT_LATENCY_SMOOTHING: f64 = 0.2;
 
 struct AacPlayer {
     decoder: AacDecoder,
-    queue: Arc<Mutex<PcmQueue>>,
+    queue: DecoderQueue,
     _stream: NativeAudioStream,
     adts_framer: AdtsFramer,
     timestamp: i64,
@@ -2044,8 +2073,11 @@ struct AacPlayer {
     events: EventEmitter,
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 type NativeAudioStream = cpal::Stream;
+
+#[cfg(any(windows, target_os = "macos"))]
+type NativeAudioStream = desktop_audio::DesktopAudioStream;
 
 #[cfg(target_os = "android")]
 type NativeAudioStream = AndroidMiPlayAudioOutput;
@@ -2200,6 +2232,12 @@ impl AacPlayer {
                 }));
             }
         }
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            self.queue.push_timed(&self.decoded_samples, media_pts_micros);
+            self.latency_telemetry.update_buffered_frames(self.queue.buffered_frames());
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         if let Ok(mut queue) = self.queue.lock() {
             queue.push_timed(&self.decoded_samples, media_pts_micros);
             self.latency_telemetry
@@ -2295,7 +2333,7 @@ impl AdtsFramer {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 fn open_native_audio_output(
     requested_device: Option<&str>,
     paused: Arc<AtomicBool>,
@@ -2830,7 +2868,7 @@ fn manage_android_miplay_output(
 #[cfg(target_os = "android")]
 const ANDROID_MIPLAY_AUDIO_RESTART_DELAYS_MILLIS: [u64; 6] = [50, 100, 200, 400, 800, 1_600];
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(windows, target_os = "android", target_os = "macos")))]
 fn build_output<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
