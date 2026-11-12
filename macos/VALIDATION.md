@@ -141,3 +141,5 @@
 
 - Resolved host conflicts against main 4f927e1: Mac identity control-port migration/persistence is macOS-only; Windows retains control-port.json and calibration. Both sets of regression tests preserved.
 - Merged host tests: 11 passed, 2 explicit network tests ignored. Shared SDK: 106 passed, 1 ignored. Cleanup/install: 5 passed. Mac app build and strict signature verification passed. Windows/Android binaries not rebuilt on this Mac; prior live acceptance does not cover this combined revision.
+
+- Post-merge UI: added a native floating/normal window-level toggle to the mini overlay. Blur mask is derived from measured controls height plus 24 pt. Native build and strict signature verification passed; installed app updated without changing runtime configuration. Pin and adaptive-blur appearance require user confirmation.

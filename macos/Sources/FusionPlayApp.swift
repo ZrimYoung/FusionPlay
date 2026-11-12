@@ -74,11 +74,13 @@ private struct PlayerWindowContent: View {
 private struct PlayerWindowBehavior: NSViewRepresentable {
     let square: Bool
     let dimButtons: Bool
+    let pinned: Bool
     let duration: Double
     func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async {
             guard let window = view.window else { return }
+            window.level = pinned ? .floating : .normal
             window.isMovableByWindowBackground = true
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
@@ -195,6 +197,8 @@ struct PlayerView: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
+    @State private var pinned = false
+    @State private var miniControlsHeight: CGFloat = 180
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
@@ -220,7 +224,7 @@ struct PlayerView: View {
             }
             PlayerWindowBehavior(square: geometry.size.width < 600 || geometry.size.height < 360,
                                  dimButtons: (geometry.size.width < 600 || geometry.size.height < 360) && !hovering && !voiceOver,
-                                 duration: reduceMotion ? 0 : 0.35)
+                                 pinned: pinned, duration: reduceMotion ? 0 : 0.35)
                 .frame(width: 0, height: 0)
         }.frame(minWidth: 260, minHeight: 260)
             .ignoresSafeArea(.container, edges: .top)
@@ -269,6 +273,8 @@ struct PlayerView: View {
     }
     private func mini(size: CGSize) -> some View {
         let showControls = hovering || voiceOver
+        let fadeStart = max(0, 1 - (miniControlsHeight + 24) / max(size.height, 1))
+        let fadeMiddle = fadeStart + (1 - fadeStart) * 0.55
         return ZStack(alignment: .bottom) {
             if let artwork = model.artwork {
                 Image(nsImage: artwork).resizable().scaledToFill()
@@ -285,19 +291,29 @@ struct PlayerView: View {
                         .frame(width: size.width, height: size.height)
                         .clipped().blur(radius: 24)
                         .mask(LinearGradient(stops: [
-                            .init(color: .clear, location: 0.67),
-                            .init(color: .black.opacity(0.45), location: 0.85),
+                            .init(color: .clear, location: fadeStart),
+                            .init(color: .black.opacity(0.45), location: fadeMiddle),
                             .init(color: .black, location: 1)
                         ], startPoint: .top, endPoint: .bottom))
                 }
                 LinearGradient(stops: [
-                    .init(color: .clear, location: 0.67),
-                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: 0.85),
+                    .init(color: .clear, location: fadeStart),
+                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: fadeMiddle),
                     .init(color: .black.opacity(0.85), location: 1)
                 ], startPoint: .top, endPoint: .bottom)
             }.opacity(showControls ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
-                Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
+                HStack(alignment: .top, spacing: 8) {
+                    Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Button { pinned.toggle() } label: {
+                        Image(systemName: pinned ? "pin.fill" : "pin")
+                            .font(.system(size: 14, weight: .medium)).frame(width: 28, height: 28)
+                    }.buttonStyle(PlayerTransportStyle())
+                        .help(pinned ? "取消置顶" : "置顶窗口")
+                        .accessibilityLabel(pinned ? "取消置顶" : "置顶窗口")
+                        .accessibilityValue(pinned ? "已开启" : "已关闭")
+                }
                 if !artist.isEmpty {
                     Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
                 }
@@ -310,6 +326,10 @@ struct PlayerView: View {
                     Spacer(minLength: 0)
                 }
             }.padding(16).padding(.top, 28)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: MiniControlsHeightKey.self, value: geometry.size.height)
+                })
+                .onPreferenceChange(MiniControlsHeightKey.self) { miniControlsHeight = $0 }
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(showControls).accessibilityHidden(!showControls)
         }.frame(width: size.width, height: size.height).clipped()
@@ -372,6 +392,11 @@ struct PlayerView: View {
         }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
             .opacity(model.canControl ? 0.9 : 0.3).help(label).accessibilityLabel(label)
     }
+}
+
+private struct MiniControlsHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
 // Use native glass when both the SDK and OS support it; keep macOS 14 builds usable.
