@@ -110,7 +110,7 @@ final class ReceiverModel: ObservableObject {
         if !state.controlsAvailable { controlMessage = "" }
         updateArtwork(state)
         if busy || sleeping { systemMedia.clear() }
-        else { systemMedia.update(state, busy: controlBusy, artwork: artwork) }
+        else { systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork) }
         if state.phase == .failed { error = state.message }
     }
     var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
@@ -118,7 +118,7 @@ final class ReceiverModel: ObservableObject {
     func control(_ command: PlaybackCommand) {
         guard let receiver, canControl, !terminating else { return }
         controlBusy = true; controlMessage = "正在发送到手机…"
-        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artwork) }
+        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artworkLoading ? nil : artwork) }
         backend.async { [weak self] in
             do {
                 let outcome = try receiver.control(command: command)
@@ -140,12 +140,12 @@ final class ReceiverModel: ObservableObject {
     private func updateArtwork(_ state: Snapshot) {
         let key = state.controlsAvailable ? "\(state.trackId)|\(state.artworkUrl)" : ""
         guard key != artworkKey else { return }
-        artworkKey = key; artworkTask?.cancel(); artwork = nil; artworkLoading = false
-        guard state.controlsAvailable else { artworkStatus = "尚未连接"; return }
+        artworkKey = key; artworkTask?.cancel(); artworkLoading = false
+        guard state.controlsAvailable else { artwork = nil; artworkStatus = "尚未连接"; return }
         let source = state.artworkUrl
         let kind = ArtworkLoader.kind(of: source)
         guard kind != "missing" else {
-            artworkStatus = "手机未提供封面"
+            artwork = nil; artworkStatus = "手机未提供封面"
             recordArtwork(kind: kind, result: "source_missing", attempt: 0)
             return
         }
@@ -169,7 +169,7 @@ final class ReceiverModel: ObservableObject {
                     self.recordArtwork(kind: kind, result: code, attempt: attempt)
                     let retry = attempt < 3 && (known?.retryable ?? (error is URLError))
                     self.artworkStatus = retry ? "加载失败，正在重试" : "封面加载失败（\(code)）"
-                    if !retry { self.artworkLoading = false; return }
+                    if !retry { self.artwork = nil; self.artworkLoading = false; return }
                     do { try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
                     catch { return }
                 }
@@ -180,7 +180,7 @@ final class ReceiverModel: ObservableObject {
         guard let snapshot, snapshot.controlsAvailable, !artworkLoading else { return }
         artworkKey = "\0"
         updateArtwork(snapshot)
-        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artwork, force: true)
+        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artworkLoading ? nil : artwork, force: true)
     }
     private func recordArtwork(kind: String, result: String, attempt: Int) {
         let directory = root.appendingPathComponent("logs")

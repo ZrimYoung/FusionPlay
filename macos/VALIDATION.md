@@ -143,3 +143,6 @@
 - Merged host tests: 11 passed, 2 explicit network tests ignored. Shared SDK: 106 passed, 1 ignored. Cleanup/install: 5 passed. Mac app build and strict signature verification passed. Windows/Android binaries not rebuilt on this Mac; prior live acceptance does not cover this combined revision.
 
 - Post-merge UI: added a native floating/normal window-level toggle to the mini overlay. Blur mask is derived from measured controls height plus 24 pt. Native build and strict signature verification passed; installed app updated without changing runtime configuration. Pin and adaptive-blur appearance require user confirmation.
+
+- Fixed mini backdrop geometry by attaching the full-cover blur directly behind the measured controls container; removed asynchronous preference-height state and duplicate top padding. Synthetic high-contrast renders at 260/440 pt showed a visible blur aligned above controls.
+- Artwork loading now retains the previous image until replacement succeeds, with a 0.35 s crossfade and blur-to-clear transition. Disconnection/missing source/terminal failure clear stale artwork; system media does not publish old artwork while loading. Build/signature passed and installed app updated. Actual phone track-switch appearance awaits acceptance.

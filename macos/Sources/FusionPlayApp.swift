@@ -110,7 +110,7 @@ struct ReceiverPanel: View {
             HStack(spacing: 12) {
                 Group {
                     if let artwork = model.artwork {
-                        Image(nsImage: artwork).resizable().scaledToFill()
+                        ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
                     } else {
                         RoundedRectangle(cornerRadius: 10).fill(.quaternary)
                             .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
@@ -198,7 +198,6 @@ struct PlayerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     @State private var pinned = false
-    @State private var miniControlsHeight: CGFloat = 180
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
@@ -273,11 +272,9 @@ struct PlayerView: View {
     }
     private func mini(size: CGSize) -> some View {
         let showControls = hovering || voiceOver
-        let fadeStart = max(0, 1 - (miniControlsHeight + 24) / max(size.height, 1))
-        let fadeMiddle = fadeStart + (1 - fadeStart) * 0.55
         return ZStack(alignment: .bottom) {
             if let artwork = model.artwork {
-                Image(nsImage: artwork).resizable().scaledToFill()
+                ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
                     .frame(width: size.width, height: size.height).clipped()
                     .accessibilityHidden(true)
             } else {
@@ -285,23 +282,6 @@ struct PlayerView: View {
                     .foregroundStyle(.white.opacity(0.4))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            ZStack {
-                if !reduceTransparency, let artwork = model.artwork {
-                    Image(nsImage: artwork).resizable().scaledToFill()
-                        .frame(width: size.width, height: size.height)
-                        .clipped().blur(radius: 24)
-                        .mask(LinearGradient(stops: [
-                            .init(color: .clear, location: fadeStart),
-                            .init(color: .black.opacity(0.45), location: fadeMiddle),
-                            .init(color: .black, location: 1)
-                        ], startPoint: .top, endPoint: .bottom))
-                }
-                LinearGradient(stops: [
-                    .init(color: .clear, location: fadeStart),
-                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: fadeMiddle),
-                    .init(color: .black.opacity(0.85), location: 1)
-                ], startPoint: .top, endPoint: .bottom)
-            }.opacity(showControls ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top, spacing: 8) {
                     Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
@@ -325,17 +305,43 @@ struct PlayerView: View {
                     transport("forward.end.fill", label: "下一曲") { model.control(.next) }
                     Spacer(minLength: 0)
                 }
-            }.padding(16).padding(.top, 28)
-                .background(GeometryReader { geometry in
-                    Color.clear.preference(key: MiniControlsHeightKey.self, value: geometry.size.height)
-                })
-                .onPreferenceChange(MiniControlsHeightKey.self) { miniControlsHeight = $0 }
+            }.padding(16)
+                .background {
+                    GeometryReader { geometry in
+                        miniBackdrop(size: size, controlsHeight: geometry.size.height)
+                            .frame(width: size.width, height: size.height)
+                            .offset(y: geometry.size.height - size.height)
+                    }.allowsHitTesting(false).accessibilityHidden(true)
+                }
                 .opacity(showControls ? 1 : 0)
                 .allowsHitTesting(showControls).accessibilityHidden(!showControls)
         }.frame(width: size.width, height: size.height).clipped()
             .contentShape(Rectangle()).onHover { hovering = $0 }
             .accessibilityLabel("迷你播放器，\(title)")
             .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: showControls)
+    }
+    private func miniBackdrop(size: CGSize, controlsHeight: CGFloat) -> some View {
+        // The background uses the same container geometry as the controls.
+        // Its full-cover image is bottom-aligned to preserve artwork coordinates.
+        let fadeEnd = max(0, 1 - (controlsHeight - 16) / max(size.height, 1))
+        let fadeStart = max(0, fadeEnd - 24 / max(size.height, 1))
+        return ZStack {
+            if !reduceTransparency, let artwork = model.artwork {
+                ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
+                    .frame(width: size.width, height: size.height)
+                    .clipped().blur(radius: 24)
+                    .mask(LinearGradient(stops: [
+                        .init(color: .clear, location: fadeStart),
+                        .init(color: .black, location: fadeEnd),
+                        .init(color: .black, location: 1)
+                    ], startPoint: .top, endPoint: .bottom))
+            }
+            LinearGradient(stops: [
+                .init(color: .clear, location: fadeStart),
+                .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: fadeEnd),
+                .init(color: .black.opacity(0.75), location: 1)
+            ], startPoint: .top, endPoint: .bottom)
+        }.frame(width: size.width, height: size.height).clipped()
     }
     private var backdrop: some View {
         GeometryReader { geometry in
@@ -345,7 +351,7 @@ struct PlayerView: View {
                                         Color(red: 0.08, green: 0.10, blue: 0.16)],
                                startPoint: .topLeading, endPoint: .bottomTrailing)
                 if let artwork = model.artwork {
-                    Image(nsImage: artwork).resizable().scaledToFill()
+                    ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .scaleEffect(1.15).blur(radius: 48)
                     Color.black.opacity(colorContrast == .increased ? 0.72 : 0.48)
@@ -359,7 +365,7 @@ struct PlayerView: View {
         ZStack {
             RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
             if let artwork = model.artwork {
-                Image(nsImage: artwork).resizable().scaledToFit()
+                ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fit)
             } else {
                 Image(systemName: "music.note").font(.system(size: 56, weight: .ultraLight))
                     .foregroundStyle(.white.opacity(0.32))
@@ -394,9 +400,20 @@ struct PlayerView: View {
     }
 }
 
-private struct MiniControlsHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+private struct ArtworkSurface: View {
+    let artwork: NSImage
+    let loading: Bool
+    let mode: ContentMode
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        ZStack {
+            Image(nsImage: artwork).resizable().aspectRatio(contentMode: mode)
+                .id(ObjectIdentifier(artwork)).transition(.opacity)
+        }
+        .blur(radius: loading ? 10 : 0)
+        .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: loading)
+        .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: ObjectIdentifier(artwork))
+    }
 }
 
 // Use native glass when both the SDK and OS support it; keep macOS 14 builds usable.
