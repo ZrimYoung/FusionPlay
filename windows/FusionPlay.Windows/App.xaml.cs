@@ -61,7 +61,11 @@ public partial class App : Application
         StartupRecord("creating_player");
         player = new MainWindow(controller, OpenSettings);
         StartupRecord("player_created");
-        player.ClosingToTray += () => panel?.HidePanel();
+        player.ClosingToTray += () =>
+        {
+            panel?.HidePanel();
+            if (!controller.Preferences.Value.ShowTrayIcon) OpenSettings();
+        };
         player.Activate();
         StartupRecord("player_activated");
         nint hwnd = WinRT.Interop.WindowNative.GetWindowHandle(player);
@@ -77,11 +81,15 @@ public partial class App : Application
         controller.Changed += () =>
         {
             tray.Receiving = controller.WantsReceiving;
-            tray.Update(controller.State.PhaseLabel);
+            tray.Visible = controller.Preferences.Value.ShowTrayIcon;
+            player.AppWindow.IsShownInSwitchers = controller.Preferences.Value.ShowTaskbarIcon;
+            tray.Update(L.Text(controller.State.PhaseLabel), controller.State.Phase);
             try { media?.Update(controller); } catch (Exception) { controller.Store.EventDiagnostic("system_media_update_failed"); }
         };
-        instance.Listen(() => player.DispatcherQueue.TryEnqueue(ShowPlayer));
+        instance.Listen(() => player.DispatcherQueue.TryEnqueue(Reopen));
         await controller.InitializeAsync();
+        if (controller.Preferences.LoadError.Length > 0) controller.Store.EventDiagnostic("ui_preferences_recovered");
+        if (!controller.Preferences.Value.ShowTaskbarIcon && !controller.Preferences.Value.ShowTrayIcon) OpenSettings();
         StartupRecord("receiver_initialized");
         controller.Store.EventDiagnostic(media == null ? "system_media_initialization_failed" : "system_media_ready");
     }
@@ -92,6 +100,12 @@ public partial class App : Application
         TrayIcon.Native.ShowWindow(WinRT.Interop.WindowNative.GetWindowHandle(player), 9);
         player.Activate();
     }
+    private void Reopen()
+    {
+        if (controller?.Preferences.Value is { ShowTaskbarIcon: false, ShowTrayIcon: false }) OpenSettings();
+        else ShowPlayer();
+    }
+    private void ShowMiniPlayer() { player?.RequestMiniPlayer(); ShowPlayer(); }
     private void OpenSettings()
     {
         if (controller == null) return;
@@ -106,7 +120,7 @@ public partial class App : Application
     private void TogglePanel()
     {
         if (controller == null) return;
-        panel ??= new TrayWindow(controller, ShowPlayer, OpenSettings, () => _ = QuitAsync());
+        panel ??= new TrayWindow(controller, ShowMiniPlayer, OpenSettings, () => _ = QuitAsync());
         panel.Toggle();
     }
     private async Task QuitAsync()

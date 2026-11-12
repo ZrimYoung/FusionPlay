@@ -73,7 +73,7 @@ internal sealed class SystemMedia : IDisposable
         var state = model.State;
         // Discovery, authentication and a control-only connection never publish
         // a new system music session. Keep an existing paused/connected session.
-        bool shouldPublish = !model.Busy && (state.Phase == ReceiverPhase.Playing || state.ControlsAvailable && state.Phase == ReceiverPhase.Paused || active && state.HasMedia);
+        bool shouldPublish = !model.Busy && !model.Suspended && (state.Phase == ReceiverPhase.Playing || state.ControlsAvailable && state.Phase == ReceiverPhase.Paused || active && state.HasMedia);
         if (!shouldPublish) { Clear(); return; }
         enabled = model.CanControl;
         if (!model.ControlBusy) Interlocked.Exchange(ref reservation, 0);
@@ -81,7 +81,8 @@ internal sealed class SystemMedia : IDisposable
         controls.IsPlayEnabled = controls.IsPauseEnabled = controls.IsPreviousEnabled = controls.IsNextEnabled = enabled;
         controls.PlaybackStatus = state.Phase == ReceiverPhase.Playing ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
         string nextMetadata = state.TrackId + "|" + state.Title + "|" + state.Artist + "|" + state.Album;
-        if (metadata != nextMetadata || !ReferenceEquals(thumbnailBytes, model.ArtworkBytes) || !active)
+        byte[]? currentArtwork = model.ArtworkLoading ? null : model.ArtworkBytes;
+        if (metadata != nextMetadata || !ReferenceEquals(thumbnailBytes, currentArtwork) || !active)
         {
             var updater = controls.DisplayUpdater;
             updater.Type = MediaPlaybackType.Music;
@@ -90,7 +91,7 @@ internal sealed class SystemMedia : IDisposable
             updater.MusicProperties.Artist = state.Artist;
             updater.MusicProperties.AlbumTitle = state.Album;
             thumbnailStream?.Dispose(); thumbnailStream = null;
-            thumbnailBytes = model.ArtworkBytes;
+            thumbnailBytes = currentArtwork;
             if (thumbnailBytes != null)
             {
                 thumbnailStream = new MemoryStream(thumbnailBytes, writable: false).AsRandomAccessStream();

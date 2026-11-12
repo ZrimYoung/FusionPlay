@@ -64,13 +64,20 @@ fn request(handle: u64, input: Value) -> Result<Value> {
         "get_calibration" => windows_calibration::get(&receiver),
         "set_calibration" => {
             let key = input["output_device_id"].as_str().unwrap_or("").to_owned();
-            let value = input["advance_ms"]
-                .as_u64()
-                .filter(|v| *v <= 500)
-                .ok_or_else(|| HostError::InvalidConfig {
-                    message: "Output compensation must be 0–500 ms".into(),
-                })?;
-            windows_calibration::set(&receiver, key, value as u32)?;
+            // New signed offsets take precedence; ABI-1 advance-only clients
+            // continue to use a positive number for earlier playback.
+            let value = if let Some(value) = input.get("offset_ms") {
+                value.as_i64().filter(|v| (-500..=500).contains(v))
+            } else {
+                input["advance_ms"]
+                    .as_u64()
+                    .filter(|v| *v <= 500)
+                    .map(|v| -(v as i64))
+            }
+            .ok_or_else(|| HostError::InvalidConfig {
+                message: "Output offset must be -500 to 500 ms".into(),
+            })?;
+            windows_calibration::set(&receiver, key, value as i32)?;
             Ok(Value::Null)
         }
         "start" => {
@@ -240,5 +247,58 @@ mod tests {
                 .unwrap();
         assert_eq!(value["error"]["code"], "invalid_config");
         unsafe { fp_buffer_free(result) };
+    }
+
+    #[test]
+    fn calibration_abi_accepts_signed_and_legacy_values_without_invalid_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "fusionplay-calibration-abi-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let created = invoke(0, serde_json::json!({"op":"create", "data_directory":dir}));
+        let handle = created["value"]["handle"].as_u64().unwrap();
+        let receiver = handles().lock().unwrap().get(&handle).unwrap().clone();
+        receiver.settings.lock().unwrap().output_device = "abi-endpoint".into();
+        let set = |fields: Value| {
+            let mut value =
+                serde_json::json!({"op":"set_calibration", "output_device_id":"abi-endpoint"});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            invoke(handle, value)
+        };
+        assert_eq!(set(serde_json::json!({"advance_ms":125}))["ok"], true);
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"get_calibration"}))["value"]["offset_ms"],
+            -125
+        );
+        assert_eq!(
+            set(serde_json::json!({"offset_ms":75,"advance_ms":125}))["ok"],
+            true
+        );
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(501),
+            serde_json::json!(-501),
+            serde_json::json!(1.5),
+            serde_json::json!("25"),
+        ] {
+            assert_eq!(
+                set(serde_json::json!({"offset_ms":invalid,"advance_ms":100}))["error"]["code"],
+                "invalid_config"
+            );
+            assert_eq!(
+                invoke(handle, serde_json::json!({"op":"get_calibration"}))["value"]["offset_ms"],
+                75
+            );
+        }
+        assert_eq!(set(serde_json::json!({"advance_ms":501}))["ok"], false);
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"destroy"}))["ok"],
+            true
+        );
+        drop(receiver);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

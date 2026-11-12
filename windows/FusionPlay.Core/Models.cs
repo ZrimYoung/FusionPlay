@@ -7,7 +7,7 @@ public sealed record ReceiverSettings(string Name = "FusionPlay-Windows", string
 public enum ReceiverPhase { Stopped, Starting, Ready, Connected, Playing, Paused, Failed }
 public enum PlaybackCommand { Play, Pause, Previous, Next }
 public sealed record CommandOutcome(bool Dispatched, bool Confirmed);
-public sealed record OutputCalibration(string OutputDeviceId, uint AdvanceMs);
+public sealed record OutputCalibration(string OutputDeviceId, int OffsetMs);
 public sealed record NetworkInterface(string Name, string Address)
 {
     public string DisplayName => string.IsNullOrEmpty(Name) ? "自动选择局域网" : $"{Name} · {Address}";

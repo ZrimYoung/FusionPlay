@@ -44,13 +44,19 @@ pub fn set_macos_sync_adjustment_millis(millis: i32) {
 }
 
 #[cfg(windows)]
-static WINDOWS_OUTPUT_ADVANCE_MS: AtomicU32 = AtomicU32::new(0);
+static WINDOWS_SYNC_ADJUSTMENT_MS: AtomicI64 = AtomicI64::new(0);
 
-/// Estimated downstream latency not represented by WASAPI's timestamps.
-/// The Windows host saves this manual adjustment separately for each endpoint.
+/// Signed Windows presentation adjustment: negative advances, positive delays.
+/// Keep the measured WASAPI latency separate from this per-endpoint preference.
+#[cfg(windows)]
+pub fn set_windows_sync_adjustment_millis(millis: i32) {
+    WINDOWS_SYNC_ADJUSTMENT_MS.store(i64::from(millis.clamp(-500, 500)), Ordering::Release);
+}
+
+/// Compatibility entry point for the original unsigned Windows advance.
 #[cfg(windows)]
 pub fn set_windows_output_advance_millis(millis: u32) {
-    WINDOWS_OUTPUT_ADVANCE_MS.store(millis.min(500), Ordering::Release);
+    set_windows_sync_adjustment_millis(-(millis.min(500) as i32));
 }
 
 #[cfg(any(windows, target_os = "macos"))]

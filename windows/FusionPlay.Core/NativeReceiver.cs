@@ -73,8 +73,14 @@ public sealed class NativeReceiver : IDisposable
     public static NetworkInterface[] Networks() => Call<NetworkInterface[]>(0, new { op = "networks" });
     public static AudioDevice[] Outputs() => Call<AudioDevice[]>(0, new { op = "outputs" });
     public ReceiverSettings Settings() => Invoke(new { op = "settings" }).Deserialize<ReceiverSettings>(WireJson.Options)!;
-    public OutputCalibration Calibration() => Invoke(new { op = "get_calibration" }).Deserialize<OutputCalibration>(WireJson.Options)!;
-    public void SetCalibration(OutputCalibration calibration) => Invoke(new { op = "set_calibration", output_device_id = calibration.OutputDeviceId, advance_ms = calibration.AdvanceMs });
+    public OutputCalibration Calibration()
+    {
+        var value = Invoke(new { op = "get_calibration" });
+        // Read older ABI-1 responses without silently reversing their direction.
+        int offset = value.TryGetProperty("offset_ms", out var signed) ? signed.GetInt32() : -value.GetProperty("advance_ms").GetInt32();
+        return new OutputCalibration(value.GetProperty("output_device_id").GetString()!, offset);
+    }
+    public void SetCalibration(OutputCalibration calibration) => Invoke(new { op = "set_calibration", output_device_id = calibration.OutputDeviceId, offset_ms = calibration.OffsetMs });
     public PollResult Poll(ulong revision = 0) => Invoke(new { op = "poll", revision }).Deserialize<PollResult>(WireJson.Options)!;
     public void Start(ReceiverSettings settings) => Invoke(new { op = "start", settings });
     public void Stop() => Invoke(new { op = "stop" });

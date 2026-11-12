@@ -1,68 +1,38 @@
-<Window x:Class="FusionPlay.Windows.MainWindow"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    Title="FusionPlay">
-    <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-        <Grid x:Name="BackdropLayer" IsHitTestVisible="False"/>
-        <Border x:Name="BackdropShade" Background="#850C1524" Visibility="Collapsed" IsHitTestVisible="False"/>
-        <Grid Padding="32,20,32,28" RowSpacing="16">
-            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-            <Grid ColumnSpacing="12">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
-                    <Image Width="30" Height="30" Source="Assets/AppIcon.png" AutomationProperties.Name="FusionPlay 标志"/>
-                    <TextBlock Text="FusionPlay" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="StatusText" FontSize="12" Opacity="0.65" VerticalAlignment="Center" Text="准备中"/>
-                </StackPanel>
-                <Button Grid.Column="1" x:Name="SettingsButton" Click="Settings_Click" ToolTipService.ToolTip="设置" AutomationProperties.Name="设置" Background="Transparent" BorderThickness="0">
-                    <FontIcon Glyph="&#xE713;" FontSize="18"/>
-                </Button>
-            </Grid>
-            <Grid Grid.Row="1" x:Name="PlayerLayout" ColumnSpacing="32" VerticalAlignment="Center">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="230"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <Border x:Name="CoverFrame" Width="230" Height="230" CornerRadius="18" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}">
-                    <Grid>
-                        <FontIcon x:Name="CoverPlaceholder" Glyph="&#xEC4F;" FontSize="72" Opacity="0.18"/>
-                        <Image x:Name="CoverImage" Stretch="UniformToFill" AutomationProperties.Name="专辑封面"/>
-                    </Grid>
-                </Border>
-                <Grid Grid.Column="1" RowSpacing="14" VerticalAlignment="Center">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <StackPanel Spacing="7">
-                        <TextBlock x:Name="TitleText" Text="让音乐，连接此刻" FontSize="27" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/>
-                        <TextBlock x:Name="ArtistText" Text="在手机妙播中选择 FusionPlay-Windows" FontSize="14" Opacity="0.7" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/>
-                    </StackPanel>
-                    <StackPanel Grid.Row="1" x:Name="ProgressPanel" Spacing="6" Visibility="Collapsed">
-                        <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" Value="0" Height="3" AutomationProperties.Name="播放进度，只读"/>
-                        <Grid>
-                            <TextBlock x:Name="PositionText" FontSize="11" Opacity="0.65"/>
-                            <TextBlock x:Name="DurationText" FontSize="11" Opacity="0.65" HorizontalAlignment="Right"/>
-                        </Grid>
-                    </StackPanel>
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="22" HorizontalAlignment="Center">
-                        <Button x:Name="PreviousButton" Click="Previous_Click" Width="44" Height="44" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="上一曲" AutomationProperties.Name="上一曲">
-                            <FontIcon Glyph="&#xE892;" FontSize="19"/>
-                        </Button>
-                        <Button x:Name="PlayButton" Click="Play_Click" Width="58" Height="58" CornerRadius="29" VerticalAlignment="Center" ToolTipService.ToolTip="播放或暂停" AutomationProperties.Name="播放">
-                            <FontIcon x:Name="PlayIcon" Glyph="&#xE768;" FontSize="21"/>
-                        </Button>
-                        <Button x:Name="NextButton" Click="Next_Click" Width="44" Height="44" Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="下一曲" AutomationProperties.Name="下一曲">
-                            <FontIcon Glyph="&#xE893;" FontSize="19"/>
-                        </Button>
-                    </StackPanel>
-                    <Grid Grid.Row="3" ColumnSpacing="12">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <FontIcon Glyph="&#xE992;" FontSize="13" Opacity="0.6" VerticalAlignment="Center"/>
-                        <Slider x:Name="VolumeSlider" Grid.Column="1" Minimum="0" Maximum="100" Value="50" StepFrequency="1" ValueChanged="Volume_Changed" AutomationProperties.Name="接收音量"/>
-                        <FontIcon Grid.Column="2" Glyph="&#xE995;" FontSize="13" Opacity="0.6" VerticalAlignment="Center"/>
-                    </Grid>
-                </Grid>
-            </Grid>
-            <StackPanel Grid.Row="2" Spacing="8">
-                <InfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" IsClosable="True" Closed="ErrorBar_Closed"/>
-                <Button x:Name="MigrationButton" Content="为此电脑建立独立身份" Visibility="Collapsed" Click="Migration_Click" HorizontalAlignment="Left"/>
-                <TextBlock x:Name="CommandText" FontSize="12" Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/>
-            </StackPanel>
-        </Grid>
+<Window x:Class="FusionPlay.Windows.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="FusionPlay">
+ <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" SizeChanged="Root_SizeChanged" PointerEntered="Root_PointerEntered" PointerExited="Root_PointerExited" GotFocus="Root_GotFocus" LostFocus="Root_LostFocus">
+  <Grid x:Name="ExpandedRoot">
+   <Grid x:Name="BackdropLayer" IsHitTestVisible="False"/><Border x:Name="BackdropShade" Background="#950C1524" Visibility="Collapsed" IsHitTestVisible="False"/>
+   <Grid Padding="32,16,32,24" RowSpacing="14">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid>
+     <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center"><Image Width="26" Height="26" Source="Assets/AppIcon.png" AutomationProperties.Name="FusionPlay"/><TextBlock Text="FusionPlay" FontSize="17" FontWeight="SemiBold" VerticalAlignment="Center"/><TextBlock x:Name="StatusText" FontSize="12" Opacity="0.65" VerticalAlignment="Center"/></StackPanel>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="6"><Button x:Name="MiniButton" Click="Mini_Click" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE8A7;" FontSize="16"/></Button><Button x:Name="SettingsButton" Click="Settings_Click" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE713;" FontSize="16"/></Button></StackPanel>
     </Grid>
+    <Grid Grid.Row="1" x:Name="PlayerLayout" ColumnSpacing="28" VerticalAlignment="Center">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <Border x:Name="CoverFrame" Width="230" Height="230" CornerRadius="16" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"><Grid><FontIcon x:Name="CoverPlaceholder" Glyph="&#xEC4F;" FontSize="72" Opacity="0.18"/><Image x:Name="PreviousCoverImage" Stretch="UniformToFill" IsHitTestVisible="False"/><Image x:Name="CoverImage" Stretch="UniformToFill" AutomationProperties.Name="专辑封面"/></Grid></Border>
+     <Grid Grid.Column="1" RowSpacing="12" VerticalAlignment="Stretch">
+      <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <StackPanel Spacing="7" VerticalAlignment="Top"><TextBlock x:Name="TitleText" FontSize="25" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="ArtistText" FontSize="13" Opacity="0.7" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/></StackPanel>
+      <StackPanel Grid.Row="1" x:Name="ProgressPanel" Spacing="5" Visibility="Collapsed"><ProgressBar x:Name="Progress" Minimum="0" Maximum="100" Value="0" Height="3"/><Grid><TextBlock x:Name="PositionText" FontSize="11" Opacity="0.65"/><TextBlock x:Name="DurationText" FontSize="11" Opacity="0.65" HorizontalAlignment="Right"/></Grid></StackPanel>
+      <StackPanel Grid.Row="2" x:Name="TransportPanel" Orientation="Horizontal" Spacing="18" HorizontalAlignment="Center"><Button x:Name="PreviousButton" Click="Previous_Click" Width="40" Height="40" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE892;" FontSize="18"/></Button><Button x:Name="PlayButton" Click="Play_Click" Width="52" Height="52" CornerRadius="26"><FontIcon x:Name="PlayIcon" Glyph="&#xE768;" FontSize="20"/></Button><Button x:Name="NextButton" Click="Next_Click" Width="40" Height="40" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE893;" FontSize="18"/></Button></StackPanel>
+      <Grid Grid.Row="3" ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><FontIcon Glyph="&#xE992;" FontSize="12" Opacity="0.6" VerticalAlignment="Center"/><Slider x:Name="VolumeSlider" Grid.Column="1" Minimum="0" Maximum="100" Value="50" StepFrequency="1" ValueChanged="Volume_Changed"/><FontIcon Grid.Column="2" Glyph="&#xE995;" FontSize="12" Opacity="0.6" VerticalAlignment="Center"/></Grid>
+     </Grid>
+    </Grid>
+    <StackPanel Grid.Row="2" Spacing="8"><InfoBar x:Name="ErrorBar" Severity="Error" IsOpen="False" IsClosable="True" Closed="ErrorBar_Closed"/><Button x:Name="MigrationButton" Content="为此电脑建立独立身份" Visibility="Collapsed" Click="Migration_Click" HorizontalAlignment="Left"/><TextBlock x:Name="CommandText" FontSize="12" Opacity="0.7" TextWrapping="Wrap" Visibility="Collapsed" AutomationProperties.LiveSetting="Polite"/></StackPanel>
+   </Grid>
+  </Grid>
+  <Grid x:Name="MiniRoot" Visibility="Collapsed" Background="#FF152136" RequestedTheme="Dark">
+   <FontIcon x:Name="MiniPlaceholder" Glyph="&#xEC4F;" FontSize="90" Opacity="0.2"/><Image x:Name="MiniPreviousCover" Stretch="UniformToFill" IsHitTestVisible="False"/><Image x:Name="MiniCover" Stretch="UniformToFill" AutomationProperties.Name="专辑封面" IsHitTestVisible="False"/>
+   <Grid x:Name="LoadingArtworkLayer" IsHitTestVisible="False"/><Grid x:Name="MiniBackdropLayer" IsHitTestVisible="False"/>
+   <Border x:Name="MiniShade" IsHitTestVisible="False"><Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00101824" Offset="0"/><GradientStop Color="#00101824" Offset="0.4"/><GradientStop Color="#D8101824" Offset="1"/></LinearGradientBrush></Border.Background></Border>
+   <Grid x:Name="MiniActions" VerticalAlignment="Top" Margin="8"><Button x:Name="MiniSettingsButton" Click="Settings_Click" HorizontalAlignment="Left" Background="#55202020" BorderThickness="0"><FontIcon Glyph="&#xE713;" FontSize="15"/></Button><Button x:Name="PinButton" Click="Pin_Click" HorizontalAlignment="Right" Background="#55202020" BorderThickness="0"><FontIcon x:Name="PinIcon" Glyph="&#xE718;" FontSize="15"/></Button></Grid>
+   <StackPanel x:Name="MiniControls" VerticalAlignment="Bottom" Padding="18,20,18,14" Spacing="6" SizeChanged="MiniControls_SizeChanged">
+    <TextBlock x:Name="MiniTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap" MaxLines="2" TextTrimming="CharacterEllipsis"/><TextBlock x:Name="MiniArtist" FontSize="12" Opacity="0.8" MaxLines="1" TextTrimming="CharacterEllipsis"/>
+    <StackPanel x:Name="MiniProgressPanel" Spacing="4" Margin="0,4,0,0"><ProgressBar x:Name="MiniProgress" Minimum="0" Maximum="100" Height="3"/><Grid><TextBlock x:Name="MiniPosition" FontSize="10" Opacity="0.75"/><TextBlock x:Name="MiniDuration" FontSize="10" Opacity="0.75" HorizontalAlignment="Right"/></Grid></StackPanel>
+    <StackPanel x:Name="MiniTransport" Orientation="Horizontal" Spacing="18" HorizontalAlignment="Center"><Button x:Name="MiniPreviousButton" Click="Previous_Click" Width="36" Height="36" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE892;" FontSize="17"/></Button><Button x:Name="MiniPlayButton" Click="Play_Click" Width="44" Height="44" CornerRadius="22" Background="#60FFFFFF" BorderThickness="0"><FontIcon x:Name="MiniPlayIcon" Glyph="&#xE768;" FontSize="19"/></Button><Button x:Name="MiniNextButton" Click="Next_Click" Width="36" Height="36" Background="Transparent" BorderThickness="0"><FontIcon Glyph="&#xE893;" FontSize="17"/></Button></StackPanel>
+    <TextBlock x:Name="MiniStatus" FontSize="11" TextWrapping="Wrap" MaxLines="2" AutomationProperties.LiveSetting="Polite"/>
+   </StackPanel>
+  </Grid>
+ </Grid>
 </Window>

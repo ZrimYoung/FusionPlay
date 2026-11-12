@@ -13,7 +13,7 @@ const RESYNC_US: f64 = 100_000.0;
 fn output_advance_ms() -> u32 {
     #[cfg(windows)]
     {
-        super::WINDOWS_OUTPUT_ADVANCE_MS.load(Ordering::Acquire)
+        (-super::WINDOWS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)).max(0) as u32
     }
     #[cfg(not(windows))]
     {
@@ -22,11 +22,15 @@ fn output_advance_ms() -> u32 {
 }
 
 fn sync_adjustment_ms() -> i64 {
+    #[cfg(windows)]
+    {
+        super::WINDOWS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
+    }
     #[cfg(target_os = "macos")]
     {
         super::MACOS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         0
     }
@@ -292,18 +296,15 @@ fn build<T: SizedSample + FromSample<f32>>(
     let mut renderer = Renderer::new(nominal);
     let failure_health = health.clone();
     let mut latency = 0.0;
-    let mut applied_advance = output_advance_ms();
     let mut applied_adjustment = sync_adjustment_ms();
     let mut calibration_pending = false;
     Ok(device.build_output_stream(
         config,
         move |output: &mut [T], info| {
             let frames = output.len() / channels;
-            let requested_advance = output_advance_ms();
             let requested_adjustment = sync_adjustment_ms();
-            if requested_advance != applied_advance || requested_adjustment != applied_adjustment {
+            if requested_adjustment != applied_adjustment {
                 renderer.realign();
-                applied_advance = requested_advance;
                 applied_adjustment = requested_adjustment;
                 calibration_pending = true;
             }
@@ -317,7 +318,7 @@ fn build<T: SizedSample + FromSample<f32>>(
             health
                 .latency_us
                 .store((latency * 1000.0) as u64, Ordering::Relaxed);
-            let effective_latency = latency + f64::from(applied_advance);
+            let effective_latency = latency;
             telemetry.update_output_latency(effective_latency);
             let is_paused = paused.load(Ordering::Acquire);
             let buffered = queue.buffered_frames();
@@ -554,8 +555,9 @@ mod tests {
         for index in 0..220 {
             #[cfg(windows)]
             match index {
-                160 => super::super::set_windows_output_advance_millis(50),
-                190 => super::super::set_windows_output_advance_millis(0),
+                140 => super::super::set_windows_sync_adjustment_millis(-50),
+                165 => super::super::set_windows_sync_adjustment_millis(50),
+                195 => super::super::set_windows_sync_adjustment_millis(0),
                 _ => {}
             }
             #[cfg(not(windows))]
@@ -576,8 +578,8 @@ mod tests {
         );
         #[cfg(windows)]
         assert!(
-            stream.health.resyncs.load(Ordering::Acquire) >= 2,
-            "live advance and reset did not realign the existing stream"
+            stream.health.resyncs.load(Ordering::Acquire) >= 3,
+            "live advance, delay and reset did not realign the existing stream"
         );
         paused.store(true, Ordering::Release);
         thread::sleep(StdDuration::from_millis(100));
@@ -602,6 +604,19 @@ mod tests {
         assert!(synchronized_buffer_frames(10.0 - 200.0) < CAPACITY);
         assert!(synchronized_buffer_frames(10.0 + 200.0) >= 2);
         assert_eq!(adjusted_presentation_offset(i64::MAX, 200), i64::MAX);
+        assert_eq!(adjusted_presentation_offset(i64::MIN, -500), i64::MIN);
+        // Migrated negative offsets produce the same deadlines and untimed
+        // buffer targets as the former unsigned downstream-latency advance.
+        assert_eq!(
+            presentation_schedule_error_micros(
+                1_000_000.0,
+                adjusted_presentation_offset(10_000, -125),
+                900_000,
+                10.0
+            ),
+            presentation_schedule_error_micros(1_000_000.0, 10_000, 900_000, 135.0)
+        );
+        assert!(synchronized_buffer_frames(10.0 - 500.0) < CAPACITY);
     }
 
     #[test]

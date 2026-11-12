@@ -163,16 +163,40 @@ if (args.Contains("--native") || args.Contains("--network"))
         using (var receiver = new NativeReceiver(directory))
         {
             var initial = receiver.Calibration();
-            Assert(initial.AdvanceMs == 0, "default calibration changed");
+            Assert(initial.OffsetMs == 0, "default calibration changed");
             if (initial.OutputDeviceId.Length == 0) return; // A machine without sound cannot calibrate an endpoint.
-            Throws<ReceiverException>(() => receiver.SetCalibration(initial with { AdvanceMs = 501 }));
+            Throws<ReceiverException>(() => receiver.SetCalibration(initial with { OffsetMs = 501 }));
+            Throws<ReceiverException>(() => receiver.SetCalibration(initial with { OffsetMs = -501 }));
             Throws<ReceiverException>(() => receiver.SetCalibration(initial with { OutputDeviceId = "stale-endpoint" }));
-            saved = initial with { AdvanceMs = 125 };
+            foreach (int offset in new[] { -500, -125, 0, 500 })
+            {
+                receiver.SetCalibration(initial with { OffsetMs = offset });
+                Assert(receiver.Calibration().OffsetMs == offset, "signed direction or boundary changed");
+            }
+            saved = initial with { OffsetMs = 125 };
             receiver.SetCalibration(saved);
             Assert(receiver.Calibration() == saved, "calibration not applied to the selected endpoint");
         }
         using var reopened = new NativeReceiver(directory);
         Assert(reopened.Calibration() == saved, "calibration lost on reopen");
+    });
+    Check("native DLL: legacy advance migrates without reversing playback direction", () =>
+    {
+        using var temporary = new TemporaryDirectory();
+        string directory = Path.Combine(temporary.Path, "legacy-calibration");
+        string endpoint;
+        using (var receiver = new NativeReceiver(directory)) endpoint = receiver.Calibration().OutputDeviceId;
+        if (endpoint.Length == 0) return;
+        File.WriteAllText(Path.Combine(directory, "output-calibration.json"), JsonSerializer.Serialize(new { outputs = new Dictionary<string, uint> { [endpoint] = 500, ["other-endpoint"] = 90 } }));
+        using (var receiver = new NativeReceiver(directory))
+        {
+            Assert(receiver.Calibration().OffsetMs == -500, "legacy advance direction changed");
+            receiver.SetCalibration(new(endpoint, 40));
+        }
+        using var reopened = new NativeReceiver(directory);
+        Assert(reopened.Calibration().OffsetMs == 40, "signed delay did not persist after migration");
+        using var saved = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, "output-calibration.json")));
+        Assert(saved.RootElement.GetProperty("outputs").GetProperty("other-endpoint").GetInt32() == 90, "another endpoint was lost during migration");
     });
 }
 if (args.Contains("--network"))
@@ -205,6 +229,44 @@ if (args.Contains("--network"))
         }
     });
 }
+Check("appearance preferences: portable defaults, persistence and invalid-input isolation", () =>
+{
+    using var temporary = new TemporaryDirectory();
+    var preferences = new UiPreferencesStore(temporary.Path);
+    Assert(preferences.Value.ShowTransport && preferences.Value.ShowTaskbarIcon && preferences.Value.ShowTrayIcon, "unsafe default entry visibility");
+    int changes = 0; preferences.Changed += () => changes++;
+    var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowTaskbarIcon = false, ShowTrayIcon = false };
+    preferences.Update(expected); preferences.Update(expected);
+    Assert(changes == 1, "unchanged preferences notified twice");
+    Assert(new UiPreferencesStore(temporary.Path).Value == expected, "portable UI state lost on reopen");
+    Throws<ArgumentException>(() => preferences.Update(expected with { Language = "invalid" }));
+    Assert(new UiPreferencesStore(temporary.Path).Value == expected, "invalid language modified saved state");
+});
+Check("appearance preferences: failed persistence leaves the active value unchanged", () =>
+{
+    using var temporary = new TemporaryDirectory();
+    var preferences = new UiPreferencesStore(temporary.Path);
+    Directory.CreateDirectory(Path.Combine(temporary.Path, "ui-preferences.json"));
+    bool rejected = false;
+    try { preferences.Update(preferences.Value with { Language = "en" }); }
+    catch (Exception e) when (e is IOException or UnauthorizedAccessException) { rejected = true; }
+    Assert(rejected, "non-file destination unexpectedly accepted");
+    Assert(preferences.Value == new UiPreferences(), "failed write changed active appearance");
+    Assert(Directory.GetFiles(temporary.Path, "*.tmp-*").Length == 0, "failed atomic save left temporary data");
+});
+Check("appearance preferences: malformed originals retained and partial older settings get defaults", () =>
+{
+    using var temporary = new TemporaryDirectory();
+    string file = Path.Combine(temporary.Path, "ui-preferences.json");
+    File.WriteAllText(file, "{broken");
+    var recovered = new UiPreferencesStore(temporary.Path);
+    Assert(recovered.Value == new UiPreferences() && recovered.LoadError.Length > 0, "corruption did not recover");
+    string backup = Directory.GetFiles(temporary.Path, "ui-preferences.json.invalid-*").Single();
+    Assert(File.ReadAllText(backup) == "{broken", "invalid preferences discarded");
+    File.WriteAllText(file, "{\"language\":\"en\"}");
+    var legacy = new UiPreferencesStore(temporary.Path).Value;
+    Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
+});
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {

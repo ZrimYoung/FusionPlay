@@ -26,6 +26,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private bool disposed;
     private readonly VolumeInteraction volume = new();
     public PortableStore Store { get; } = new(AppContext.BaseDirectory);
+    public UiPreferencesStore Preferences { get; }
     public ReceiverSettings Settings { get; private set; } = new();
     public ReceiverSnapshot State { get; private set; } = new();
     public NetworkInterface[] Networks { get; private set; } = [];
@@ -41,11 +42,20 @@ public sealed class ReceiverController : IAsyncDisposable
     public string ArtworkStatus { get; private set; } = "尚未连接";
     public BitmapImage? Artwork { get; private set; }
     public byte[]? ArtworkBytes { get; private set; }
+    public bool ArtworkLoading { get; private set; }
+    public bool Suspended => sleeping;
     public double Volume => volume.Value;
-    public bool CanControl => State.ControlsAvailable && !Busy && !ControlBusy;
+    public bool CanControl => State.ControlsAvailable && !Busy && !ControlBusy && !sleeping && !disposed;
     public event Action? Changed;
     public event Action? DevicesChanged;
-    public ReceiverController(DispatcherQueue dispatcher) => ui = dispatcher;
+    public ReceiverController(DispatcherQueue dispatcher)
+    {
+        ui = dispatcher;
+        Preferences = new UiPreferencesStore(Store.Data);
+        L.Language = Preferences.Value.Language;
+        Preferences.Changed += PreferencesChanged;
+    }
+    private void PreferencesChanged() { L.Language = Preferences.Value.Language; Notify(); }
     private void Notify() => Changed?.Invoke();
     private Task OnUi(Action action)
     {
@@ -248,11 +258,27 @@ public sealed class ReceiverController : IAsyncDisposable
         string key = snapshot.ControlsAvailable ? snapshot.TrackId + "|" + snapshot.ArtworkUrl : "";
         if (key == artworkKey) return;
         artworkKey = key; artworkCancellation?.Cancel(); artworkCancellation?.Dispose();
-        Artwork = null; ArtworkBytes = null;
-        if (key == "") { ArtworkStatus = "尚未连接"; return; }
-        if (snapshot.ArtworkUrl.Length == 0) { ArtworkStatus = "手机未提供封面"; return; }
+        ArtworkLoading = false;
+        if (key == "") { Artwork = null; ArtworkBytes = null; ArtworkStatus = "尚未连接"; return; }
         artworkCancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        if (snapshot.ArtworkUrl.Length == 0)
+        {
+            ArtworkStatus = "等待手机提供封面"; ArtworkLoading = Artwork != null;
+            _ = ExpireArtworkAsync(key, artworkCancellation.Token); return;
+        }
+        ArtworkLoading = true;
         _ = LoadArtworkAsync(key, snapshot.ArtworkUrl, artworkCancellation.Token);
+    }
+    private async Task ExpireArtworkAsync(string key, CancellationToken cancellation)
+    {
+        try
+        {
+            await Task.Delay(2000, cancellation);
+            if (cancellation.IsCancellationRequested || key != artworkKey || disposed) return;
+            Artwork = null; ArtworkBytes = null; ArtworkLoading = false;
+            ArtworkStatus = "手机未提供封面"; Notify();
+        }
+        catch (OperationCanceledException) { }
     }
     private async Task LoadArtworkAsync(string key, string source, CancellationToken cancellation)
     {
@@ -274,7 +300,7 @@ public sealed class ReceiverController : IAsyncDisposable
                 stream.Seek(0);
                 var image = new BitmapImage { DecodePixelWidth = 800 }; await image.SetSourceAsync(stream);
                 if (cancellation.IsCancellationRequested || key != artworkKey || disposed) return;
-                Artwork = image; ArtworkBytes = bytes; ArtworkStatus = "已加载";
+                Artwork = image; ArtworkBytes = bytes; ArtworkLoading = false; ArtworkStatus = "已加载";
                 Store.ArtworkDiagnostic(kind, "loaded", attempt); Notify(); return;
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { return; }
@@ -284,6 +310,7 @@ public sealed class ReceiverController : IAsyncDisposable
                 bool retry = attempt < 3 && (e is HttpRequestException or TaskCanceledException || e is ArtworkException { Retryable: true });
                 string code = e is ArtworkException ae ? ae.Code : e is HttpRequestException or TaskCanceledException ? "network_error" : "invalid_image";
                 Store.ArtworkDiagnostic(kind, code, attempt);
+                if (!retry) { Artwork = null; ArtworkBytes = null; ArtworkLoading = false; }
                 ArtworkStatus = retry ? "加载失败，正在重试" : "封面加载失败，可在设置中重试"; Notify();
                 if (!retry) return;
                 try { await Task.Delay(attempt * 2000, cancellation); } catch (OperationCanceledException) { return; }
@@ -311,6 +338,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
+        Preferences.Changed -= PreferencesChanged;
         artworkCancellation?.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();
         if (polling != null) await polling;

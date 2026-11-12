@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Dispatching;
+using FusionPlay.Core;
 
 namespace FusionPlay.Windows.Platform;
 
@@ -10,6 +11,13 @@ internal sealed class TrayIcon : IDisposable
     private readonly Native.SubclassProc hook;
     private Native.NotifyIconData data;
     private readonly uint taskbarCreated = Native.RegisterWindowMessage("TaskbarCreated");
+    private readonly nint idleIcon, playingIcon, pausedIcon;
+    private bool visible = true;
+    public bool Visible
+    {
+        get => visible;
+        set { if (visible == value) return; visible = value; if (visible) Add(); else Native.ShellNotifyIcon(2, ref data); }
+    }
     public Action? TogglePanel { get; set; }
     public Action? ShowPlayer { get; set; }
     public Action? ShowSettings { get; set; }
@@ -27,18 +35,23 @@ internal sealed class TrayIcon : IDisposable
         {
             Size = (uint)Marshal.SizeOf<Native.NotifyIconData>(), Window = hwnd, Id = 1,
             Flags = 1 | 2 | 4, Callback = CallbackMessage, Tip = "FusionPlay · 等待连接",
-            Icon = Native.LoadImage(0, iconPath, 1, 0, 0, 0x10 | 0x40),
+            Icon = Native.LoadImage(0, iconPath, 1, 0, 0, 0x10),
             Info = "", InfoTitle = "", Version = 4
         };
+        idleIcon = data.Icon;
+        playingIcon = CreatePlaybackIcon(false); pausedIcon = CreatePlaybackIcon(true);
         Add();
     }
     private void Add() { Native.ShellNotifyIcon(0, ref data); data.Version = 4; Native.ShellNotifyIcon(4, ref data); }
-    public void Update(string status)
+    public void Update(string status, ReceiverPhase phase)
     {
         string tip = "FusionPlay · " + status;
-        if (tip == data.Tip) return;
+        nint icon = phase == ReceiverPhase.Playing ? playingIcon : phase == ReceiverPhase.Paused ? pausedIcon : idleIcon;
+        if (icon == 0) icon = idleIcon;
+        if (tip == data.Tip && icon == data.Icon) return;
+        data.Icon = icon;
         data.Tip = tip.Length < 128 ? tip : tip[..127];
-        Native.ShellNotifyIcon(1, ref data);
+        if (visible) Native.ShellNotifyIcon(1, ref data);
     }
     private nint WindowMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint subclass, nuint reference)
     {
@@ -49,7 +62,7 @@ internal sealed class TrayIcon : IDisposable
             if (notification is 0x205 or 0x7b) ShowMenu();
             return 0;
         }
-        if (message == taskbarCreated) Add();
+        if (message == taskbarCreated && visible) Add();
         if (message is 0x1a or 0x31a) AppearanceChanged?.Invoke();
         if (message == 0x218)
         {
@@ -63,11 +76,11 @@ internal sealed class TrayIcon : IDisposable
         nint menu = Native.CreatePopupMenu();
         try
         {
-            Native.AppendMenu(menu, 0, 1, "显示播放窗口");
-            Native.AppendMenu(menu, 0, 2, "设置");
-            Native.AppendMenu(menu, 0, 3, Receiving ? "停止接收" : "开始接收");
+            Native.AppendMenu(menu, 0, 1, L.Text("显示播放窗口"));
+            Native.AppendMenu(menu, 0, 2, L.Text("设置"));
+            Native.AppendMenu(menu, 0, 3, L.Text(Receiving ? "停止接收" : "启动接收"));
             Native.AppendMenu(menu, 0x800, 0, "");
-            Native.AppendMenu(menu, 0, 4, "退出");
+            Native.AppendMenu(menu, 0, 4, L.Text("退出"));
             Native.GetCursorPos(out var point); Native.SetForegroundWindow(window);
             uint selected = Native.TrackPopupMenu(menu, 0x100 | 2, point.X, point.Y, 0, window, 0);
             Native.PostMessage(window, 0, 0, 0);
@@ -84,8 +97,39 @@ internal sealed class TrayIcon : IDisposable
     public void Dispose()
     {
         Native.ShellNotifyIcon(2, ref data); Native.RemoveWindowSubclass(window, hook, 1);
-        if (data.Icon != 0) Native.DestroyIcon(data.Icon);
+        foreach (nint icon in new[] { idleIcon, playingIcon, pausedIcon }) if (icon != 0) Native.DestroyIcon(icon);
         GC.KeepAlive(hook);
+    }
+    // Small vector status marks, supersampled into a premultiplied BGRA icon.
+    private static nint CreatePlaybackIcon(bool paused)
+    {
+        const int size = 32, samples = 4;
+        byte[] pixels = new byte[size * size * 4];
+        for (int y = 0; y < size; y++) for (int x = 0; x < size; x++)
+        {
+            int coverage = 0;
+            for (int sy = 0; sy < samples; sy++) for (int sx = 0; sx < samples; sx++)
+            {
+                double px = x + (sx + .5) / samples, py = y + (sy + .5) / samples;
+                double radius = Math.Sqrt((px - 16) * (px - 16) + (py - 16) * (py - 16));
+                bool glyph = paused ? py >= 10 && py <= 22 && (px >= 11 && px <= 14 || px >= 18 && px <= 21)
+                    : px >= 12 && px <= 23 && Math.Abs(py - 16) <= (23 - px) * .64;
+                if (radius >= 12 && radius <= 14 || glyph) coverage++;
+            }
+            int i = (y * size + x) * 4, alpha = coverage * 255 / (samples * samples);
+            pixels[i] = (byte)alpha; pixels[i + 1] = (byte)(131 * alpha / 255); pixels[i + 2] = (byte)(61 * alpha / 255); pixels[i + 3] = (byte)alpha;
+        }
+        var header = new Native.BitmapInfoHeader { Size = 40, Width = size, Height = -size, Planes = 1, BitCount = 32, SizeImage = (uint)pixels.Length };
+        nint bitmap = Native.CreateDIBSection(0, ref header, 0, out nint bits, 0, 0);
+        nint mask = Native.CreateBitmap(size, size, 1, 1, new byte[size * size / 8]);
+        try
+        {
+            if (bitmap == 0 || mask == 0 || bits == 0) return 0;
+            Marshal.Copy(pixels, 0, bits, pixels.Length);
+            var info = new Native.IconInfo { IsIcon = true, Mask = mask, Color = bitmap };
+            return Native.CreateIconIndirect(ref info);
+        }
+        finally { if (bitmap != 0) Native.DeleteObject(bitmap); if (mask != 0) Native.DeleteObject(mask); }
     }
     internal static class Native
     {
@@ -100,6 +144,16 @@ internal sealed class TrayIcon : IDisposable
             [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)] public string InfoTitle;
             public uint InfoFlags; public Guid GuidItem; public nint BalloonIcon;
         }
+        [StructLayout(LayoutKind.Sequential)] internal struct BitmapInfoHeader
+        {
+            public uint Size; public int Width, Height; public ushort Planes, BitCount;
+            public uint Compression, SizeImage; public int XPelsPerMeter, YPelsPerMeter; public uint ClrUsed, ClrImportant;
+        }
+        [StructLayout(LayoutKind.Sequential)] internal struct IconInfo { [MarshalAs(UnmanagedType.Bool)] public bool IsIcon; public uint XHotspot, YHotspot; public nint Mask, Color; }
+        [DllImport("gdi32.dll")] internal static extern nint CreateDIBSection(nint dc, ref BitmapInfoHeader info, uint usage, out nint bits, nint section, uint offset);
+        [DllImport("gdi32.dll")] internal static extern nint CreateBitmap(int width, int height, uint planes, uint bitsPerPixel, byte[] bits);
+        [DllImport("gdi32.dll")] internal static extern bool DeleteObject(nint item);
+        [DllImport("user32.dll")] internal static extern nint CreateIconIndirect(ref IconInfo info);
         [StructLayout(LayoutKind.Sequential)] internal struct Point { public int X, Y; }
         internal delegate nint SubclassProc(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint reference);
         [DllImport("comctl32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] internal static extern bool SetWindowSubclass(nint hwnd, SubclassProc callback, nuint id, nuint reference);
