@@ -49,13 +49,9 @@ final class ReceiverModel: ObservableObject {
     private var terminating = false
 
     private init() {
-        root = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/FusionPlay", isDirectory: true)
         let data = root.appendingPathComponent("data").path
-        let marker = root.appendingPathComponent(".fusionplay-mac").path
-        guard FileManager.default.fileExists(atPath: marker) else {
-            error = "请从项目 artifacts 目录打开应用；未找到独立项目标记。"
-            return
-        }
         backend.async { [weak self] in
             do {
                 let receiver = try Receiver(dataDirectory: data)
@@ -117,7 +113,7 @@ final class ReceiverModel: ObservableObject {
         else { systemMedia.update(state, busy: controlBusy, artwork: artwork) }
         if state.phase == .failed { error = state.message }
     }
-    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy }
+    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
     func control(_ command: PlaybackCommand) {
         guard let receiver, canControl, !terminating else { return }
@@ -245,7 +241,9 @@ final class ReceiverModel: ObservableObject {
         backend.async { [weak self] in
             receiver.stop()
             let state = receiver.snapshot()
-            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state) }
+            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state)
+                if let self, self.wantsReceiving, !self.sleeping, !self.terminating { self.restartApplied() }
+            }
         }
     }
     func volumeEditingChanged(_ editing: Bool) {
@@ -283,7 +281,7 @@ final class ReceiverModel: ObservableObject {
             do {
                 let nets = try networkInterfaces(); let audio = try audioDevices()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, !self.busy, !self.sleeping, !self.terminating else { return }
                     self.networks = nets; self.outputs = audio
                     guard self.wantsReceiving, let settings = self.appliedSettings else { return }
                     let current = self.deviceSignature(settings: settings)

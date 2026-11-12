@@ -30,7 +30,8 @@ struct FusionPlayApp: App {
             PlayerWindowContent(model: model, delegate: delegate)
         }.defaultSize(width: 760, height: 400)
           .windowStyle(.hiddenTitleBar)
-          .windowResizability(.contentSize)
+          .windowResizability(.contentMinSize)
+          .commands { ReceiverSettingsCommands() }
         MenuBarExtra {
             ReceiverPanel(model: model)
         } label: {
@@ -40,6 +41,18 @@ struct FusionPlayApp: App {
             SettingsPanel(model: model)
         }.defaultSize(width: 480, height: 430)
           .windowResizability(.contentSize)
+    }
+}
+
+private struct ReceiverSettingsCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("设置…") {
+                openWindow(id: "settings")
+                NSApp.activate(ignoringOtherApps: true)
+            }.keyboardShortcut(",", modifiers: .command)
+        }
     }
 }
 
@@ -58,30 +71,57 @@ private struct PlayerWindowContent: View {
     }
 }
 
+private struct PlayerWindowBehavior: NSViewRepresentable {
+    let square: Bool
+    let dimButtons: Bool
+    let duration: Double
+    func makeNSView(context: Context) -> NSView { NSView() }
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let window = view.window else { return }
+            window.isMovableByWindowBackground = true
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.styleMask.insert(.fullSizeContentView)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+                    window.standardWindowButton(kind)?.animator().alphaValue = dimButtons ? 0.22 : 1
+                }
+            }
+            let desired = square ? NSSize(width: 1, height: 1) : .zero
+            guard window.contentAspectRatio != desired else { return }
+            window.contentAspectRatio = desired
+            if square {
+                let width = max(260, window.contentLayoutRect.width)
+                window.setContentSize(NSSize(width: width, height: width))
+            }
+        }
+    }
+}
+
 struct ReceiverPanel: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        VStack(spacing: 16) {
-            HStack(spacing: 11) {
-                DoubleRingMark().stroke(style: StrokeStyle(lineWidth: 2.4, lineCap: .butt))
-                    .foregroundStyle(.tint).frame(width: 32, height: 24).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("FusionPlay").font(.system(size: 14, weight: .semibold))
-                    Text(model.phaseLabel).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Circle().fill(model.snapshot?.phase == .playing ? Color.green :
-                              model.wantsReceiving ? Color.accentColor : Color.secondary.opacity(0.4))
-                    .frame(width: 6, height: 6).accessibilityHidden(true)
-            }
-            if let state = model.snapshot, !state.title.isEmpty {
-                VStack(spacing: 4) {
-                    Text(state.title).font(.system(size: 13, weight: .medium)).lineLimit(2).help(state.title)
-                    if !state.artist.isEmpty {
-                        Text(state.artist).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+        VStack(spacing: 14) {
+            HStack(spacing: 12) {
+                Group {
+                    if let artwork = model.artwork {
+                        Image(nsImage: artwork).resizable().scaledToFill()
+                    } else {
+                        RoundedRectangle(cornerRadius: 10).fill(.quaternary)
+                            .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
                     }
-                }.frame(maxWidth: .infinity).padding(.top, 2)
+                }.frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .accessibilityLabel(model.artwork == nil ? "暂无专辑封面" : "专辑封面")
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(model.snapshot?.title.isEmpty == false ? model.snapshot!.title : "FusionPlay")
+                        .font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                    Text(model.snapshot?.artist.isEmpty == false ? model.snapshot!.artist : model.phaseLabel)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
             PlaybackControls(model: model)
             HStack(spacing: 10) {
@@ -90,20 +130,14 @@ struct ReceiverPanel: View {
                     .controlSize(.small).accessibilityLabel("接收音量")
                     .accessibilityValue("\(Int(model.volume.rounded()))%")
                 Image(systemName: "speaker.wave.3.fill").font(.system(size: 11))
-            }.foregroundStyle(.secondary).disabled(!model.initialized)
+            }.frame(width: 190).foregroundStyle(.secondary).disabled(!model.initialized)
             if !model.error.isEmpty {
                 Text(model.error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-            } else if !model.controlMessage.isEmpty {
-                Text(model.controlMessage).font(.caption).foregroundStyle(.secondary)
+            } else if model.controlMessage.hasPrefix("播放控制失败") {
+                Text(model.controlMessage).font(.caption).foregroundStyle(.red)
             }
             Divider()
             HStack(spacing: 0) {
-                action(model.wantsReceiving ? "stop.circle" : "dot.radiowaves.left.and.right",
-                       label: model.wantsReceiving ? "停止接收" : "启动接收") {
-                    if model.wantsReceiving { model.stop() } else { model.start() }
-                }.foregroundStyle(model.wantsReceiving ? Color.accentColor : Color.secondary)
-                    .disabled(model.busy || !model.initialized)
-                Spacer(minLength: 0)
                 action("play.rectangle", label: "正在播放") {
                     openWindow(id: "player"); NSApp.activate(ignoringOtherApps: true)
                 }
@@ -112,11 +146,9 @@ struct ReceiverPanel: View {
                     openWindow(id: "settings"); NSApp.activate(ignoringOtherApps: true)
                 }
                 Spacer(minLength: 0)
-                action("doc.text", label: "打开日志") { model.openLogs() }
-                Spacer(minLength: 0)
                 action("power", label: "退出 FusionPlay") { NSApp.terminate(nil) }
             }.foregroundStyle(.secondary)
-        }.padding(18).frame(width: 296)
+        }.padding(16).frame(width: 280)
     }
     private func action(_ symbol: String, label: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
@@ -160,6 +192,10 @@ struct PlaybackControls: View {
 struct PlayerView: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hovering = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
         if let title = model.snapshot?.title, !title.isEmpty { return title }
@@ -176,10 +212,27 @@ struct PlayerView: View {
         return String(format: "%llu:%02llu", seconds / 60, seconds % 60)
     }
     var body: some View {
-        HStack(spacing: 36) {
-            cover
+        GeometryReader { geometry in
+            if geometry.size.width >= 600 && geometry.size.height >= 360 {
+                expanded(size: geometry.size)
+            } else {
+                mini(size: geometry.size)
+            }
+            PlayerWindowBehavior(square: geometry.size.width < 600 || geometry.size.height < 360,
+                                 dimButtons: (geometry.size.width < 600 || geometry.size.height < 360) && !hovering && !voiceOver,
+                                 duration: reduceMotion ? 0 : 0.35)
+                .frame(width: 0, height: 0)
+        }.frame(minWidth: 260, minHeight: 260)
+            .ignoresSafeArea(.container, edges: .top)
+            .foregroundStyle(.white)
+            .background { backdrop.ignoresSafeArea() }
+            .environment(\.colorScheme, .dark)
+    }
+    private func expanded(size: CGSize) -> some View {
+        let side = min(360, size.height - 80, size.width * 0.37)
+        return HStack(alignment: .top, spacing: 28) {
+            cover(side: side)
             VStack(alignment: .leading, spacing: 0) {
-                Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 9) {
                     Text(title).font(.system(size: 25, weight: .semibold))
                         .lineLimit(2).textSelection(.enabled).help(title)
@@ -209,21 +262,60 @@ struct PlayerView: View {
                         .help(playing ? "暂停" : "播放").accessibilityLabel(playing ? "暂停" : "播放")
                     transport("forward.end.fill", label: "下一曲") { model.control(.next) }
                     Spacer(minLength: 0)
-                }.padding(.vertical, 19)
-                HStack(spacing: 12) {
-                    Image(systemName: "speaker.fill").font(.system(size: 11))
-                    Slider(value: $model.volume, in: 0...100) { editing in model.volumeEditingChanged(editing) }
-                        .controlSize(.small).tint(.white).accessibilityLabel("接收音量")
-                        .accessibilityValue("\(Int(model.volume.rounded()))%")
-                    Image(systemName: "speaker.wave.3.fill").font(.system(size: 12))
-                }.foregroundStyle(.white.opacity(0.65)).disabled(!model.initialized)
-                Spacer(minLength: 0)
-            }.frame(maxWidth: .infinity)
-        }.padding(.horizontal, 34).padding(.top, 40).padding(.bottom, 28)
-            .frame(width: 760, height: 400)
-            .foregroundStyle(.white)
-            .background { backdrop.ignoresSafeArea() }
-            .environment(\.colorScheme, .dark)
+                }.padding(.top, 16)
+            }.frame(maxWidth: 440).frame(height: side)
+        }.padding(.horizontal, 28)
+            .frame(width: size.width, height: size.height, alignment: .center)
+    }
+    private func mini(size: CGSize) -> some View {
+        let showControls = hovering || voiceOver
+        return ZStack(alignment: .bottom) {
+            if let artwork = model.artwork {
+                Image(nsImage: artwork).resizable().scaledToFill()
+                    .frame(width: size.width, height: size.height).clipped()
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: "music.note").font(.system(size: 64, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.4))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            ZStack {
+                if !reduceTransparency, let artwork = model.artwork {
+                    Image(nsImage: artwork).resizable().scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped().blur(radius: 24)
+                        .mask(LinearGradient(stops: [
+                            .init(color: .clear, location: 0.67),
+                            .init(color: .black.opacity(0.45), location: 0.85),
+                            .init(color: .black, location: 1)
+                        ], startPoint: .top, endPoint: .bottom))
+                }
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0.67),
+                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: 0.85),
+                    .init(color: .black.opacity(0.85), location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }.opacity(showControls ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
+                if !artist.isEmpty {
+                    Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
+                }
+                progress.padding(.top, 4)
+                HStack {
+                    Spacer(minLength: 0)
+                    transport("backward.end.fill", label: "上一曲") { model.control(.previous) }
+                    transport(playing ? "pause.fill" : "play.fill", label: playing ? "暂停" : "播放") { model.togglePlayback() }
+                    transport("forward.end.fill", label: "下一曲") { model.control(.next) }
+                    Spacer(minLength: 0)
+                }
+            }.padding(16).padding(.top, 28)
+                .opacity(showControls ? 1 : 0)
+                .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+        }.frame(width: size.width, height: size.height).clipped()
+            .contentShape(Rectangle()).onHover { hovering = $0 }
+            .accessibilityLabel("迷你播放器，\(title)")
+            .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: showControls)
     }
     private var backdrop: some View {
         GeometryReader { geometry in
@@ -243,7 +335,7 @@ struct PlayerView: View {
             }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
         }.accessibilityHidden(true)
     }
-    private var cover: some View {
+    private func cover(side: CGFloat) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06))
             if let artwork = model.artwork {
@@ -252,7 +344,7 @@ struct PlayerView: View {
                 Image(systemName: "music.note").font(.system(size: 56, weight: .ultraLight))
                     .foregroundStyle(.white.opacity(0.32))
             }
-        }.frame(width: 280, height: 280).clipShape(RoundedRectangle(cornerRadius: 12))
+        }.frame(width: side, height: side).clipShape(RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.1), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.28), radius: 20, y: 12)
             .accessibilityLabel(model.artwork == nil ? "暂无专辑封面" : "专辑封面")
@@ -336,9 +428,14 @@ struct SettingsPanel: View {
                 }
                 Button(model.wantsReceiving ? "保存并重新连接" : "保存并启动接收") { model.start() }
                     .disabled(model.busy || !model.initialized)
+                if model.wantsReceiving {
+                    Button("停止接收") { model.stop() }.disabled(model.busy)
+                }
                 Text("重新连接后，可能需要在手机上重新选择此设备。全屋播放请在手机中添加 Mac。").font(.caption).foregroundStyle(.secondary)
             }
             Section("同步诊断") {
+                Button("打开日志") { model.openLogs() }
+                Button("打开数据与卸载目录") { NSWorkspace.shared.open(model.root) }
                 LabeledContent("状态", value: model.phaseLabel)
                 LabeledContent("专辑封面", value: model.artworkStatus)
                 if model.snapshot?.controlsAvailable == true && model.artwork == nil {

@@ -70,9 +70,15 @@ struct BridgeSmoke {
                 print("Native MediaPlayer publication, pause and cleanup: PASS")
             }
             if CommandLine.arguments.contains("--network") {
+                var previousPort: Int?
                 for _ in 0..<3 {
                     try receiver!.start(settings: receiver!.settings())
                     precondition(probe.ready.wait(timeout: .now() + 5) == .success, "Receiver did not become ready")
+                    let identity = try JSONSerialization.jsonObject(with: Data(contentsOf: data.appendingPathComponent("identity.json"))) as! [String: Any]
+                    let port = identity["control_port"] as! Int
+                    precondition(port != 8899 && port > 0)
+                    if let previousPort { precondition(port == previousPort) }
+                    previousPort = port
                     receiver!.stop()
                     precondition(receiver!.snapshot().phase == .stopped)
                 }
