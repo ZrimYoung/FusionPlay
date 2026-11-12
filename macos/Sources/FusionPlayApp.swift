@@ -285,14 +285,14 @@ struct PlayerView: View {
                         .frame(width: size.width, height: size.height)
                         .clipped().blur(radius: 24)
                         .mask(LinearGradient(stops: [
-                            .init(color: .clear, location: 0.12),
-                            .init(color: .black.opacity(0.45), location: 0.4),
-                            .init(color: .black, location: 0.72)
+                            .init(color: .clear, location: 0.67),
+                            .init(color: .black.opacity(0.45), location: 0.85),
+                            .init(color: .black, location: 1)
                         ], startPoint: .top, endPoint: .bottom))
                 }
                 LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: 0.4),
+                    .init(color: .clear, location: 0.67),
+                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: 0.85),
                     .init(color: .black.opacity(0.85), location: 1)
                 ], startPoint: .top, endPoint: .bottom)
             }.opacity(showControls ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
