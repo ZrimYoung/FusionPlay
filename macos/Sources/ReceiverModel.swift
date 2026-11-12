@@ -49,13 +49,9 @@ final class ReceiverModel: ObservableObject {
     private var terminating = false
 
     private init() {
-        root = Bundle.main.bundleURL.deletingLastPathComponent().deletingLastPathComponent()
+        root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/FusionPlay", isDirectory: true)
         let data = root.appendingPathComponent("data").path
-        let marker = root.appendingPathComponent(".fusionplay-mac").path
-        guard FileManager.default.fileExists(atPath: marker) else {
-            error = "请从项目 artifacts 目录打开应用；未找到独立项目标记。"
-            return
-        }
         backend.async { [weak self] in
             do {
                 let receiver = try Receiver(dataDirectory: data)

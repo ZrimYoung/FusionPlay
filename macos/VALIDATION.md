@@ -126,3 +126,11 @@
 - Resizable player/hover mini mode: native build and strict signature checks passed. Minimum 260 × 260, expanded layout from 600 × 360; physical resize/hover appearance awaits user confirmation.
 
 - Player refinement: expanded cover and information panel share one height and are centered as a unit; controls are bottom-aligned and title top-aligned. Mini hover overlay now includes source-reported progress/time and a blurred artwork layer fading in toward the bottom. Reduce Transparency skips artwork blur. Native build/signature checks passed; visual resize behavior awaits user feedback.
+
+## 0.3.0 installed app (2026-11-12)
+
+- Installed in /Applications; runtime data is ~/Library/Application Support/FusionPlay. Copied files/signature verified, identity and settings compared equal after launch, installed process reported receiver_ready. External source/build caches retained. Legacy external data/logs and previous binary remain as backups; deletion was not performed. Root launch/uninstall entries target installed app.
+- Five cleanup/installation tests passed. Uninstaller syntax checked, destructive uninstall not executed on real installation.
+- Mini native content aspect ratio is 1:1 and remains resizable. Keyboard focus ring disabled following user report; hover info and controls preserved.
+
+- Final installed revision: native transparent full-size title area, no player keyboard-focus outline, ordinary hover controls hidden on pointer exit; mini window buttons fade to 22% opacity and overlays fade over 0.35 seconds (disabled with Reduce Motion). Installer tests and build/signature passed. Installed app launched from /Applications; identity/settings unchanged during update; cancellation of uninstall tested without deletion. Visual hover/window behavior still requires user confirmation.

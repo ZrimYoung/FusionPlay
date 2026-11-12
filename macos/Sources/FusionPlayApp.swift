@@ -61,7 +61,7 @@ private struct PlayerWindowContent: View {
     let delegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
     var body: some View {
-        PlayerView(model: model).background(PlayerWindowBehavior()).onAppear {
+        PlayerView(model: model).onAppear {
             // Keep SwiftUI responsible for recreating a closed player window.
             delegate.showPlayer = {
                 openWindow(id: "player")
@@ -72,10 +72,30 @@ private struct PlayerWindowContent: View {
 }
 
 private struct PlayerWindowBehavior: NSViewRepresentable {
+    let square: Bool
+    let dimButtons: Bool
+    let duration: Double
     func makeNSView(context: Context) -> NSView { NSView() }
     func updateNSView(_ view: NSView, context: Context) {
         DispatchQueue.main.async {
-            view.window?.isMovableByWindowBackground = true
+            guard let window = view.window else { return }
+            window.isMovableByWindowBackground = true
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
+            window.styleMask.insert(.fullSizeContentView)
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = duration
+                for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+                    window.standardWindowButton(kind)?.animator().alphaValue = dimButtons ? 0.22 : 1
+                }
+            }
+            let desired = square ? NSSize(width: 1, height: 1) : .zero
+            guard window.contentAspectRatio != desired else { return }
+            window.contentAspectRatio = desired
+            if square {
+                let width = max(260, window.contentLayoutRect.width)
+                window.setContentSize(NSSize(width: width, height: width))
+            }
         }
     }
 }
@@ -173,8 +193,8 @@ struct PlayerView: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
-    @FocusState private var keyboardFocused: Bool
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
@@ -198,7 +218,12 @@ struct PlayerView: View {
             } else {
                 mini(size: geometry.size)
             }
+            PlayerWindowBehavior(square: geometry.size.width < 600 || geometry.size.height < 360,
+                                 dimButtons: (geometry.size.width < 600 || geometry.size.height < 360) && !hovering && !voiceOver,
+                                 duration: reduceMotion ? 0 : 0.35)
+                .frame(width: 0, height: 0)
         }.frame(minWidth: 260, minHeight: 260)
+            .ignoresSafeArea(.container, edges: .top)
             .foregroundStyle(.white)
             .background { backdrop.ignoresSafeArea() }
             .environment(\.colorScheme, .dark)
@@ -243,7 +268,7 @@ struct PlayerView: View {
             .frame(width: size.width, height: size.height, alignment: .center)
     }
     private func mini(size: CGSize) -> some View {
-        let showControls = hovering || keyboardFocused || voiceOver
+        let showControls = hovering || voiceOver
         return ZStack(alignment: .bottom) {
             if let artwork = model.artwork {
                 Image(nsImage: artwork).resizable().scaledToFill()
@@ -289,9 +314,8 @@ struct PlayerView: View {
                 .allowsHitTesting(showControls).accessibilityHidden(!showControls)
         }.frame(width: size.width, height: size.height).clipped()
             .contentShape(Rectangle()).onHover { hovering = $0 }
-            .focusable().focused($keyboardFocused)
             .accessibilityLabel("迷你播放器，\(title)")
-            .animation(.easeInOut(duration: 0.18), value: showControls)
+            .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: showControls)
     }
     private var backdrop: some View {
         GeometryReader { geometry in
@@ -411,6 +435,7 @@ struct SettingsPanel: View {
             }
             Section("同步诊断") {
                 Button("打开日志") { model.openLogs() }
+                Button("打开数据与卸载目录") { NSWorkspace.shared.open(model.root) }
                 LabeledContent("状态", value: model.phaseLabel)
                 LabeledContent("专辑封面", value: model.artworkStatus)
                 if model.snapshot?.controlsAvailable == true && model.artwork == nil {
