@@ -107,3 +107,13 @@
 - Local validation: SDK 105 tests passed; host 8 passed, 1 existing network test ignored; cleanup 2 passed; Swift volume and brand smoke tests passed.
 - CI attempt could not run: GitHub account billing restriction; macos-14 runner also rejected. Updated Mac runner to macos-15; deployment target remains macOS 14. Remote Mac build and Android compilation remain unverified for this integration.
 - Later Android branch commits remain on fix/miplay-port-conflict and are not included in this integration. No new phone casting acceptance performed.
+
+## 0.2.6 recovery and device identity (2026-11-12)
+
+- Mac host migrates legacy identity files without changing device identifiers, chooses a private-range preferred control port, and persists the actual bound port for subsequent starts (including port-conflict fallback). Existing stale phone records are not removed.
+- Sleep-stop completion now reconciles a wake/start request that arrived while the backend was busy. Device enumeration callbacks arriving after sleep/stop/termination cannot restart the receiver. Media commands are rejected during sleep and termination.
+- Long-run audio and objective whole-house synchronization measurement are excluded from this round at the user's request.
+- Physical sleep/wake, output removal, phone media keys and control-center behavior require live acceptance; automated checks do not establish these results.
+
+- Validation this round: 9 ordinary host tests passed; the new live port-conflict/missing-output recovery test passed when run serially. Swift bridge passed three start/stop cycles with persisted port checks and native MediaPlayer publication/pause/cleanup. Application build and strict signature verification passed.
+- Existing malformed-control probe did not observe its expected diagnostic in this environment (also failed on a serial retry); it is not marked passed. Concurrent network tests contend for fixed Lyra ports and must run serially.

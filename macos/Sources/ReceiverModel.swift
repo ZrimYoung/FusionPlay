@@ -117,7 +117,7 @@ final class ReceiverModel: ObservableObject {
         else { systemMedia.update(state, busy: controlBusy, artwork: artwork) }
         if state.phase == .failed { error = state.message }
     }
-    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy }
+    var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
     func control(_ command: PlaybackCommand) {
         guard let receiver, canControl, !terminating else { return }
@@ -245,7 +245,9 @@ final class ReceiverModel: ObservableObject {
         backend.async { [weak self] in
             receiver.stop()
             let state = receiver.snapshot()
-            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state) }
+            DispatchQueue.main.async { [weak self] in self?.busy = false; self?.accept(state)
+                if let self, self.wantsReceiving, !self.sleeping, !self.terminating { self.restartApplied() }
+            }
         }
     }
     func volumeEditingChanged(_ editing: Bool) {
@@ -283,7 +285,7 @@ final class ReceiverModel: ObservableObject {
             do {
                 let nets = try networkInterfaces(); let audio = try audioDevices()
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, !self.busy, !self.sleeping, !self.terminating else { return }
                     self.networks = nets; self.outputs = audio
                     guard self.wantsReceiving, let settings = self.appliedSettings else { return }
                     let current = self.deviceSignature(settings: settings)

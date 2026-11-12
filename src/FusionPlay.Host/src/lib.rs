@@ -210,13 +210,24 @@ struct Identity {
     idm: String,
     lyra: String,
     media: String,
+    #[serde(default)]
+    control_port: u16,
+}
+fn new_control_port() -> u16 {
+    49152 + (uuid::Uuid::new_v4().as_u128() % 16384) as u16
 }
 fn load_identity(dir: &Path) -> Result<Identity> {
     let path = dir.join("identity.json");
     if path.exists() {
-        return serde_json::from_slice(&fs::read(path).map_err(storage)?).map_err(storage);
+        let mut identity: Identity = serde_json::from_slice(&fs::read(&path).map_err(storage)?).map_err(storage)?;
+        if identity.control_port == 0 || identity.control_port == 8899 {
+            identity.control_port = new_control_port();
+            save_json(&path, &identity)?;
+        }
+        return Ok(identity);
     }
     let identity = Identity {
+        control_port: new_control_port(),
         idm: uuid::Uuid::new_v4().to_string(),
         lyra: uuid::Uuid::new_v4().simple().to_string()[..8].to_uppercase(),
         media: uuid::Uuid::new_v4().simple().to_string()[..8].to_uppercase(),
@@ -467,11 +478,11 @@ impl Receiver {
                 message: "Selected audio output is unavailable".into(),
             });
         }
-        let identity = load_identity(&self.data)?;
+        let mut identity = load_identity(&self.data)?;
         let hardware_address = network_identity::interface_hardware_address(&interface.name);
         let config = ReceiverConfig::new(
             settings.name.trim(),
-            ReceiverIdentity::new(identity.idm, identity.lyra, identity.media),
+            ReceiverIdentity::new(identity.idm.clone(), identity.lyra.clone(), identity.media.clone()),
             interface
                 .address
                 .parse::<Ipv4Addr>()
@@ -481,6 +492,7 @@ impl Receiver {
         .with_output_device(
             (!settings.output_device.is_empty()).then(|| settings.output_device.clone()),
         )
+        .with_preferred_control_port(Some(identity.control_port))
         .with_initial_volume_percent(settings.volume)
         .with_hardware_address(hardware_address);
         save_json(&self.data.join("settings.json"), &settings)?;
@@ -495,6 +507,11 @@ impl Receiver {
             }),
         )
         .map_err(receiver_error)?;
+        identity.control_port = core.control_port();
+        if let Err(error) = save_json(&self.data.join("identity.json"), &identity) {
+            core.controller().stop();
+            return Err(error);
+        }
         *self.core.lock().unwrap() = Some(core);
         Ok(())
     }
@@ -761,6 +778,35 @@ fn write_diagnostic(dir: &Path, event: &Value) {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires LAN sockets and an available audio output"]
+    fn port_conflict_and_missing_output_recover() {
+        let root = std::env::temp_dir().join(format!("fusionplay-recover-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        let r = Receiver::new(data.to_string_lossy().into()).unwrap();
+        let ip: Ipv4Addr = network_interfaces().unwrap()[0].address.parse().unwrap();
+        let occupied = std::net::TcpListener::bind((ip, 0)).unwrap();
+        let mut identity = load_identity(&data).unwrap();
+        identity.control_port = occupied.local_addr().unwrap().port();
+        save_json(&data.join("identity.json"), &identity).unwrap();
+        let settings = r.settings();
+        r.start(settings.clone()).unwrap();
+        let port = r.core.lock().unwrap().as_ref().unwrap().control_port();
+        assert_ne!(port, identity.control_port);
+        assert_eq!(load_identity(&data).unwrap().control_port, port);
+        r.stop();
+        drop(occupied);
+        r.start(settings.clone()).unwrap();
+        assert_eq!(r.core.lock().unwrap().as_ref().unwrap().control_port(), port);
+        let mut missing = settings.clone();
+        missing.output_device = "nonexistent-fusionplay-test-device".into();
+        assert!(r.start(missing).is_err());
+        assert!(r.core.lock().unwrap().is_none());
+        r.start(settings).unwrap();
+        assert_eq!(r.core.lock().unwrap().as_ref().unwrap().control_port(), port);
+        r.stop(); drop(r);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     #[ignore = "requires local LAN sockets; run explicitly with the app stopped"]
     fn malformed_control_probe_keeps_live_listener_and_redacts_diagnostic() {
         use std::net::TcpStream;
@@ -981,6 +1027,19 @@ mod tests {
             &serde_json::json!({"event":"audio_output_signal_started"}),
         );
         assert_eq!(s.phase, Phase::Playing);
+    }
+    #[test]
+    fn legacy_identity_keeps_device_ids_and_allocates_port() {
+        let dir = std::env::temp_dir().join(format!("fusionplay-migrate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("identity.json"), br#"{"idm":"old-id","lyra":"old-lyra","media":"old-media"}"#).unwrap();
+        let first = load_identity(&dir).unwrap();
+        assert_eq!(first.idm, "old-id");
+        assert_eq!(first.lyra, "old-lyra");
+        assert_eq!(first.media, "old-media");
+        assert!(first.control_port >= 49152);
+        assert_eq!(first.control_port, load_identity(&dir).unwrap().control_port);
+        fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn identity_persistence_and_exclusive_ownership() {
