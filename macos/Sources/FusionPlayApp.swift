@@ -200,13 +200,6 @@ struct PlayerView: View {
                     transport("forward.end.fill", label: "下一曲") { model.control(.next) }
                     Spacer(minLength: 0)
                 }.padding(.vertical, 19)
-                HStack(spacing: 12) {
-                    Image(systemName: "speaker.fill").font(.system(size: 11))
-                    Slider(value: $model.volume, in: 0...100) { editing in model.volumeEditingChanged(editing) }
-                        .controlSize(.small).tint(.white).accessibilityLabel("接收音量")
-                        .accessibilityValue("\(Int(model.volume.rounded()))%")
-                    Image(systemName: "speaker.wave.3.fill").font(.system(size: 12))
-                }.foregroundStyle(.white.opacity(0.65)).disabled(!model.initialized)
                 Spacer(minLength: 0)
             }.frame(maxWidth: .infinity)
         }.padding(.horizontal, 34).padding(.top, 40).padding(.bottom, 28)
