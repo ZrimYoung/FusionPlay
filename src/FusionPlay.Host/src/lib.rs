@@ -19,6 +19,8 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(target_os = "macos")]
+mod macos_sync;
 mod network_identity;
 #[cfg(windows)]
 mod windows_calibration;
@@ -531,6 +533,8 @@ impl Receiver {
                 message: "Selected audio output is unavailable".into(),
             });
         }
+        #[cfg(target_os = "macos")]
+        macos_sync::apply(&self.data)?;
         let mut identity = load_identity(&self.data)?;
         #[cfg(windows)]
         windows_calibration::apply(&self.data, &settings)?;
