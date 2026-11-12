@@ -134,3 +134,5 @@
 - Mini native content aspect ratio is 1:1 and remains resizable. Keyboard focus ring disabled following user report; hover info and controls preserved.
 
 - Final installed revision: native transparent full-size title area, no player keyboard-focus outline, ordinary hover controls hidden on pointer exit; mini window buttons fade to 22% opacity and overlays fade over 0.35 seconds (disabled with Reduce Motion). Installer tests and build/signature passed. Installed app launched from /Applications; identity/settings unchanged during update; cancellation of uninstall tested without deletion. Visual hover/window behavior still requires user confirmation.
+
+- User acceptance on 2026-11-12: after reducing mini-player blur/dimming to the bottom third, user confirmed the result acceptable and requested GitHub publication. This confirms the current UI revision; it does not close the separately unverified sleep/wake, physical output-switching or malformed-control diagnostic checks. Long-run/synchronization measurement remains excluded by user request.
