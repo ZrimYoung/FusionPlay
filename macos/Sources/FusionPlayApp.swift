@@ -159,6 +159,7 @@ struct PlaybackControls: View {
 struct PlayerView: View {
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var hovering = false
     @FocusState private var keyboardFocused: Bool
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -190,10 +191,10 @@ struct PlayerView: View {
             .environment(\.colorScheme, .dark)
     }
     private func expanded(size: CGSize) -> some View {
-        HStack(spacing: 28) {
-            cover(side: min(360, size.height - 80, size.width * 0.37))
+        let side = min(360, size.height - 80, size.width * 0.37)
+        return HStack(alignment: .top, spacing: 28) {
+            cover(side: side)
             VStack(alignment: .leading, spacing: 0) {
-                Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 9) {
                     Text(title).font(.system(size: 25, weight: .semibold))
                         .lineLimit(2).textSelection(.enabled).help(title)
@@ -223,11 +224,10 @@ struct PlayerView: View {
                         .help(playing ? "暂停" : "播放").accessibilityLabel(playing ? "暂停" : "播放")
                     transport("forward.end.fill", label: "下一曲") { model.control(.next) }
                     Spacer(minLength: 0)
-                }.padding(.vertical, 19)
-                Spacer(minLength: 0)
-            }.frame(maxWidth: .infinity)
-        }.padding(.horizontal, 34).padding(.top, 40).padding(.bottom, 28)
-            .frame(width: size.width, height: size.height)
+                }.padding(.top, 16)
+            }.frame(maxWidth: 440).frame(height: side)
+        }.padding(.horizontal, 28)
+            .frame(width: size.width, height: size.height, alignment: .center)
     }
     private func mini(size: CGSize) -> some View {
         let showControls = hovering || keyboardFocused || voiceOver
@@ -241,13 +241,29 @@ struct PlayerView: View {
                     .foregroundStyle(.white.opacity(0.4))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
-                .opacity(showControls ? 1 : 0).allowsHitTesting(false)
+            ZStack {
+                if !reduceTransparency, let artwork = model.artwork {
+                    Image(nsImage: artwork).resizable().scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped().blur(radius: 24)
+                        .mask(LinearGradient(stops: [
+                            .init(color: .clear, location: 0.12),
+                            .init(color: .black.opacity(0.45), location: 0.4),
+                            .init(color: .black, location: 0.72)
+                        ], startPoint: .top, endPoint: .bottom))
+                }
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black.opacity(reduceTransparency ? 0.85 : 0.35), location: 0.4),
+                    .init(color: .black.opacity(0.85), location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }.opacity(showControls ? 1 : 0).allowsHitTesting(false).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 8) {
                 Text(title).font(.system(size: 16, weight: .semibold)).lineLimit(2)
                 if !artist.isEmpty {
                     Text(artist).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75)).lineLimit(1)
                 }
+                progress.padding(.top, 4)
                 HStack {
                     Spacer(minLength: 0)
                     transport("backward.end.fill", label: "上一曲") { model.control(.previous) }

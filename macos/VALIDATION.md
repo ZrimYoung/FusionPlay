@@ -124,3 +124,5 @@
 - Compact menu revision adds a 56 pt cover with title/artist, a 190 pt volume row, and three footer actions (player/settings/quit). Receiver stop and logs remain available in settings; routine command acknowledgements are omitted but failures remain visible.
 
 - Resizable player/hover mini mode: native build and strict signature checks passed. Minimum 260 × 260, expanded layout from 600 × 360; physical resize/hover appearance awaits user confirmation.
+
+- Player refinement: expanded cover and information panel share one height and are centered as a unit; controls are bottom-aligned and title top-aligned. Mini hover overlay now includes source-reported progress/time and a blurred artwork layer fading in toward the bottom. Reduce Transparency skips artwork blur. Native build/signature checks passed; visual resize behavior awaits user feedback.
