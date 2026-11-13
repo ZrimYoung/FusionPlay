@@ -222,6 +222,7 @@ internal static class SeekInputCheck
                         ArrangeMain(width, height);
                     });
                     await Settle(queue!);
+                    await WaitForProgress(visible: true);
                     await OnUi(queue!, () => Pass("real_main_progress_visible_" + mode + "_" + colorMode, () =>
                     {
                         ArrangeMain(width, height);
@@ -288,9 +289,14 @@ internal static class SeekInputCheck
                     // Check the synchronous preference notification before layout
                     // can unload controls and independently cancel the gesture.
                     Require(PendingRequest(active) == null && !active.IsEnabled, "real_main_hidden_gesture_not_canceled_immediately");
+                    Pass("real_main_hide_immediately_removes_seek_passthrough_" + mode, () =>
+                    {
+                        var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                        Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_fading_progress_hole_remains");
+                    });
                     ArrangeMain(width, height);
                 });
-                await Settle(queue!);
+                await WaitForProgress(visible: false);
                 await OnUi(queue!, () => Pass("real_main_progress_hidden_" + mode, () =>
                 {
                     ArrangeMain(width, height);
@@ -303,7 +309,57 @@ internal static class SeekInputCheck
                     Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_hidden_progress_hole_remains");
                     mainSamples.Add(new { mode, width, height, show_progress = false, old_seek_region = new[] { oldProgressRegion.X, oldProgressRegion.Y, oldProgressRegion.Width, oldProgressRegion.Height }, registered_passthrough_count = holes.Length });
                 }));
+                step = "reverse_real_main_progress_animation_" + mode;
+                await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true }); ArrangeMain(width, height); });
+                await Task.Delay(50);
+                await OnUi(queue!, () =>
+                {
+                    ArrangeMain(width, height);
+                    Pass("real_main_expanding_progress_input_is_clipped_" + mode, () =>
+                    {
+                        var panel = Find<FrameworkElement>(mode == "compact" ? "MiniProgressPanel" : "ProgressPanel");
+                        var active = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
+                        Require(panel.Clip is RectangleGeometry clip && Math.Abs(clip.Rect.Height - panel.ActualHeight) < .01 && Math.Abs(clip.Rect.Width - panel.ActualWidth) < .01, "real_main_animated_progress_not_clipped");
+                        var full = MainRegion(active, (FrameworkElement)main!.Content);
+                        var viewport = MainRegion(panel, (FrameworkElement)main.Content);
+                        var holes = InputNonClientPointerSource.GetForWindowId(main.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                        foreach (var hole in holes.Where(rect => Overlaps(rect, full) && rect.Width >= full.Width))
+                            Require(Contains(viewport, Intersect(hole, full)), "real_main_expanding_seek_hole_exceeds_viewport");
+                        mainSamples.Add(new { mode, phase = "progress_expansion_clip", mid_animation_observed = !double.IsNaN(panel.Height), viewport_region = new[] { viewport.X, viewport.Y, viewport.Width, viewport.Height }, full_target_region = new[] { full.X, full.Y, full.Width, full.Height } });
+                    });
+                    controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false }); ArrangeMain(width, height);
+                });
+                await Task.Delay(50);
+                await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true }); ArrangeMain(width, height); });
+                await WaitForProgress(visible: true);
+                await OnUi(queue!, () => Pass("real_main_rapid_progress_reversal_finishes_visible_" + mode, () =>
+                {
+                    ArrangeMain(width, height);
+                    Require(Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek").IsEnabled, "real_main_reversed_progress_disabled");
+                    var active = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
+                    var region = MainRegion(active, (FrameworkElement)main!.Content);
+                    Require(InputNonClientPointerSource.GetForWindowId(main.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough).Any(rect => Contains(rect, region)), "real_main_reversed_progress_hole_missing");
+                }));
+                await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false }); ArrangeMain(width, height); });
+                await WaitForProgress(visible: false);
+                await OnUi(queue!, () => Pass("real_main_reversed_progress_finishes_collapsed_" + mode, () =>
+                    Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed, "real_main_reversed_progress_not_collapsed")));
             }
+            step = "real_main_progress_animation_mode_switch";
+            await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true }); ArrangeMain(820, 480); });
+            await WaitForProgress(visible: true);
+            await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false }); WindowSizing.ResizeContent(main!, 420, 420); });
+            await Settle(queue!);
+            await OnUi(queue!, () => ArrangeMain(420, 420));
+            await WaitForProgress(visible: false);
+            await OnUi(queue!, () => Pass("real_main_mode_switch_during_progress_hide_snaps_collapsed", () =>
+                Require(Find<FrameworkElement>("MiniRoot").Visibility == Visibility.Visible && Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed, "real_main_mode_switch_retained_old_hide")));
+            await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true }); WindowSizing.ResizeContent(main!, 820, 480); });
+            await Settle(queue!);
+            await OnUi(queue!, () => ArrangeMain(820, 480));
+            await WaitForProgress(visible: true);
+            await OnUi(queue!, () => Pass("real_main_mode_switch_during_progress_show_snaps_visible", () =>
+                Require(Find<FrameworkElement>("ExpandedRoot").Visibility == Visibility.Visible && Find<ProgressSeekButton>("ProgressSeek").IsEnabled, "real_main_mode_switch_retained_old_show")));
             status = "passed";
         }
         catch (Exception error)
@@ -374,6 +430,26 @@ internal static class SeekInputCheck
             foreach (var text in new[] { Find<PlayerText>("PositionText"), Find<PlayerText>("MiniPosition") })
                 Require(text.Text == expectedTime, "real_main_time_ignored_display_position");
         }
+        async Task WaitForProgress(bool visible)
+        {
+            // Completion is an observed layout state, not an assumed timer.
+            // Bound the check so a lost/stale storyboard callback is a failure.
+            long started = Environment.TickCount64;
+            do
+            {
+                bool settled = false;
+                await OnUi(queue!, () =>
+                {
+                    Background();
+                    settled = new[] { Find<FrameworkElement>("ProgressPanel"), Find<FrameworkElement>("MiniProgressPanel") }.All(panel =>
+                        visible ? panel.Visibility == Visibility.Visible && double.IsNaN(panel.Height) && Math.Abs(panel.Opacity - 1) < .001
+                            : panel.Visibility == Visibility.Collapsed);
+                });
+                if (settled) return;
+                await Task.Delay(20);
+            } while (Environment.TickCount64 - started < 1500);
+            throw new CheckFailure(visible ? "real_main_progress_show_animation_did_not_settle" : "real_main_progress_hide_animation_did_not_settle");
+        }
         T Find<T>(string name) where T : FrameworkElement
         {
             var content = (FrameworkElement)main!.Content;
@@ -411,6 +487,11 @@ internal static class SeekInputCheck
             foreach (var child in Descendants(VisualTreeHelper.GetChild(parent, index))) yield return child;
     }
     private static bool Contains(RectInt32 a, RectInt32 b) => a.X <= b.X && a.Y <= b.Y && a.X + a.Width >= b.X + b.Width && a.Y + a.Height >= b.Y + b.Height;
+    private static RectInt32 Intersect(RectInt32 a, RectInt32 b)
+    {
+        int left = Math.Max(a.X, b.X), top = Math.Max(a.Y, b.Y);
+        return new(left, top, Math.Max(0, Math.Min(a.X + a.Width, b.X + b.Width) - left), Math.Max(0, Math.Min(a.Y + a.Height, b.Y + b.Height) - top));
+    }
     private static bool Overlaps(RectInt32 a, RectInt32 b) => a.X < b.X + b.Width && b.X < a.X + a.Width && a.Y < b.Y + b.Height && b.Y < a.Y + a.Height;
     private static Task OnUi(DispatcherQueue queue, Action action)
     {

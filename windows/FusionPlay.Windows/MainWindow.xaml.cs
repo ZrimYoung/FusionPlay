@@ -23,10 +23,11 @@ public sealed partial class MainWindow : Window
     private readonly Backdrop backdrop, miniBackdrop, loadingBackdrop;
     private readonly ISquareWindow squareSizing;
     private readonly TransportTransition transportTransition, expandedTransportTransition;
+    private readonly TransportTransition progressTransition, expandedProgressTransition;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
     private string? progressColorKey;
-    private bool pointerInside, focusInside, controlsShown = true, captionShown = true, closed, compact = true, rendering = true, revealMiniRequested;
+    private bool pointerInside, focusInside, controlsShown = true, captionShown = true, progressShown, closed, compact = true, rendering = true, revealMiniRequested;
     private string preferenceError = "";
     public bool AllowClose { get; set; }
     public event Action? ClosingToTray;
@@ -51,6 +52,8 @@ public sealed partial class MainWindow : Window
         squareSizing = WindowSizing.FixedSquare(this, NativeHoverChanged);
         transportTransition = new TransportTransition(MiniTransport);
         expandedTransportTransition = new TransportTransition(TransportPanel, 52);
+        progressTransition = new TransportTransition(MiniProgressPanel, 48, clipToBounds: true);
+        expandedProgressTransition = new TransportTransition(ProgressPanel, 48, clipToBounds: true);
         AttachVolume(VolumeSlider, model);
         RootGrid.Loaded += (_, _) => { UiTypography.Apply(RootGrid, model.Preferences.Value, force: true); UpdateInputRegions(); };
         RootGrid.LayoutUpdated += Root_LayoutUpdated;
@@ -91,7 +94,7 @@ public sealed partial class MainWindow : Window
             backdrop.Failed -= LogBackdropFailure; miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
-            hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose();
+            hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); progressTransition.Dispose(); expandedProgressTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose();
         };
         Render(); ScheduleHide();
     }
@@ -153,15 +156,18 @@ public sealed partial class MainWindow : Window
         PinIcon.Opacity = preferences.Pinned ? 1 : 0.6;
         PinButton.Visibility = preferences.ShowPinButton ? Visibility.Visible : Visibility.Collapsed;
         if (AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsAlwaysOnTop = preferences.Pinned;
-        transportTransition.SetVisible(preferences.ShowTransport && !model.MigrationRequired, Backdrop.AnimationsEnabled && compact);
-        expandedTransportTransition.SetVisible(preferences.ShowTransport && !model.MigrationRequired, Backdrop.AnimationsEnabled && !compact);
+        bool sectionAnimations = Backdrop.AnimationsEnabled;
+        transportTransition.SetVisible(preferences.ShowTransport && !model.MigrationRequired, sectionAnimations && compact);
+        expandedTransportTransition.SetVisible(preferences.ShowTransport && !model.MigrationRequired, sectionAnimations && !compact);
         VolumeSlider.IsEnabled = model.Initialized; VolumeSlider.Value = model.Volume;
         AutomationProperties.SetName(VolumeSlider, L.Text("接收音量"));
         AutomationProperties.SetName(MiniCover, L.Text("专辑封面"));
         AutomationProperties.SetName(MiniProgress, L.Text("播放进度"));
         AutomationProperties.SetName(CoverImage, L.Text("专辑封面")); AutomationProperties.SetName(Progress, L.Text("播放进度"));
         bool progress = preferences.ShowProgress && state.HasMedia && state.DurationMs is > 0 && displayPosition != null;
-        MiniProgressPanel.Visibility = ProgressPanel.Visibility = progress ? Visibility.Visible : Visibility.Collapsed;
+        // Input follows the requested state immediately, while the outgoing
+        // visual can remain visible until its fade and height animation finish.
+        progressShown = progress;
         foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
         {
             seek.IsEnabled = progress && model.CanSeek;
@@ -176,6 +182,8 @@ public sealed partial class MainWindow : Window
             MiniProgress.Value = Progress.Value = Math.Clamp(100.0 * displayPosition!.Value / state.DurationMs!.Value, 0, 100);
             MiniPosition.Text = PositionText.Text = FormatTime(displayPosition.Value); MiniDuration.Text = DurationText.Text = FormatTime(state.DurationMs.Value);
         }
+        progressTransition.SetVisible(progress, sectionAnimations && compact);
+        expandedProgressTransition.SetVisible(progress, sectionAnimations && !compact);
         string error = preferenceError.Length > 0 ? preferenceError : model.Error;
         MigrationButton.Content = ExpandedMigrationButton.Content = L.Text("为此电脑建立独立身份");
         MigrationButton.Visibility = ExpandedMigrationButton.Visibility = model.MigrationRequired ? Visibility.Visible : Visibility.Collapsed;
@@ -255,17 +263,27 @@ public sealed partial class MainWindow : Window
         if (closed || squareSizing == null || RootGrid.XamlRoot == null) return;
         double scale = RootGrid.XamlRoot.RasterizationScale;
         var rectangles = new List<global::Windows.Graphics.RectInt32>();
-        void Add(FrameworkElement element)
+        void Add(FrameworkElement element, FrameworkElement? viewport = null)
         {
             if (element.Visibility != Visibility.Visible || element.ActualWidth <= 0 || element.ActualHeight <= 0) return;
             var bounds = element.TransformToVisual(RootGrid).TransformBounds(new global::Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            if (viewport != null)
+            {
+                // A 24-DIP child can exceed its animated section's current
+                // height. Route input only through the part actually exposed.
+                var clip = viewport.TransformToVisual(RootGrid).TransformBounds(new global::Windows.Foundation.Rect(0, 0, viewport.ActualWidth, viewport.ActualHeight));
+                double left = Math.Max(bounds.Left, clip.Left), top = Math.Max(bounds.Top, clip.Top);
+                double right = Math.Min(bounds.Right, clip.Right), bottom = Math.Min(bounds.Bottom, clip.Bottom);
+                if (right <= left || bottom <= top) return;
+                bounds = new global::Windows.Foundation.Rect(left, top, right - left, bottom - top);
+            }
             int x = (int)Math.Floor(bounds.Left * scale), y = (int)Math.Floor(bounds.Top * scale);
             rectangles.Add(new(x, y, (int)Math.Ceiling(bounds.Right * scale) - x, (int)Math.Ceiling(bounds.Bottom * scale) - y));
         }
         if (!compact)
         {
             Add(SettingsButton); Add(MiniButton); Add(ExpandedCloseButton); Add(VolumeSlider); Add(ExpandedMigrationButton);
-            if (ProgressPanel.Visibility == Visibility.Visible) Add(ProgressSeek);
+            if (progressShown && ProgressPanel.Visibility == Visibility.Visible) Add(ProgressSeek, ProgressPanel);
             if (TransportPanel.Visibility == Visibility.Visible && TransportPanel.ActualHeight > 0) { Add(PreviousButton); Add(PlayButton); Add(NextButton); }
         }
         else
@@ -273,7 +291,7 @@ public sealed partial class MainWindow : Window
             if (captionShown) { Add(CloseButton); Add(PinButton); }
             if (controlsShown)
             {
-                if (MiniProgressPanel.Visibility == Visibility.Visible) Add(MiniProgressSeek);
+                if (progressShown && MiniProgressPanel.Visibility == Visibility.Visible) Add(MiniProgressSeek, MiniProgressPanel);
                 if (MiniTransport.Visibility == Visibility.Visible && MiniTransport.ActualHeight > 0) { Add(MiniPreviousButton); Add(MiniPlayButton); Add(MiniNextButton); }
                 Add(MigrationButton);
             }

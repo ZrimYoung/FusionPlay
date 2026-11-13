@@ -1,22 +1,25 @@
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
 
 namespace FusionPlay.Windows.Platform;
 
-/// <summary>Collapses transport controls without leaving a blank row or restarting on state polling.</summary>
+/// <summary>Collapses a player section without leaving a blank row or restarting on state polling.</summary>
 internal sealed class TransportTransition : IDisposable
 {
     private readonly FrameworkElement element;
     private readonly double fallbackHeight, visibleOpacity;
     private readonly bool visibleHitTesting;
+    private readonly RectangleGeometry? originalClip;
+    private readonly RectangleGeometry? boundsClip;
     private Storyboard? animation;
     private EventHandler<object>? completed;
     private bool? target;
     private long version;
     private bool disposed;
 
-    public TransportTransition(FrameworkElement element, double visibleHeight = 44)
+    public TransportTransition(FrameworkElement element, double visibleHeight = 44, bool clipToBounds = false)
     {
         ArgumentNullException.ThrowIfNull(element);
         if (!double.IsFinite(visibleHeight) || visibleHeight < 0)
@@ -24,6 +27,12 @@ internal sealed class TransportTransition : IDisposable
         this.element = element; fallbackHeight = visibleHeight;
         visibleOpacity = element.Opacity;
         visibleHitTesting = element.IsHitTestVisible;
+        if (clipToBounds)
+        {
+            originalClip = element.Clip;
+            boundsClip = new RectangleGeometry(); element.Clip = boundsClip;
+            element.SizeChanged += SizeChanged; UpdateClip();
+        }
     }
 
     public void SetVisible(bool visible, bool animate)
@@ -105,6 +114,11 @@ internal sealed class TransportTransition : IDisposable
         animation.Stop(); animation.Children.Clear();
         animation = null; completed = null;
     }
+    private void SizeChanged(object sender, SizeChangedEventArgs args) => UpdateClip();
+    private void UpdateClip()
+    {
+        if (boundsClip != null) boundsClip.Rect = new Rect(0, 0, Math.Max(0, element.ActualWidth), Math.Max(0, element.ActualHeight));
+    }
 
     public void Dispose()
     {
@@ -112,5 +126,6 @@ internal sealed class TransportTransition : IDisposable
         disposed = true;
         Stop();
         Snap(target ?? element.Visibility == Visibility.Visible);
+        if (boundsClip != null) { element.SizeChanged -= SizeChanged; element.Clip = originalClip; }
     }
 }
