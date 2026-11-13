@@ -39,6 +39,15 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--seek-input-check"))
+        {
+            // Separate, hidden seek-target check; never contacts the running app,
+            // creates a receiver, or enters visible startup/fallback handling.
+            try { await SeekInputCheck.Run(Path.Combine(AppContext.BaseDirectory, "seek-input-check.json")); }
+            catch (Exception error) { StartupRecord("seek_input_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--tray-layout-check"))
         {
             // This isolated diagnostic never enters single-instance notification,

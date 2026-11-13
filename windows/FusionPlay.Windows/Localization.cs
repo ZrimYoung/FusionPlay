@@ -18,6 +18,8 @@ internal static class L
     public static string Text(string chinese, string english) => language == "en" ? english : chinese;
     private static readonly Dictionary<string, string> English = new(StringComparer.Ordinal)
     {
+        ["播放进度，点击跳转"] = "Playback progress, click to seek",
+        ["点击跳转；方向键前后 10 秒，Home 到开头，End 到结尾。"] = "Click to seek; arrow keys move 10 seconds, Home goes to the start, and End goes to the end.",
         ["进度条颜色"] = "Progress Bar Color",
         ["展开音量"] = "Expand Volume",
         ["收起音量"] = "Collapse Volume",

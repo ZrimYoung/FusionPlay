@@ -509,7 +509,13 @@ impl Receiver {
             .ok_or_else(|| receiver_error("Receiver is stopped"))?.controller();
         let outcome = controller.send_confirmed(MediaAction::Seek(position_ms), Duration::from_millis(1500))
             .map_err(receiver_error)?;
-        Ok(CommandOutcome { dispatched: outcome.dispatched, confirmed: outcome.confirmed })
+        // A confirmation can arrive as the sender changes tracks. Preserve the
+        // fact that the request was dispatched, but do not claim that a new
+        // track's state confirms this request against the preceding metadata.
+        let current = self.snapshot();
+        let confirmed = outcome.confirmed && current.controls_available
+            && current.track_id == expected_track_id && current.title == expected_title;
+        Ok(CommandOutcome { dispatched: outcome.dispatched, confirmed })
     }
     pub fn set_volume(&self, volume: u32) -> Result<()> {
         let _operation = self.operations.lock().unwrap();

@@ -1,6 +1,9 @@
-param([string]$Version = '0.2.0-preview7-tray2', [switch]$SkipNative)
+param([string]$Version = '0.2.0-preview8-seek', [switch]$SkipNative, [string]$NativeDir = '')
 . (Join-Path $PSScriptRoot 'env.ps1')
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Invalid package version.' }
+if ($NativeDir -and -not $SkipNative) { throw 'Use NativeDir only with SkipNative for a separately built native library.' }
+$taskNative = if ($NativeDir) { [IO.Path]::GetFullPath($NativeDir) } else { Join-Path $env:CARGO_TARGET_DIR 'release' }
+if ($SkipNative -and -not (Test-Path -LiteralPath (Join-Path $taskNative 'fusionplay_host.dll'))) { throw 'The requested native library does not exist.' }
 $taskArtifacts = Join-Path $RepositoryRoot 'artifacts'
 $taskName = "FusionPlay-Windows-$Version-x64"
 $taskPublish = Join-Path $taskArtifacts $taskName
@@ -16,7 +19,7 @@ try {
     }
     & (Join-Path $PSScriptRoot 'make-icon.ps1')
     $taskCompile = Join-Path $taskArtifacts ("windows-compile-" + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '/')
-    & dotnet publish FusionPlay.Windows/FusionPlay.Windows.csproj -c Release -p:Platform=x64 "-p:Version=$Version" "-p:BaseOutputPath=$taskCompile" "-p:FusionPlayNativeDir=$env:CARGO_TARGET_DIR/release" --self-contained true -o $taskPublish --nologo
+    & dotnet publish FusionPlay.Windows/FusionPlay.Windows.csproj -c Release -p:Platform=x64 "-p:Version=$Version" "-p:BaseOutputPath=$taskCompile" "-p:FusionPlayNativeDir=$taskNative" --self-contained true -o $taskPublish --nologo
     if ($LASTEXITCODE -ne 0) { throw 'Self-contained Windows publish failed.' }
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot 'windows/README.zh-CN.md') -Destination (Join-Path $taskPublish '使用说明.md') -Force
     $taskCommit = (& git -C $RepositoryRoot rev-parse HEAD).Trim()
@@ -25,6 +28,7 @@ try {
         source_url="https://github.com/ZrimYoung/FusionPlay/tree/$taskCommit"
         branch=(& git -C $RepositoryRoot branch --show-current).Trim()
         dirty=[bool](& git -C $RepositoryRoot status --porcelain)
+        native_sha256=(Get-FileHash -LiteralPath (Join-Path $taskPublish 'fusionplay_host.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
         acoustic_sync='not_verified'
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskPublish 'build-info.json') -Encoding utf8
     $taskArchive = Join-Path $taskArtifacts "$taskName.zip"

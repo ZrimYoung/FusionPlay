@@ -75,6 +75,10 @@ const MOBILE_AUDIO_STREAMING_MODE_ACK: [u8; 5] = [0, 0, 0, 0, 1];
 // pause/previous/next/seek frames look like duplicates and they are silently
 // discarded by CmdSource.
 const FIRST_ENCRYPTED_NOTIFICATION_SEQUENCE: u32 = 8;
+// A phone may report the seek result after command confirmation has timed out.
+// Keep a bounded, one-shot attribution window without extending confirmation.
+const SEEK_JUMP_GUARD_WINDOW: Duration = Duration::from_secs(10);
+const MAX_RECENT_SEEK_JUMPS: usize = 16;
 
 // Xiaomi encodes the standalone-player command family in the high byte of
 // the 16-bit command id. Keeping the namespace separate is important: for
@@ -193,6 +197,15 @@ struct RemoteEffectState {
     track_identity: Option<String>,
     last_position: Option<(u64, u64)>,
     pending: HashMap<u64, PendingRemoteEffect>,
+    recent_seek_jumps: Vec<RecentSeekJump>,
+}
+
+struct RecentSeekJump {
+    effect_id: u64,
+    session_id: u64,
+    track_revision: u64,
+    target_ms: u64,
+    sent_at: Instant,
 }
 
 struct PendingRemoteEffect {
@@ -211,6 +224,7 @@ enum ExpectedRemoteEffect {
     Position {
         target_ms: u64,
         baseline_revision: u64,
+        track_revision: u64,
     },
 }
 
@@ -418,8 +432,25 @@ impl ControlHub {
                 MediaAction::Seek(target_ms) => ExpectedRemoteEffect::Position {
                     target_ms,
                     baseline_revision: effects.position_revision,
+                    track_revision: effects.track_revision,
                 },
             };
+            if let MediaAction::Seek(target_ms) = resolved_action {
+                effects
+                    .recent_seek_jumps
+                    .retain(|seek| seek.sent_at.elapsed() < SEEK_JUMP_GUARD_WINDOW);
+                if effects.recent_seek_jumps.len() >= MAX_RECENT_SEEK_JUMPS {
+                    effects.recent_seek_jumps.remove(0);
+                }
+                let track_revision = effects.track_revision;
+                effects.recent_seek_jumps.push(RecentSeekJump {
+                    effect_id,
+                    session_id: active.id,
+                    track_revision,
+                    target_ms,
+                    sent_at: Instant::now(),
+                });
+            }
             effects.pending.insert(
                 effect_id,
                 PendingRemoteEffect {
@@ -433,6 +464,11 @@ impl ControlHub {
         let sequence = allocate_notification_sequence(notification_sequence);
         if let Err(error) = control_sender.send(Outgoing::encrypted(NOTIFY, sequence, body)) {
             self.remove_pending_effect(effect_id);
+            if let Ok(mut effects) = self.remote_effects.lock() {
+                effects
+                    .recent_seek_jumps
+                    .retain(|seek| seek.effect_id != effect_id);
+            }
             return Err(error).context("send Xiaomi MiPlay receiver-control notification");
         }
 
@@ -524,6 +560,7 @@ impl ControlHub {
         if let Ok(mut effects) = self.remote_effects.lock() {
             effects.track_identity = None;
             effects.last_position = None;
+            effects.recent_seek_jumps.clear();
         }
         playback_gate
     }
@@ -591,6 +628,7 @@ impl ControlHub {
                 effects.track_identity = identity;
                 effects.track_revision = effects.track_revision.wrapping_add(1);
                 effects.last_position = None;
+                effects.recent_seek_jumps.clear();
             }
             let revision = effects.track_revision;
             drain_matching_effects(&mut effects, id, |expected| {
@@ -605,7 +643,7 @@ impl ControlHub {
     }
 
     fn observe_position(&self, id: u64, position_ms: u64) -> (bool, bool) {
-        let (completions, changed, advancing) = {
+        let (completions, changed, advancing, seek_jump) = {
             let Ok(mut effects) = self.remote_effects.lock() else {
                 return (false, false);
             };
@@ -618,21 +656,43 @@ impl ControlHub {
             effects.last_position = Some((id, position_ms));
             effects.position_revision = effects.position_revision.wrapping_add(1);
             let revision = effects.position_revision;
+            let current_track_revision = effects.track_revision;
+            let mut seek_jump = false;
+            effects.recent_seek_jumps.retain(|seek| {
+                if seek.sent_at.elapsed() >= SEEK_JUMP_GUARD_WINDOW {
+                    return false;
+                }
+                if changed
+                    && seek.session_id == id
+                    && seek.track_revision == current_track_revision
+                    && position_ms.abs_diff(seek.target_ms) <= 2_000
+                {
+                    seek_jump = true;
+                    return false;
+                }
+                true
+            });
             (
                 drain_matching_effects(&mut effects, id, |expected| {
                     matches!(
                         expected,
-                        ExpectedRemoteEffect::Position { target_ms, baseline_revision }
+                        ExpectedRemoteEffect::Position { target_ms, baseline_revision, track_revision }
                             if revision > *baseline_revision
+                                && current_track_revision == *track_revision
                                 && position_ms.abs_diff(*target_ms) <= 2_000
                     )
                 }),
                 changed,
                 advancing,
+                seek_jump,
             )
         };
+        // A seek acknowledgment is a position jump, not evidence of resumed
+        // playback. Rebase last_position above, then allow subsequent real
+        // progression or explicit playback messages to resume as before.
+        let seek_acknowledged = !completions.is_empty();
         complete_remote_effects(completions, true);
-        let resumed = advancing && self.resume_if_paused(id);
+        let resumed = advancing && !seek_acknowledged && !seek_jump && self.resume_if_paused(id);
         (changed, resumed)
     }
 
@@ -2373,7 +2433,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex, mpsc};
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn control_notification_sequence() -> Arc<AtomicU32> {
         Arc::new(AtomicU32::new(FIRST_ENCRYPTED_NOTIFICATION_SEQUENCE + 1))
@@ -2709,6 +2769,208 @@ mod tests {
         assert_eq!(next.command, NOTIFY);
         assert_eq!(next.sequence, 13);
         assert_eq!(next.body, b"\x08key-next\x00\x01");
+    }
+
+    fn seek_confirmation_fixture() -> (ControlHub, mpsc::Receiver<super::Outgoing>) {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let (sender, receiver) = mpsc::channel();
+        hub.activate(
+            17,
+            "127.0.0.1".parse().unwrap(),
+            sender,
+            control_notification_sequence(),
+        );
+        hub.observe_media_info(17, br#"{"mAudioId":"track-a","mTitle":"Song A"}"#);
+        hub.observe_position(17, 1_000);
+        (hub, receiver)
+    }
+
+    #[test]
+    fn seek_confirmation_requires_the_same_session_and_current_track_position() {
+        let (hub, outgoing) = seek_confirmation_fixture();
+        let dispatched = hub.clone();
+        let worker = thread::spawn(move || {
+            dispatched
+                .send_confirmed(MediaAction::Seek(123_456), Duration::from_secs(1))
+                .unwrap()
+        });
+        let frame = outgoing.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(frame.command, NOTIFY);
+        assert_eq!(frame.body, b"\x08key-seek\x09\x00\x00\x00\x00\x00\x01\xe2@");
+        // Merely dispatching a request cannot project a fabricated position.
+        assert_eq!(
+            hub.remote_effects.lock().unwrap().last_position,
+            Some((17, 1_000))
+        );
+        hub.observe_position(99, 123_456);
+        assert_eq!(hub.remote_effects.lock().unwrap().pending.len(), 1);
+        hub.observe_position(17, 123_456);
+        assert_eq!(
+            worker.join().unwrap(),
+            MediaControlOutcome {
+                dispatched: true,
+                confirmed: true
+            }
+        );
+        assert!(hub.remote_effects.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn seek_confirmation_cannot_be_satisfied_by_a_different_track_at_the_target() {
+        let (hub, outgoing) = seek_confirmation_fixture();
+        let dispatched = hub.clone();
+        let worker = thread::spawn(move || {
+            dispatched
+                .send_confirmed(MediaAction::Seek(12_345), Duration::from_millis(150))
+                .unwrap()
+        });
+        outgoing.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(hub.remote_effects.lock().unwrap().pending.len(), 1);
+        hub.observe_media_info(17, br#"{"mAudioId":"track-b","mTitle":"Song B"}"#);
+        hub.observe_position(17, 12_345);
+        // Before this regression fix, that new track's matching position drained
+        // the old seek and falsely reported confirmation immediately.
+        assert_eq!(hub.remote_effects.lock().unwrap().pending.len(), 1);
+        assert_eq!(
+            worker.join().unwrap(),
+            MediaControlOutcome {
+                dispatched: true,
+                confirmed: false
+            }
+        );
+        assert!(hub.remote_effects.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn seek_timeout_reports_dispatched_without_faking_confirmation_or_position() {
+        let (hub, outgoing) = seek_confirmation_fixture();
+        let outcome = hub
+            .send_confirmed(MediaAction::Seek(20_000), Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(
+            outcome,
+            MediaControlOutcome {
+                dispatched: true,
+                confirmed: false
+            }
+        );
+        assert_eq!(outgoing.try_iter().count(), 1);
+        let effects = hub.remote_effects.lock().unwrap();
+        assert_eq!(effects.last_position, Some((17, 1_000)));
+        assert!(effects.pending.is_empty());
+    }
+
+    #[test]
+    fn paused_seek_position_jump_does_not_resume_but_later_progress_still_can() {
+        let (hub, outgoing) = seek_confirmation_fixture();
+        let paused = hub
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .playback_gate
+            .clone();
+        assert!(hub.observe_playback(17, true));
+        // Exercise a genuinely settled pause; the existing 1.5s stale-position
+        // guard must not accidentally make this regression test pass by itself.
+        thread::sleep(Duration::from_millis(1510));
+        let dispatched = hub.clone();
+        let worker = thread::spawn(move || {
+            dispatched
+                .send_confirmed(MediaAction::Seek(20_000), Duration::from_secs(1))
+                .unwrap()
+        });
+        outgoing.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(hub.observe_position(17, 20_000), (true, false));
+        assert!(paused.is_paused());
+        assert_eq!(
+            worker.join().unwrap(),
+            MediaControlOutcome {
+                dispatched: true,
+                confirmed: true
+            }
+        );
+        assert_eq!(hub.observe_position(17, 21_000), (true, true));
+        assert!(!paused.is_paused());
+    }
+
+    #[test]
+    fn paused_seek_late_target_after_timeout_does_not_resume_playback() {
+        let (hub, outgoing) = seek_confirmation_fixture();
+        let paused = hub
+            .active
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .playback_gate
+            .clone();
+        assert!(hub.observe_playback(17, true));
+        thread::sleep(Duration::from_millis(1510));
+        let outcome = hub
+            .send_confirmed(MediaAction::Seek(20_000), Duration::ZERO)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            MediaControlOutcome {
+                dispatched: true,
+                confirmed: false
+            }
+        );
+        assert_eq!(outgoing.try_iter().count(), 1);
+        assert!(hub.remote_effects.lock().unwrap().pending.is_empty());
+        // No pending confirmation remains. The one-shot attribution still knows
+        // this target jump came from our seek rather than source-side Resume.
+        assert_eq!(hub.observe_position(17, 20_000), (true, false));
+        assert!(paused.is_paused());
+        assert!(
+            hub.remote_effects
+                .lock()
+                .unwrap()
+                .recent_seek_jumps
+                .is_empty()
+        );
+        assert_eq!(hub.observe_position(17, 21_000), (true, true));
+        assert!(!paused.is_paused());
+    }
+
+    #[test]
+    fn expired_seek_jump_attribution_does_not_block_normal_position_resume() {
+        let (hub, _outgoing) = seek_confirmation_fixture();
+        assert!(hub.observe_playback(17, true));
+        thread::sleep(Duration::from_millis(1510));
+        hub.send_confirmed(MediaAction::Seek(20_000), Duration::ZERO)
+            .unwrap();
+        {
+            let mut effects = hub.remote_effects.lock().unwrap();
+            for seek in &mut effects.recent_seek_jumps {
+                seek.sent_at =
+                    Instant::now() - super::SEEK_JUMP_GUARD_WINDOW - Duration::from_secs(1);
+            }
+        }
+        assert_eq!(hub.observe_position(17, 20_000), (true, true));
+        assert!(
+            hub.remote_effects
+                .lock()
+                .unwrap()
+                .recent_seek_jumps
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn paused_short_seek_duplicate_position_cannot_consume_the_late_jump_guard() {
+        let (hub, _outgoing) = seek_confirmation_fixture();
+        assert!(hub.observe_playback(17, true));
+        thread::sleep(Duration::from_millis(1510));
+        hub.send_confirmed(MediaAction::Seek(2_500), Duration::ZERO)
+            .unwrap();
+        // The ordinary pre-seek position is inside the protocol's 2s tolerance,
+        // but repeating it is not the seek result and must not use up attribution.
+        assert_eq!(hub.observe_position(17, 1_000), (false, false));
+        assert_eq!(hub.observe_position(17, 2_500), (true, false));
+        assert_eq!(hub.observe_position(17, 3_500), (true, true));
     }
 
     #[test]

@@ -101,6 +101,33 @@ fn request(handle: u64, input: Value) -> Result<Value> {
             })?;
             Ok(serde_json::to_value(receiver.control(command)?).map_err(storage)?)
         }
+        "seek" => {
+            let position_ms =
+                input["position_ms"]
+                    .as_u64()
+                    .ok_or_else(|| HostError::InvalidConfig {
+                        message: "position_ms is required and must be an unsigned 64-bit integer"
+                            .into(),
+                    })?;
+            let expected_track_id =
+                input["expected_track_id"]
+                    .as_str()
+                    .ok_or_else(|| HostError::InvalidConfig {
+                        message: "expected_track_id is required and must be a string".into(),
+                    })?;
+            let expected_title =
+                input["expected_title"]
+                    .as_str()
+                    .ok_or_else(|| HostError::InvalidConfig {
+                        message: "expected_title is required and must be a string".into(),
+                    })?;
+            serde_json::to_value(receiver.seek(
+                position_ms,
+                expected_track_id.to_owned(),
+                expected_title.to_owned(),
+            )?)
+            .map_err(storage)
+        }
         "volume" => {
             let volume = input["volume"]
                 .as_u64()
@@ -299,6 +326,160 @@ mod tests {
             true
         );
         drop(receiver);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seek_abi_requires_typed_fields_and_never_substitutes_missing_track_guards() {
+        let dir = std::env::temp_dir().join(format!(
+            "fusionplay-seek-abi-types-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let created = invoke(0, serde_json::json!({"op":"create", "data_directory":dir}));
+        let handle = created["value"]["handle"].as_u64().unwrap();
+        {
+            let receiver = handles().lock().unwrap().get(&handle).unwrap().clone();
+            let mut state = receiver.shared.state.lock().unwrap();
+            state.controls_available = true;
+            state.duration_ms = Some(1000);
+            state.position_ms = Some(125);
+            // Exact empty guards are legal values in the Host contract. Omitting
+            // either required field must still fail before reaching that contract.
+        }
+        let request = serde_json::json!({"op":"seek", "position_ms":500, "expected_track_id":"", "expected_title":""});
+        let before = invoke(handle, serde_json::json!({"op":"poll"}))["value"].clone();
+        assert_eq!(invoke(handle, request.clone())["error"]["code"], "receiver");
+        for field in ["position_ms", "expected_track_id", "expected_title"] {
+            let mut missing = request.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            let rejected = invoke(handle, missing);
+            assert_eq!(rejected["error"]["code"], "invalid_config");
+            assert!(
+                rejected["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(field)
+            );
+            let invalid = if field == "position_ms" {
+                vec![
+                    serde_json::json!(null),
+                    serde_json::json!(-1),
+                    serde_json::json!(1.5),
+                    serde_json::json!("500"),
+                    serde_json::json!(true),
+                    serde_json::json!([]),
+                ]
+            } else {
+                vec![
+                    serde_json::json!(null),
+                    serde_json::json!(5),
+                    serde_json::json!(false),
+                    serde_json::json!([]),
+                    serde_json::json!({}),
+                ]
+            };
+            for value in invalid {
+                let mut malformed = request.clone();
+                malformed[field] = value;
+                let rejected = invoke(handle, malformed);
+                assert_eq!(rejected["error"]["code"], "invalid_config");
+                assert!(
+                    rejected["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(field)
+                );
+            }
+        }
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"poll"}))["value"],
+            before
+        );
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"destroy"}))["ok"],
+            true
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn seek_abi_checks_session_track_range_and_never_projects_requested_progress() {
+        let dir = std::env::temp_dir().join(format!(
+            "fusionplay-seek-abi-routing-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let created = invoke(0, serde_json::json!({"op":"create", "data_directory":dir}));
+        let handle = created["value"]["handle"].as_u64().unwrap();
+        let seek = |position, track, title| {
+            invoke(
+                handle,
+                serde_json::json!({"op":"seek", "position_ms":position, "expected_track_id":track, "expected_title":title}),
+            )
+        };
+        let before = invoke(handle, serde_json::json!({"op":"poll"}))["value"].clone();
+        assert_eq!(
+            seek(0, "track-a", "Song")["error"]["code"],
+            "invalid_config"
+        );
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"poll"}))["value"],
+            before
+        );
+        {
+            let receiver = handles().lock().unwrap().get(&handle).unwrap().clone();
+            let mut state = receiver.shared.state.lock().unwrap();
+            state.controls_available = true;
+            state.phase = Phase::Playing;
+            state.track_id = "track-a".into();
+            state.title = "Song".into();
+            state.duration_ms = Some(1000);
+            state.position_ms = Some(125);
+        }
+        let before = invoke(handle, serde_json::json!({"op":"poll"}))["value"].clone();
+        for position in [0_u64, 1000] {
+            // Valid boundary requests reach Receiver.seek's stopped-core check,
+            // proving the ABI routes the operation rather than rejecting it as unknown.
+            assert_eq!(
+                seek(position, "track-a", "Song")["error"]["code"],
+                "receiver"
+            );
+        }
+        for (position, track, title) in [
+            (1001, "track-a", "Song"),
+            (u64::MAX, "track-a", "Song"),
+            (500, "old-track", "Song"),
+            (500, "track-a", "Old song"),
+        ] {
+            assert_eq!(
+                seek(position, track, title)["error"]["code"],
+                "invalid_config"
+            );
+        }
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"poll"}))["value"],
+            before
+        );
+        {
+            let receiver = handles().lock().unwrap().get(&handle).unwrap().clone();
+            receiver.shared.state.lock().unwrap().track_id = "track-b".into();
+        }
+        let changed = invoke(handle, serde_json::json!({"op":"poll"}))["value"].clone();
+        assert_eq!(
+            seek(500, "track-a", "Song")["error"]["code"],
+            "invalid_config"
+        );
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"poll"}))["value"],
+            changed
+        );
+        assert_eq!(
+            invoke(handle, serde_json::json!({"op":"destroy"}))["ok"],
+            true
+        );
+        assert_eq!(
+            seek(500, "track-b", "Song")["error"]["code"],
+            "invalid_config"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
