@@ -4,6 +4,11 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Application.Resources>
         <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default"><SolidColorBrush x:Key="PlayerSecondaryTextBrush" Color="#FFD6D6D6" /></ResourceDictionary>
+                <ResourceDictionary x:Key="Light"><SolidColorBrush x:Key="PlayerSecondaryTextBrush" Color="#FF505050" /></ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast"><SolidColorBrush x:Key="PlayerSecondaryTextBrush" Color="{ThemeResource SystemColorWindowTextColor}" /></ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
             <ResourceDictionary.MergedDictionaries><XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" /></ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

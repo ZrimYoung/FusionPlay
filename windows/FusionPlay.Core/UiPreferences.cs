@@ -13,6 +13,9 @@ public sealed record UiPreferences
     public bool ShowTrayIcon { get; init; } = true;
     public string ProgressColorMode { get; init; } = "system";
     public string ProgressCustomColor { get; init; } = "#FFFFFF";
+    public string UiFontFamily { get; init; } = "";
+    public int UiFontWeight { get; init; } = 400;
+    public string PlayerTextRendering { get; init; } = "enhanced";
 }
 
 /// <summary>Portable presentation preferences, independent of receiver identity and audio settings.</summary>
@@ -70,6 +73,12 @@ public sealed class UiPreferencesStore
     {
         if (preferences.Language is not ("zh-Hans" or "en"))
             throw new ArgumentException("Unsupported interface language.", nameof(preferences));
+        if (preferences.UiFontFamily == null || preferences.UiFontFamily.Length > 256 || preferences.UiFontFamily.Any(char.IsControl))
+            throw new ArgumentException("Invalid interface font family.", nameof(preferences));
+        if (preferences.UiFontWeight is < 1 or > 999)
+            throw new ArgumentException("Invalid interface font weight.", nameof(preferences));
+        if (preferences.PlayerTextRendering is not ("system" or "enhanced"))
+            throw new ArgumentException("Unsupported player text rendering.", nameof(preferences));
         if (preferences.ProgressColorMode is not ("system" or "white" or "custom"))
             throw new ArgumentException("Unsupported progress color mode.", nameof(preferences));
         string? color = preferences.ProgressCustomColor;

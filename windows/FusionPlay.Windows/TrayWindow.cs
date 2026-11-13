@@ -18,8 +18,8 @@ internal sealed class TrayWindow : Window
     private const double PanelWidth = 340;
     private readonly StackPanel root;
     private readonly Image cover = new() { Width = 60, Height = 60, Stretch = Stretch.UniformToFill };
-    private readonly TextBlock title = new() { FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, MaxLines = 2, TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock artist = new() { Opacity = 0.65, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis };
+    private readonly PlayerText title = new() { FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, MaxLines = 2, TextWrapping = TextWrapping.Wrap };
+    private readonly PlayerText artist = new() { FontSize = 13, Opacity = 0.9, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock status = new() { FontSize = 12, Opacity = 0.65 };
     private readonly Button play = new(), previous = new(), next = new();
     private readonly Button artworkButton = new(), trackButton = new(), settingsButton = new(), quitButton = new();
@@ -95,7 +95,7 @@ internal sealed class TrayWindow : Window
                 closedByTrayClick = Environment.TickCount64;
             HidePanel();
         };
-        root.Loaded += (_, _) => QueueFit(); root.SizeChanged += (_, _) => QueueFit();
+        root.Loaded += (_, _) => { UiTypography.Apply(root, model.Preferences.Value, force: true); QueueFit(); }; root.SizeChanged += (_, _) => QueueFit();
         model.Changed += Render; Closed += (_, _) => { closed = true; model.Changed -= Render; }; Render();
     }
     private static void Setup(Button button, string glyph, Action action)
@@ -111,6 +111,7 @@ internal sealed class TrayWindow : Window
     private void Render()
     {
         if (closed) return;
+        UiTypography.Apply(root, model.Preferences.Value);
         rendering = true; var state = model.State; Title = "FusionPlay · " + L.Text("接收面板");
         cover.Source = model.Artwork;
         string oldTitle = title.Text, oldArtist = artist.Text, oldStatus = status.Text;

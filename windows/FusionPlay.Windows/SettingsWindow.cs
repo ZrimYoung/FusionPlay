@@ -33,6 +33,7 @@ internal sealed class SettingsWindow : Window
     private readonly Button earlier = new() { Content = "−10" }, later = new() { Content = "+10" }, reset = new();
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.65, TextWrapping = TextWrapping.Wrap };
     private readonly ComboBox language = new() { DisplayMemberPath = "Label", ItemsSource = new[] { new Choice("zh-Hans", "简体中文"), new Choice("en", "English") } };
+    private FontSettingsPanel fontSettings = null!;
     private readonly ComboBox progressColorMode = new() { DisplayMemberPath = "Label", HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly ColorPicker progressColor = new()
     {
@@ -68,6 +69,7 @@ internal sealed class SettingsWindow : Window
         Label(() => { Title = L.Text("FusionPlay 设置"); heading.Text = L.Text("设置"); });
         root.Children.Add(heading); Grid.SetRow(error, 1); root.Children.Add(error);
         Grid.SetRow(navigation, 2); root.Children.Add(navigation); Content = root;
+        root.Loaded += (_, _) => UiTypography.Apply(root, model.Preferences.Value, force: true);
         AddPage("receiver", "接收", ReceiverPage());
         AddPage("appearance", "外观", AppearancePage());
         AddPage("advanced", "高级", AdvancedPage());
@@ -92,6 +94,7 @@ internal sealed class SettingsWindow : Window
         Closed += (_, _) =>
         {
             closed = true;
+            fontSettings.Dispose();
             // Programmatic Window.Close can bypass AppWindow.Closing during application exit.
             FlushProgressColor();
             model.DevicesChanged -= DevicesChanged; model.Changed -= Render;
@@ -110,7 +113,7 @@ internal sealed class SettingsWindow : Window
     }
     private TextBlock Text(string text, bool subdued = false)
     {
-        var result = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = subdued ? 12 : 14, Opacity = subdued ? 0.68 : 1 };
+        var result = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = subdued ? 13 : 14, Opacity = subdued ? 0.85 : 1 };
         Label(() => result.Text = L.Text(text)); return result;
     }
     private Button Button(string text, Action action)
@@ -152,6 +155,8 @@ internal sealed class SettingsWindow : Window
         {
             if (!renderingPreferences && language.SelectedItem is Choice choice) UpdatePreferences(p => p with { Language = choice.Key });
         };
+        fontSettings = new FontSettingsPanel(model.Preferences, UpdatePreferences);
+        Label(fontSettings.Localize); page.Children.Add(fontSettings);
         page.Children.Add(Text("迷你播放器"));
         always = Toggle("控件常驻", (p, value) => p with { AlwaysShowControls = value }); page.Children.Add(always);
         page.Children.Add(Text("鼠标移出后仍显示歌曲信息、进度和已开启的控件。", true));
@@ -290,6 +295,8 @@ internal sealed class SettingsWindow : Window
         try
         {
             var preferences = model.Preferences.Value;
+            fontSettings.Refresh();
+            if (Content is FrameworkElement root) UiTypography.Apply(root, preferences);
             language.SelectedItem = ((Choice[])language.ItemsSource).First(x => x.Key == preferences.Language);
             transport.IsOn = preferences.ShowTransport; always.IsOn = preferences.AlwaysShowControls;
             pinned.IsOn = preferences.Pinned; pinButton.IsOn = preferences.ShowPinButton;

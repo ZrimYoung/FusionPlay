@@ -18,6 +18,20 @@ internal static class L
     public static string Text(string chinese, string english) => language == "en" ? english : chinese;
     private static readonly Dictionary<string, string> English = new(StringComparer.Ordinal)
     {
+        ["界面字体"] = "Interface Font",
+        ["字重"] = "Weight",
+        ["播放器文字效果"] = "Player Text Appearance",
+        ["按字族选择已安装字体；标题自动使用同字族较粗的字重。可在字体列表中键入名称定位。"] = "Choose an installed font family; headings use a heavier weight from that family. Type a name in the font list to jump to it.",
+        ["恢复默认字体与文字效果"] = "Reset Font and Text Appearance",
+        ["跟随系统字体"] = "System Font",
+        ["未安装"] = "Not Installed",
+        ["柔和"] = "Soft",
+        ["系统默认"] = "System Default",
+        ["无法读取字体列表，当前使用系统字体。"] = "The font list could not be read. The system font is being used.",
+        ["此字体未安装，当前使用系统字体；已保留原来的选择。"] = "This font is not installed. The system font is being used and your original choice has been kept.",
+        ["极细"] = "Thin", ["特细"] = "Extra Light", ["细体"] = "Light", ["半细"] = "Semi Light",
+        ["常规"] = "Regular", ["中等"] = "Medium", ["半粗"] = "Semi Bold", ["粗体"] = "Bold",
+        ["特粗"] = "Extra Bold", ["黑体"] = "Black", ["超黑"] = "Extra Black",
         ["进度条颜色"] = "Progress Bar Color",
         ["跟随系统主题"] = "Follow System Theme",
         ["始终白色"] = "Always White",

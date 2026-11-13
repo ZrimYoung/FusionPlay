@@ -33,12 +33,23 @@ public partial class App : Application
     public App()
     {
         StartupRecord("application_constructing");
-        UnhandledException += (_, args) => StartupRecord("unhandled_exception", args.Exception);
+        UnhandledException += (_, args) =>
+        {
+            StartupRecord("unhandled_exception", args.Exception);
+            if (Environment.GetCommandLineArgs().Contains("--typography-check"))
+            { TypographyCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
+        };
         try { InitializeComponent(); StartupRecord("resources_ready"); }
         catch (Exception e) { StartupRecord("resources_failed", e); throw; }
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--typography-check"))
+        {
+            try { await TypographyCheck.Run(Path.Combine(AppContext.BaseDirectory, "typography-check")); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--window-input-check"))
         {
             // Hidden, isolated input-registration check: no receiver, shell-media

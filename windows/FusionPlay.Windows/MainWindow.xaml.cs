@@ -45,7 +45,7 @@ public sealed partial class MainWindow : Window
         transportTransition = new TransportTransition(MiniTransport);
         expandedTransportTransition = new TransportTransition(TransportPanel, 52);
         AttachVolume(VolumeSlider, model);
-        RootGrid.Loaded += (_, _) => UpdateInputRegions();
+        RootGrid.Loaded += (_, _) => { UiTypography.Apply(RootGrid, model.Preferences.Value, force: true); UpdateInputRegions(); };
         RootGrid.LayoutUpdated += Root_LayoutUpdated;
         WindowSizing.ResizeContent(this, 420, 420);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
@@ -108,6 +108,7 @@ public sealed partial class MainWindow : Window
         if (closed || miniBackdrop == null || backdrop == null) return;
         rendering = true;
         var state = model.State; var preferences = model.Preferences.Value;
+        UiTypography.Apply(RootGrid, preferences);
         MiniTitle.Text = TitleText.Text = state.Title.Length > 0 ? state.Title : L.Text(state.HasMedia ? "正在接收音乐" : "让音乐，连接此刻");
         string metadata = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => !string.IsNullOrWhiteSpace(x)));
         MiniArtist.Text = ArtistText.Text = metadata.Length > 0 ? metadata : state.HasMedia ? L.Text("来自手机妙播") : L.Text("在手机妙播中选择") + " " + model.Settings.Name;

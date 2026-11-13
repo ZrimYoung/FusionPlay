@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.0-preview6', [switch]$SkipNative)
+param([string]$Version = '0.2.0-preview7', [switch]$SkipNative)
 . (Join-Path $PSScriptRoot 'env.ps1')
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Invalid package version.' }
 $taskArtifacts = Join-Path $RepositoryRoot 'artifacts'

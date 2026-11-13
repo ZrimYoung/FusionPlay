@@ -285,6 +285,33 @@ Check("appearance preferences: failed persistence leaves the active value unchan
     Assert(preferences.Value == new UiPreferences(), "failed write changed active appearance");
     Assert(Directory.GetFiles(temporary.Path, "*.tmp-*").Length == 0, "failed atomic save left temporary data");
 });
+Check("typography: separate family and weight persist, absent fonts remain portable, invalid writes are isolated", () =>
+{
+    using var temporary = new TemporaryDirectory();
+    var store = new UiPreferencesStore(temporary.Path);
+    Assert(store.Value.UiFontFamily == "" && store.Value.UiFontWeight == 400 && store.Value.PlayerTextRendering == "enhanced", "typography defaults changed");
+    var selected = store.Value with { UiFontFamily = "未安装的字族 Font Family", UiFontWeight = 350, PlayerTextRendering = "system" };
+    store.Update(selected);
+    Assert(new UiPreferencesStore(temporary.Path).Value == selected, "family, weight or renderer lost on reopen");
+    string file = Path.Combine(temporary.Path, "ui-preferences.json"), saved = File.ReadAllText(file);
+    foreach (var invalid in new[] { selected with { UiFontFamily = null! }, selected with { UiFontFamily = "Font\nName" }, selected with { UiFontFamily = new string('A', 257) }, selected with { UiFontWeight = 0 }, selected with { UiFontWeight = 1000 }, selected with { PlayerTextRendering = "cleartype" } })
+    {
+        Throws<ArgumentException>(() => store.Update(invalid));
+        Assert(store.Value == selected && File.ReadAllText(file) == saved, "invalid typography changed saved or active state");
+    }
+    File.WriteAllText(file, "{\"language\":\"en\",\"progress_color_mode\":\"white\"}");
+    var legacy = new UiPreferencesStore(temporary.Path).Value;
+    Assert(legacy.UiFontFamily == "" && legacy.UiFontWeight == 400 && legacy.PlayerTextRendering == "enhanced" && legacy.ProgressColorMode == "white", "older preferences lost existing values or typography defaults");
+});
+Check("typography: available face weights resolve deterministically without fabricating a heading face", () =>
+{
+    Assert(FontSelection.NearestWeight([700, 400, 400], 600) == 700, "closest installed weight not chosen");
+    Assert(FontSelection.NearestWeight([700, 300], 500) == 300, "equal-distance selection not deterministic");
+    Assert(FontSelection.HeadingWeight([400, 700], 400) == 700, "heading emphasis lost");
+    Assert(FontSelection.HeadingWeight([400], 400) == 400, "nonexistent bold face requested");
+    Assert(FontSelection.NearestWeight([], 800) == 400, "empty family lacks safe fallback");
+    Assert(FontSelection.HeadingWeight([400, 700, 900], 900) == 900, "heading weight overflow");
+});
 Check("appearance preferences: malformed originals retained and partial older settings get defaults", () =>
 {
     using var temporary = new TemporaryDirectory();
