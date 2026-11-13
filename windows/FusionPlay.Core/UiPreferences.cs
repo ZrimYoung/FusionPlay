@@ -11,6 +11,8 @@ public sealed record UiPreferences
     public bool ShowPinButton { get; init; }
     public bool ShowTaskbarIcon { get; init; } = true;
     public bool ShowTrayIcon { get; init; } = true;
+    public string ProgressColorMode { get; init; } = "system";
+    public string ProgressCustomColor { get; init; } = "#FFFFFF";
 }
 
 /// <summary>Portable presentation preferences, independent of receiver identity and audio settings.</summary>
@@ -68,5 +70,10 @@ public sealed class UiPreferencesStore
     {
         if (preferences.Language is not ("zh-Hans" or "en"))
             throw new ArgumentException("Unsupported interface language.", nameof(preferences));
+        if (preferences.ProgressColorMode is not ("system" or "white" or "custom"))
+            throw new ArgumentException("Unsupported progress color mode.", nameof(preferences));
+        string? color = preferences.ProgressCustomColor;
+        if (color == null || color.Length != 7 || color[0] != '#' || color.Skip(1).Any(value => !char.IsAsciiHexDigit(value)))
+            throw new ArgumentException("Progress color must be an opaque #RRGGBB value.", nameof(preferences));
     }
 }

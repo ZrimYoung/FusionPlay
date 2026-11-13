@@ -1,5 +1,6 @@
 using FusionPlay.Core;
 using FusionPlay.Windows.Platform;
+using System.Globalization;
 using System.Numerics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Windowing;
@@ -24,6 +25,7 @@ public sealed partial class MainWindow : Window
     private readonly TransportTransition transportTransition, expandedTransportTransition;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
+    private string? progressColorKey;
     private bool pointerInside, focusInside, controlsShown = true, captionShown = true, closed, compact = true, rendering = true, revealMiniRequested;
     private string preferenceError = "";
     public bool AllowClose { get; set; }
@@ -147,6 +149,7 @@ public sealed partial class MainWindow : Window
         AutomationProperties.SetName(MiniCover, L.Text("专辑封面"));
         AutomationProperties.SetName(MiniProgress, L.Text("播放进度，只读"));
         AutomationProperties.SetName(CoverImage, L.Text("专辑封面")); AutomationProperties.SetName(Progress, L.Text("播放进度，只读"));
+        ApplyProgressColor(preferences);
         bool progress = state.HasMedia && state.DurationMs is > 0 && state.PositionMs != null;
         MiniProgressPanel.Visibility = ProgressPanel.Visibility = progress ? Visibility.Visible : Visibility.Collapsed;
         if (progress)
@@ -166,6 +169,24 @@ public sealed partial class MainWindow : Window
             ShowCaption(pointerInside);
         }
         UpdateBlurCoverage(); UpdateInputRegions(); rendering = false;
+    }
+    private void ApplyProgressColor(UiPreferences preferences)
+    {
+        string key = preferences.ProgressColorMode == "custom" ? "custom:" + preferences.ProgressCustomColor : preferences.ProgressColorMode;
+        if (progressColorKey == key) return;
+        if (preferences.ProgressColorMode == "system")
+        {
+            // Restore the native theme resource so later system color changes still apply.
+            Progress.ClearValue(Control.ForegroundProperty);
+            MiniProgress.ClearValue(Control.ForegroundProperty);
+        }
+        else
+        {
+            uint rgb = preferences.ProgressColorMode == "white" ? 0xFFFFFF : uint.Parse(preferences.ProgressCustomColor.AsSpan(1), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            var color = global::Windows.UI.Color.FromArgb(255, (byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb);
+            Progress.Foreground = MiniProgress.Foreground = new SolidColorBrush(color);
+        }
+        progressColorKey = key;
     }
     private static void Label(Button button, string label)
     { ToolTipService.SetToolTip(button, label); AutomationProperties.SetName(button, label); }

@@ -18,6 +18,13 @@ internal static class L
     public static string Text(string chinese, string english) => language == "en" ? english : chinese;
     private static readonly Dictionary<string, string> English = new(StringComparer.Ordinal)
     {
+        ["进度条颜色"] = "Progress Bar Color",
+        ["跟随系统主题"] = "Follow System Theme",
+        ["始终白色"] = "Always White",
+        ["自定义颜色"] = "Custom Color",
+        ["自定义进度条颜色"] = "Custom Progress Bar Color",
+        ["颜色预览"] = "Color Preview",
+        ["选择不透明 RGB 颜色，也可输入 #RRGGBB。大小播放窗口使用同一颜色。"] = "Choose an opaque RGB color or enter #RRGGBB. Both player layouts use the same color.",
         ["在手机妙播中选择"] = "Choose this receiver in MiPlay on your phone:",
         ["无法保存外观设置，请检查数据目录。"] = "Could not save appearance settings. Check the data folder.",
         ["FusionPlay · 正在播放"] = "FusionPlay · Now Playing",

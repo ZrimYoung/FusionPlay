@@ -33,6 +33,19 @@ internal sealed class SettingsWindow : Window
     private readonly Button earlier = new() { Content = "−10" }, later = new() { Content = "+10" }, reset = new();
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.65, TextWrapping = TextWrapping.Wrap };
     private readonly ComboBox language = new() { DisplayMemberPath = "Label", ItemsSource = new[] { new Choice("zh-Hans", "简体中文"), new Choice("en", "English") } };
+    private readonly ComboBox progressColorMode = new() { DisplayMemberPath = "Label", HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly ColorPicker progressColor = new()
+    {
+        IsAlphaEnabled = false, IsAlphaSliderVisible = false, IsAlphaTextInputVisible = false,
+        IsHexInputVisible = true, IsColorChannelTextInputVisible = true, IsMoreButtonVisible = false,
+        HorizontalAlignment = HorizontalAlignment.Left, MaxWidth = 420
+    };
+    private readonly StackPanel progressColorEditor = new() { Spacing = 12 };
+    private readonly SolidColorBrush progressColorPreview = new(Colors.White);
+    private readonly TextBlock progressColorValue = new() { IsTextSelectionEnabled = true, VerticalAlignment = VerticalAlignment.Center };
+    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer progressColorSaveTimer;
+    private string? pendingProgressColor;
+    private bool renderingProgressColorChoices;
     private ToggleSwitch transport = null!, always = null!, pinned = null!, pinButton = null!, taskbar = null!, tray = null!;
     private OutputCalibration? calibration;
     private bool renderingCalibration, changingCalibration, renderingPreferences, renderingDevices, closed;
@@ -44,6 +57,9 @@ internal sealed class SettingsWindow : Window
     public SettingsWindow(ReceiverController controller)
     {
         model = controller;
+        progressColorSaveTimer = DispatcherQueue.CreateTimer();
+        progressColorSaveTimer.IsRepeating = false; progressColorSaveTimer.Interval = TimeSpan.FromMilliseconds(300);
+        progressColorSaveTimer.Tick += (_, _) => FlushProgressColor();
         var root = new Grid { Background = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"] };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -67,9 +83,18 @@ internal sealed class SettingsWindow : Window
         output.SelectionChanged += (_, _) => { if (!renderingDevices) Render(); };
         model.DevicesChanged += DevicesChanged; model.Changed += Render;
         model.Preferences.Changed += PreferencesChanged; L.Changed += Localize;
+        AppWindow.Closing += (_, args) =>
+        {
+            // Let the native hex editor commit its valid text before saving the final selection.
+            if (progressColorEditor.Visibility == Visibility.Visible) progressColorMode.Focus(FocusState.Programmatic);
+            if (!FlushProgressColor()) args.Cancel = true;
+        };
         Closed += (_, _) =>
         {
-            closed = true; model.DevicesChanged -= DevicesChanged; model.Changed -= Render;
+            closed = true;
+            // Programmatic Window.Close can bypass AppWindow.Closing during application exit.
+            FlushProgressColor();
+            model.DevicesChanged -= DevicesChanged; model.Changed -= Render;
             model.Preferences.Changed -= PreferencesChanged; L.Changed -= Localize;
         };
         RenderDevices(); RenderPreferences(); Render();
@@ -132,6 +157,32 @@ internal sealed class SettingsWindow : Window
         page.Children.Add(Text("鼠标移出后仍显示歌曲信息、进度和已开启的控件。", true));
         transport = Toggle("显示播放控制", (p, value) => p with { ShowTransport = value }); page.Children.Add(transport);
         page.Children.Add(Text("显示上一首、播放/暂停和下一首按钮。", true));
+        Label(() => { progressColorMode.Header = L.Text("进度条颜色"); RefreshProgressColorChoices(); progressColor.Language = L.Language == "en" ? "en-US" : "zh-CN"; AutomationProperties.SetName(progressColor, L.Text("自定义进度条颜色")); });
+        page.Children.Add(progressColorMode);
+        progressColorMode.SelectionChanged += (_, _) =>
+        {
+            if (renderingPreferences || renderingProgressColorChoices || progressColorMode.SelectedItem is not Choice choice) return;
+            string requested = choice.Key;
+            if (FlushProgressColor()) UpdatePreferences(p => p with { ProgressColorMode = requested });
+            else RenderPreferences();
+        };
+        progressColorEditor.Children.Add(progressColor);
+        var preview = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
+        var swatch = new Border { Width = 28, Height = 28, Background = progressColorPreview, CornerRadius = new CornerRadius(5), BorderThickness = new Thickness(1), BorderBrush = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"] };
+        Label(() => { AutomationProperties.SetName(swatch, L.Text("颜色预览")); ToolTipService.SetToolTip(swatch, L.Text("颜色预览")); });
+        preview.Children.Add(swatch); preview.Children.Add(progressColorValue); progressColorEditor.Children.Add(preview);
+        progressColorEditor.Children.Add(Text("选择不透明 RGB 颜色，也可输入 #RRGGBB。大小播放窗口使用同一颜色。", true));
+        page.Children.Add(progressColorEditor);
+        progressColor.ColorChanged += (_, args) =>
+        {
+            if (renderingPreferences || closed) return;
+            string hex = ProgressHex(args.NewColor);
+            progressColorPreview.Color = ParseProgressColor(hex); progressColorValue.Text = hex;
+            if ((progressColorMode.SelectedItem as Choice)?.Key != "custom") return;
+            pendingProgressColor = hex;
+            // A one-shot throttle saves the newest color every 300 ms during continuous dragging.
+            if (!progressColorSaveTimer.IsRunning) progressColorSaveTimer.Start();
+        };
         pinned = Toggle("窗口置顶", (p, value) => p with { Pinned = value }); page.Children.Add(pinned);
         pinButton = Toggle("显示置顶按钮", (p, value) => p with { ShowPinButton = value }); page.Children.Add(pinButton);
         page.Children.Add(Text("应用入口"));
@@ -219,14 +270,17 @@ internal sealed class SettingsWindow : Window
         try { Process.Start(new ProcessStartInfo(target) { UseShellExecute = true }); }
         catch (Exception) { localError = L.Text("操作未完成，请重试或打开日志检查。"); Render(); }
     }
-    private void UpdatePreferences(Func<UiPreferences, UiPreferences> update)
+    private bool UpdatePreferences(Func<UiPreferences, UiPreferences> update)
     {
+        bool saved = true;
         try { localError = ""; model.Preferences.Update(update(model.Preferences.Value)); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException)
         {
+            saved = false;
             localError = L.Text("界面设置保存失败，请检查程序旁的数据目录是否可写。"); RenderPreferences();
         }
         Render();
+        return saved;
     }
     private void PreferencesChanged() { RenderPreferences(); Render(); }
     private void RenderPreferences()
@@ -240,9 +294,39 @@ internal sealed class SettingsWindow : Window
             transport.IsOn = preferences.ShowTransport; always.IsOn = preferences.AlwaysShowControls;
             pinned.IsOn = preferences.Pinned; pinButton.IsOn = preferences.ShowPinButton;
             taskbar.IsOn = preferences.ShowTaskbarIcon; tray.IsOn = preferences.ShowTrayIcon;
+            if (progressColorMode.ItemsSource is Choice[] modes)
+                progressColorMode.SelectedItem = modes.First(item => item.Key == preferences.ProgressColorMode);
+            progressColorEditor.Visibility = preferences.ProgressColorMode == "custom" ? Visibility.Visible : Visibility.Collapsed;
+            // Other preference changes must not overwrite the latest color still waiting for its throttle tick.
+            string hex = pendingProgressColor ?? preferences.ProgressCustomColor;
+            progressColor.Color = ParseProgressColor(hex);
+            progressColorPreview.Color = ParseProgressColor(hex); progressColorValue.Text = hex;
         }
         finally { renderingPreferences = false; }
     }
+    private void RefreshProgressColorChoices()
+    {
+        string selected = (progressColorMode.SelectedItem as Choice)?.Key ?? model.Preferences.Value.ProgressColorMode;
+        renderingProgressColorChoices = true;
+        try
+        {
+            var choices = new[] { new Choice("system", L.Text("跟随系统主题")), new Choice("white", L.Text("始终白色")), new Choice("custom", L.Text("自定义颜色")) };
+            progressColorMode.ItemsSource = choices; progressColorMode.SelectedItem = choices.First(choice => choice.Key == selected);
+        }
+        finally { renderingProgressColorChoices = false; }
+    }
+    private bool FlushProgressColor()
+    {
+        progressColorSaveTimer.Stop();
+        string? hex = pendingProgressColor;
+        pendingProgressColor = null;
+        return hex == null || UpdatePreferences(p => p with { ProgressCustomColor = hex });
+    }
+    private static string ProgressHex(global::Windows.UI.Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+    private static global::Windows.UI.Color ParseProgressColor(string hex) => global::Windows.UI.Color.FromArgb(255,
+        byte.Parse(hex.AsSpan(1, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+        byte.Parse(hex.AsSpan(3, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture),
+        byte.Parse(hex.AsSpan(5, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
 
     private void RenderDevices()
     {

@@ -234,6 +234,7 @@ Check("appearance preferences: portable defaults, persistence and invalid-input 
     using var temporary = new TemporaryDirectory();
     var preferences = new UiPreferencesStore(temporary.Path);
     Assert(preferences.Value.ShowTransport && preferences.Value.ShowTaskbarIcon && preferences.Value.ShowTrayIcon, "unsafe default entry visibility");
+    Assert(preferences.Value.ProgressColorMode == "system" && preferences.Value.ProgressCustomColor == "#FFFFFF", "progress color defaults changed");
     int changes = 0; preferences.Changed += () => changes++;
     var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowTaskbarIcon = false, ShowTrayIcon = false };
     preferences.Update(expected); preferences.Update(expected);
@@ -241,6 +242,36 @@ Check("appearance preferences: portable defaults, persistence and invalid-input 
     Assert(new UiPreferencesStore(temporary.Path).Value == expected, "portable UI state lost on reopen");
     Throws<ArgumentException>(() => preferences.Update(expected with { Language = "invalid" }));
     Assert(new UiPreferencesStore(temporary.Path).Value == expected, "invalid language modified saved state");
+});
+Check("appearance preferences: progress choices persist and invalid colors leave saved and active values intact", () =>
+{
+    using var temporary = new TemporaryDirectory();
+    var preferences = new UiPreferencesStore(temporary.Path);
+    foreach (string mode in new[] { "white", "custom", "system" })
+    {
+        var expected = preferences.Value with { ProgressColorMode = mode, ProgressCustomColor = "#a0B1c2" };
+        preferences.Update(expected);
+        Assert(new UiPreferencesStore(temporary.Path).Value == expected, "progress choice or custom color was lost on reopen");
+    }
+    var saved = preferences.Value;
+    string file = Path.Combine(temporary.Path, "ui-preferences.json"), savedJson = File.ReadAllText(file);
+    int changes = 0; preferences.Changed += () => changes++;
+    var invalidChoices = new[]
+    {
+        saved with { ProgressColorMode = "accent" },
+        saved with { ProgressCustomColor = "#80FFFFFF" }, // An alpha channel is not supported.
+        saved with { ProgressCustomColor = "#FFF" },
+        saved with { ProgressCustomColor = "#12345G" },
+        saved with { ProgressCustomColor = "FFFFFF" },
+        saved with { ProgressCustomColor = null! }
+    };
+    foreach (var invalid in invalidChoices)
+    {
+        Throws<ArgumentException>(() => preferences.Update(invalid));
+        Assert(preferences.Value == saved && File.ReadAllText(file) == savedJson, "invalid progress choice modified active or saved appearance");
+    }
+    Assert(changes == 0, "invalid progress choice notified listeners");
+    Assert(new UiPreferencesStore(temporary.Path).Value == saved, "invalid progress choice affected reopened preferences");
 });
 Check("appearance preferences: failed persistence leaves the active value unchanged", () =>
 {
@@ -266,6 +297,12 @@ Check("appearance preferences: malformed originals retained and partial older se
     File.WriteAllText(file, "{\"language\":\"en\"}");
     var legacy = new UiPreferencesStore(temporary.Path).Value;
     Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
+    Assert(legacy.ProgressColorMode == "system" && legacy.ProgressCustomColor == "#FFFFFF", "older preferences did not receive progress defaults");
+    const string invalidColor = "{\"progress_color_mode\":\"custom\",\"progress_custom_color\":\"#80FF0000\"}";
+    File.WriteAllText(file, invalidColor);
+    var invalidProgress = new UiPreferencesStore(temporary.Path);
+    Assert(invalidProgress.Value == new UiPreferences() && invalidProgress.LoadError.Length > 0, "invalid stored progress color did not recover safely");
+    Assert(Directory.GetFiles(temporary.Path, "ui-preferences.json.invalid-*").Any(path => File.ReadAllText(path) == invalidColor), "invalid stored progress color was not retained");
 });
 Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconnect", () =>
 {
