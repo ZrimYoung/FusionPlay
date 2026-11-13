@@ -10,6 +10,8 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
+using Rectangle = Microsoft.UI.Xaml.Shapes.Rectangle;
 using Windows.Graphics;
 using VirtualKey = Windows.System.VirtualKey;
 
@@ -42,9 +44,11 @@ internal static class SeekInputCheck
         byte[]? originalPreferencesFile = null;
         bool preferencesCaptured = false, controllerCreated = false, initializedFlagIsFixture = false;
         string status = "failed", step = "create_hidden_window", failure = "", exceptionType = "", hresult = "";
+        string fixtureXamlError = "";
         bool remainedHidden = true, foregroundUnchanged = true;
         var cases = new List<string>();
         var mainSamples = new List<object>();
+        var indicatorSamples = new List<object>();
         var requests = new List<SeekRequest>();
         var initial = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true, TrackId = "fixture-track", Title = "Fixture", DurationMs = 200_000, PositionMs = 50_000 };
         var snapshot = initial;
@@ -249,6 +253,56 @@ internal static class SeekInputCheck
                         mainSamples.Add(new { mode, width, height, show_progress = true, color_mode = colorMode, bar_height_dips = 3, target_height_dips = active.ActualHeight, seek_region = new[] { region.X, region.Y, region.Width, region.Height }, registered_passthrough_count = holes.Length });
                     }));
                 }
+                step = "real_main_indicator_left_anchor_" + mode;
+                foreach (var (position, direction) in new[]
+                {
+                    (150_000UL, "forward"), (40_000UL, "backward"), (40_000UL, "repeat_backward_report"),
+                    (120_500UL, "forward_again"), (25_000UL, "backward_again"), (25_000UL, "repeat_again")
+                })
+                {
+                    await OnUi(queue!, () => { Background(); AcceptMain(initial with { PositionMs = position }); ArrangeMain(width, height); });
+                    int sample = 0;
+                    foreach (int delay in new[] { 0, 40, 60, 180 })
+                    {
+                        if (delay > 0) await Task.Delay(delay);
+                        int capturedSample = sample++;
+                        await OnUi(queue!, () => InspectIndicator(mode, width, height, position, direction, capturedSample));
+                    }
+                    await OnUi(queue!, () => Pass("real_main_indicator_left_fixed_" + mode + "_" + direction, () =>
+                        Require(controller!.State.PositionMs == position && controller.DisplayPositionMs == position, "indicator_fixture_changed_position")));
+                }
+                ProgressBar? themeBar = null;
+                ElementTheme originalTheme = ElementTheme.Default;
+                await OnUi(queue!, () =>
+                {
+                    themeBar = Find<ProgressBar>(mode == "compact" ? "MiniProgress" : "Progress");
+                    originalTheme = themeBar.RequestedTheme;
+                    Require(themeBar.Template != null && themeBar.ReadLocalValue(Control.TemplateProperty) == DependencyProperty.UnsetValue, "player_progress_template_not_native_theme");
+                });
+                // Exercise the real theme source without replacing the native
+                // template with a synthetic one. Theme/layout work gets its own
+                // dispatcher turns before measuring the existing indicator.
+                try
+                {
+                    foreach (var theme in new[] { ElementTheme.Light, ElementTheme.Dark })
+                    {
+                        step = "real_main_indicator_template_theme_refresh_" + mode + "_" + theme;
+                        await OnUi(queue!, () => { themeBar!.RequestedTheme = theme; themeBar.ApplyTemplate(); ArrangeMain(width, height); });
+                        await Settle(queue!);
+                        await OnUi(queue!, () => InspectIndicator(mode, width, height, 25_000, "native_theme_" + theme, 0));
+                    }
+                }
+                finally
+                {
+                    await OnUi(queue!, () => { themeBar!.RequestedTheme = originalTheme; themeBar.ApplyTemplate(); ArrangeMain(width, height); });
+                }
+                await Settle(queue!);
+                await OnUi(queue!, () => Pass("real_main_indicator_native_theme_refresh_is_safe_" + mode, () =>
+                {
+                    Require(themeBar!.ReadLocalValue(Control.TemplateProperty) == DependencyProperty.UnsetValue, "player_progress_theme_template_not_restored");
+                    InspectIndicator(mode, width, height, 25_000, "native_theme_restored", 0);
+                }));
+                await OnUi(queue!, () => AcceptMain(initial));
                 step = "real_main_seek_presentation_feedback_" + mode;
                 await OnUi(queue!, () =>
                 {
@@ -360,12 +414,21 @@ internal static class SeekInputCheck
             await WaitForProgress(visible: true);
             await OnUi(queue!, () => Pass("real_main_mode_switch_during_progress_show_snaps_visible", () =>
                 Require(Find<FrameworkElement>("ExpandedRoot").Visibility == Visibility.Visible && Find<ProgressSeekButton>("ProgressSeek").IsEnabled, "real_main_mode_switch_retained_old_show")));
+            await OnUi(queue!, () => Pass("plain_progress_theme_keeps_native_reposition_transition", () =>
+            {
+                bar!.ApplyTemplate();
+                var templateRoot = ProgressTemplateRoot(bar);
+                Require(VisualStateManager.GetVisualStateGroups(templateRoot).SelectMany(group => group.Transitions)
+                    .Any(transition => HasIndicatorReposition(transition.Storyboard)), "player_progress_changed_global_theme");
+            }));
             status = "passed";
         }
         catch (Exception error)
         {
             failure = error is CheckFailure check ? check.Code : "seek_check_failed";
             exceptionType = error.GetType().Name; hresult = error.HResult.ToString("X8");
+            if (error.GetType().Name == "XamlParseException" && step.StartsWith("real_main_indicator_template_", StringComparison.Ordinal))
+                fixtureXamlError = error.Message.Length <= 768 ? error.Message : error.Message[..768];
         }
         finally
         {
@@ -404,12 +467,12 @@ internal static class SeekInputCheck
                     Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outputFile))!);
                     File.WriteAllText(outputFile, JsonSerializer.Serialize(new
                     {
-                        status, step, failure_code = failure, exception_type = exceptionType, hresult,
+                        status, step, failure_code = failure, exception_type = exceptionType, hresult, fixture_xaml_error = fixtureXamlError,
                         window_remained_hidden = remainedHidden, foreground_unchanged = foregroundUnchanged,
                         receiver_created = false, native_receiver_created = false, controller_created = controllerCreated,
                         initialized_flag_is_fixture = initializedFlagIsFixture, receiver_initialize_method_called = false,
                         shell_media_session_created = false, dispatched_fixture_requests = requests.Count,
-                        cases, main_samples = mainSamples,
+                        cases, main_samples = mainSamples, indicator_samples = indicatorSamples,
                         scope = "hidden_seek_component_and_real_main_show_progress_binding_and_actual_sdk_regions; physical_pointer_and_phone_playback_not_tested"
                     }, new JsonSerializerOptions { WriteIndented = true }));
                 }
@@ -429,6 +492,31 @@ internal static class SeekInputCheck
                 Require(Math.Abs(progressBar.Value - expectedPercent) < 0.000001, "real_main_bar_ignored_display_position");
             foreach (var text in new[] { Find<PlayerText>("PositionText"), Find<PlayerText>("MiniPosition") })
                 Require(text.Text == expectedTime, "real_main_time_ignored_display_position");
+        }
+        void InspectIndicator(string mode, double width, double height, ulong position, string direction, int sample)
+        {
+            ArrangeMain(width, height);
+            var progressBar = Find<ProgressBar>(mode == "compact" ? "MiniProgress" : "Progress");
+            Require(progressBar is PlayerProgressBar, "real_main_player_progress_type_missing");
+            progressBar.ApplyTemplate();
+            var templateRoot = ProgressTemplateRoot(progressBar);
+            var indicator = Descendants(templateRoot).OfType<Rectangle>().FirstOrDefault(element => element.Name == "DeterminateProgressBarIndicator");
+            Require(indicator != null, "native_progress_indicator_missing");
+            var transitions = VisualStateManager.GetVisualStateGroups(templateRoot).SelectMany(group => group.Transitions);
+            Require(transitions.All(transition => !HasIndicatorReposition(transition.Storyboard)), "native_progress_reposition_transition_remains");
+            double percent = 100.0 * position / initial.DurationMs!.Value;
+            Require(Math.Abs(progressBar.Value - percent) < .000001, "native_progress_value_incorrect");
+            var bounds = indicator!.TransformToVisual(templateRoot).TransformBounds(new global::Windows.Foundation.Rect(0, 0, indicator.ActualWidth, indicator.ActualHeight));
+            double scale = progressBar.XamlRoot?.RasterizationScale ?? 1;
+            var border = progressBar.BorderThickness;
+            double Border(double value) => progressBar.UseLayoutRounding ? Math.Round(value * scale, MidpointRounding.AwayFromZero) / scale : value;
+            double expectedWidth = Math.Max(0, templateRoot.ActualWidth - progressBar.Padding.Left - progressBar.Padding.Right - Border(border.Left) - Border(border.Right)) * percent / 100;
+            Require(Math.Abs(bounds.Left) <= 1 / scale, "native_progress_indicator_left_moved");
+            Require(Math.Abs(indicator.ActualWidth - expectedWidth) <= 1 / scale, "native_progress_indicator_length_incorrect");
+            Require(indicator.HorizontalAlignment == HorizontalAlignment.Left && progressBar.Height == 3, "native_progress_indicator_alignment_changed");
+            Require(ReferenceEquals(indicator.Fill, progressBar.Foreground), "native_progress_foreground_binding_lost");
+            indicatorSamples.Add(new { mode, direction, sample, source_position_ms = position, value = progressBar.Value, left_dips = bounds.Left, width_dips = indicator.ActualWidth, expected_width_dips = expectedWidth, height_dips = progressBar.Height, reposition_transition_present = false });
+            Background();
         }
         async Task WaitForProgress(bool visible)
         {
@@ -480,6 +568,12 @@ internal static class SeekInputCheck
     private static object? PendingRequest(ProgressSeekButton target)
         => (typeof(ProgressSeekButton).GetField("pointerRequest", BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new CheckFailure("pending_pointer_fixture_field_missing")).GetValue(target);
+    private static FrameworkElement ProgressTemplateRoot(ProgressBar progressBar)
+        => Descendants(progressBar).OfType<Grid>().FirstOrDefault(element => element.Name == "LayoutRoot")
+            ?? throw new CheckFailure("native_progress_template_root_missing");
+    private static bool HasIndicatorReposition(Storyboard? storyboard)
+        => storyboard != null && storyboard.Children.Any(child => child is RepositionThemeAnimation { TargetName: "DeterminateProgressBarIndicator" }
+            || child is Storyboard nested && HasIndicatorReposition(nested));
     private static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
     {
         yield return parent;

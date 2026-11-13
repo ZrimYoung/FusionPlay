@@ -1,4 +1,4 @@
-param([string]$Version = '0.2.0-preview11', [switch]$SkipNative, [string]$NativeDir = '')
+param([string]$Version = '0.2.0-preview12', [switch]$SkipNative, [string]$NativeDir = '')
 . (Join-Path $PSScriptRoot 'env.ps1')
 if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$') { throw 'Invalid package version.' }
 if ($NativeDir -and -not $SkipNative) { throw 'Use NativeDir only with SkipNative for a separately built native library.' }
