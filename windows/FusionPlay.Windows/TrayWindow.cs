@@ -27,7 +27,6 @@ internal sealed class TrayWindow : Window
     private readonly Image cover = new() { Name = "AlbumCover", Stretch = Stretch.UniformToFill, IsHitTestVisible = false };
     private readonly TextBlock title = new() { Name = "TrackTitle", FontSize = 14, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, MaxLines = 2, TextWrapping = TextWrapping.Wrap, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly TextBlock artist = new() { Name = "TrackArtist", FontSize = 12, Opacity = 0.65, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis };
-    private readonly TextBlock status = new() { FontSize = 12, Opacity = 0.65 };
     private readonly Button play = new(), previous = new(), next = new();
     private readonly Button artworkButton = new(), trackButton = new(), settingsButton = new(), quitButton = new();
     private readonly MenuVolumeSlider volumeControl = new();
@@ -118,10 +117,8 @@ internal sealed class TrayWindow : Window
         volumeGroup.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         volumeGroup.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         volumeGroup.Children.Add(volumeButton); Grid.SetColumn(volumeViewport, 1); volumeGroup.Children.Add(volumeViewport);
-        status.VerticalAlignment = VerticalAlignment.Center; status.HorizontalAlignment = HorizontalAlignment.Center;
-        status.MaxLines = 1; status.TextTrimming = TextTrimming.CharacterEllipsis;
-        Grid.SetColumn(volumeGroup, 1); Grid.SetColumn(status, 2); Grid.SetColumn(quitButton, 3);
-        footer.Children.Add(settingsButton); footer.Children.Add(volumeGroup); footer.Children.Add(status); footer.Children.Add(quitButton); root.Children.Add(footer);
+        Grid.SetColumn(volumeGroup, 1); Grid.SetColumn(quitButton, 3);
+        footer.Children.Add(settingsButton); footer.Children.Add(volumeGroup); footer.Children.Add(quitButton); root.Children.Add(footer);
         foreach (var b in new[] { artworkButton, trackButton }) { b.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent); b.BorderThickness = new Thickness(0); }
         Content = root; WindowSizing.Apply(this, PanelWidth, 220); AppWindow.IsShownInSwitchers = false;
         if (AppWindow.Presenter is OverlappedPresenter presenter) { presenter.SetBorderAndTitleBar(true, false); presenter.IsResizable = false; presenter.IsMaximizable = false; presenter.IsMinimizable = false; presenter.IsAlwaysOnTop = true; }
@@ -157,8 +154,7 @@ internal sealed class TrayWindow : Window
         if (closed) return;
         rendering = true; var state = model.State; Title = "FusionPlay · " + L.Text("接收面板");
         cover.Source = model.Artwork;
-        string oldTitle = title.Text, oldArtist = artist.Text, oldStatus = status.Text;
-        status.Text = L.Text(model.Busy ? "正在处理…" : state.PhaseLabel);
+        string oldTitle = title.Text, oldArtist = artist.Text;
         title.Text = state.Title.Length > 0 ? state.Title : L.Text("等待音乐");
         artist.Text = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => x.Length > 0));
         if (artist.Text.Length == 0) artist.Text = model.Settings.Name;
@@ -169,7 +165,7 @@ internal sealed class TrayWindow : Window
         Label(settingsButton, "设置"); Label(quitButton, "退出"); Label(volume, "接收音量"); Label(volumeButton, volumeExpanded ? "收起音量" : "展开音量");
         speaker.Glyph = model.Volume == 0 ? "\uE74F" : "\uE767";
         volume.IsEnabled = model.Initialized; volume.Value = model.Volume; rendering = false;
-        if (oldTitle != title.Text || oldArtist != artist.Text || oldStatus != status.Text || contentHeight == 0) QueueFit();
+        if (oldTitle != title.Text || oldArtist != artist.Text || contentHeight == 0) QueueFit();
     }
     private void QueueFit()
     {
