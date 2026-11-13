@@ -19,6 +19,8 @@ internal static class L
     private static readonly Dictionary<string, string> English = new(StringComparer.Ordinal)
     {
         ["进度条颜色"] = "Progress Bar Color",
+        ["展开音量"] = "Expand Volume",
+        ["收起音量"] = "Collapse Volume",
         ["跟随系统主题"] = "Follow System Theme",
         ["始终白色"] = "Always White",
         ["自定义颜色"] = "Custom Color",

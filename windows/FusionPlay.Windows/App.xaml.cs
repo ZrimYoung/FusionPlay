@@ -39,6 +39,15 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--tray-layout-check"))
+        {
+            // This isolated diagnostic never enters single-instance notification,
+            // receiver initialization, shell-media registration or visible launch.
+            try { await TrayLayoutCheck.Run(Path.Combine(AppContext.BaseDirectory, "tray-layout-check.json")); }
+            catch (Exception error) { StartupRecord("tray_layout_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--window-input-check"))
         {
             // Hidden, isolated input-registration check: no receiver, shell-media
