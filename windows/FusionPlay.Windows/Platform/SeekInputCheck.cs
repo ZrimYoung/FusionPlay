@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Reflection;
 using System.Text.Json;
 using FusionPlay.Core;
 using Microsoft.UI.Dispatching;
@@ -14,12 +15,14 @@ using VirtualKey = Windows.System.VirtualKey;
 
 namespace FusionPlay.Windows.Platform;
 
-/// <summary>Exercises the seek target and real SDK input regions without creating a receiver or showing a window.</summary>
+/// <summary>Exercises seek targets and the real player without creating a native receiver or showing a window.</summary>
 internal static class SeekInputCheck
 {
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out ClientRect rect);
+    [StructLayout(LayoutKind.Sequential)] private struct ClientRect { public int Left, Top, Right, Bottom; }
     private sealed class CheckFailure(string code) : Exception { public string Code { get; } = code; }
 
     public static async Task Run(string outputFile)
@@ -28,9 +31,20 @@ internal static class SeekInputCheck
         nint foreground = GetForegroundWindow(), hwnd = 0;
         Window? window = null;
         ISquareWindow? sizing = null;
+        MainWindow? main = null;
+        ReceiverController? controller = null;
+        PlaybackTimeline? mainTimeline = null;
+        MethodInfo? acceptSource = null;
+        ulong mainRevision = 0;
+        UiPreferences? originalPreferences = null;
+        nint mainHwnd = 0;
+        string preferencesPath = Path.Combine(new PortableStore(AppContext.BaseDirectory).Data, "ui-preferences.json");
+        byte[]? originalPreferencesFile = null;
+        bool preferencesCaptured = false, controllerCreated = false, initializedFlagIsFixture = false;
         string status = "failed", step = "create_hidden_window", failure = "", exceptionType = "", hresult = "";
         bool remainedHidden = true, foregroundUnchanged = true;
         var cases = new List<string>();
+        var mainSamples = new List<object>();
         var requests = new List<SeekRequest>();
         var initial = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true, TrackId = "fixture-track", Title = "Fixture", DurationMs = 200_000, PositionMs = 50_000 };
         var snapshot = initial;
@@ -41,6 +55,7 @@ internal static class SeekInputCheck
         void Background()
         {
             remainedHidden &= hwnd == 0 || !IsWindowVisible(hwnd);
+            remainedHidden &= mainHwnd == 0 || !IsWindowVisible(mainHwnd);
             foregroundUnchanged &= GetForegroundWindow() == foreground;
             Require(remainedHidden, "window_became_visible"); Require(foregroundUnchanged, "foreground_changed");
         }
@@ -127,6 +142,21 @@ internal static class SeekInputCheck
                     Require(requests[^1].PositionMs == 150_000 && range.Value == 25 && bar!.Value == 25, "range_seek_or_progress_incorrect");
                     target!.IsEnabled = false; Require(range.IsReadOnly, "disabled_range_writable"); target.IsEnabled = true;
                 });
+                Pass("presentation_position_drives_keyboard_and_accessibility", () =>
+                {
+                    target!.Snapshot = () => snapshot with { PositionMs = 120_000 };
+                    try
+                    {
+                        Require(target.SeekFromKey(VirtualKey.Right) && requests[^1].PositionMs == 130_000, "keyboard_ignored_presentation_position");
+                        var peer = FrameworkElementAutomationPeer.CreatePeerForElement(target);
+                        Require(peer?.GetPattern(PatternInterface.RangeValue) is IRangeValueProvider, "presentation_range_pattern_missing");
+                        var range = (IRangeValueProvider)peer!.GetPattern(PatternInterface.RangeValue);
+                        Require(range.Value == 60 && snapshot.PositionMs == 50_000, "presentation_changed_source_or_accessibility_mismatch");
+                        target.BeginPointer(9, 150, 300, true); target.CancelPointer(); target.IsEnabled = false;
+                        Require(!target.CommitPointerClick(), "hidden_progress_committed_request");
+                    }
+                    finally { target.Snapshot = () => snapshot; target.IsEnabled = true; }
+                });
                 Pass("progress_visual_color_preserved", () =>
                 {
                     var white = new SolidColorBrush(Microsoft.UI.Colors.White); bar!.Foreground = white;
@@ -153,8 +183,128 @@ internal static class SeekInputCheck
                     target.Visibility = Visibility.Collapsed; sizing.UpdateInputRegions([]);
                     Require(input.GetRegionRects(NonClientRegionKind.Passthrough).Length == 0, "hidden_seek_passthrough_remains");
                 });
-                status = "passed";
             });
+            step = "create_real_hidden_main_with_fixture_controller";
+            await OnUi(queue!, () =>
+            {
+                Background();
+                originalPreferencesFile = File.Exists(preferencesPath) ? File.ReadAllBytes(preferencesPath) : null;
+                preferencesCaptured = true;
+                controller = new ReceiverController(queue!); controllerCreated = true;
+                originalPreferences = controller.Preferences.Value;
+                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, Pinned = false, ShowPinButton = false });
+                var initialized = typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized));
+                Require(initialized?.GetSetMethod(nonPublic: true) != null, "initialized_fixture_setter_missing");
+                initialized!.SetValue(controller, true); initializedFlagIsFixture = true;
+                // This flag only enables the real UI. No Initialize/Start/native
+                // construction or SeekRequested/Commit invocation occurs here.
+                acceptSource = typeof(ReceiverController).GetMethod("Accept", BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(PollResult)], null);
+                Require(acceptSource != null, "source_fixture_accept_missing");
+                mainTimeline = typeof(ReceiverController).GetField("timeline", BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(controller) as PlaybackTimeline;
+                Require(mainTimeline != null, "presentation_timeline_fixture_missing");
+                AcceptMain(initial);
+                main = new MainWindow(controller, () => { }) { AllowClose = true };
+                mainHwnd = WinRT.Interop.WindowNative.GetWindowHandle(main);
+                main.AppWindow.IsShownInSwitchers = false;
+                Background();
+            });
+            foreach (var (width, height, mode) in new[] { (420.0, 420.0, "compact"), (820.0, 480.0, "expanded") })
+            {
+                step = "resize_real_hidden_main_" + mode;
+                await OnUi(queue!, () => { Background(); AcceptMain(initial); WindowSizing.ResizeContent(main!, width, height); });
+                await Settle(queue!);
+                foreach (string colorMode in new[] { "white", "custom", "system" })
+                {
+                    step = "inspect_real_main_progress_visible_" + mode + "_" + colorMode;
+                    await OnUi(queue!, () =>
+                    {
+                        controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true, ProgressColorMode = colorMode, ProgressCustomColor = "#3689EC" });
+                        ArrangeMain(width, height);
+                    });
+                    await Settle(queue!);
+                    await OnUi(queue!, () => Pass("real_main_progress_visible_" + mode + "_" + colorMode, () =>
+                    {
+                        ArrangeMain(width, height);
+                        var playerRoot = (FrameworkElement)main!.Content;
+                        var active = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
+                        Require(Find<FrameworkElement>(mode == "compact" ? "MiniRoot" : "ExpandedRoot").Visibility == Visibility.Visible, "real_main_mode_not_applied");
+                        Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Visible && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Visible, "real_main_progress_not_visible");
+                        Require(active.IsEnabled && active.ActualHeight >= 24, "real_main_seek_target_unavailable");
+                        foreach (var progressBar in new[] { Find<ProgressBar>("Progress"), Find<ProgressBar>("MiniProgress") })
+                        {
+                            Require(progressBar.Height == 3 && progressBar.Value == 25, "real_main_progress_visual_changed");
+                            if (colorMode == "system") Require(progressBar.ReadLocalValue(Control.ForegroundProperty) == DependencyProperty.UnsetValue, "real_main_system_color_not_restored");
+                            else
+                            {
+                                var expected = colorMode == "white" ? Microsoft.UI.Colors.White : global::Windows.UI.Color.FromArgb(255, 0x36, 0x89, 0xEC);
+                                Require(progressBar.Foreground is SolidColorBrush brush && brush.Color.Equals(expected), "real_main_progress_color_changed");
+                            }
+                        }
+                        RectInt32 region = MainRegion(active, playerRoot);
+                        var input = InputNonClientPointerSource.GetForWindowId(main.AppWindow.Id);
+                        var holes = input.GetRegionRects(NonClientRegionKind.Passthrough);
+                        Require(holes.Any(rect => Contains(rect, region)), "real_main_seek_passthrough_missing");
+                        Require(input.GetRegionRects(NonClientRegionKind.Caption).All(rect => !Overlaps(rect, region)), "real_main_progress_is_caption");
+                        mainSamples.Add(new { mode, width, height, show_progress = true, color_mode = colorMode, bar_height_dips = 3, target_height_dips = active.ActualHeight, seek_region = new[] { region.X, region.Y, region.Width, region.Height }, registered_passthrough_count = holes.Length });
+                    }));
+                }
+                step = "real_main_seek_presentation_feedback_" + mode;
+                await OnUi(queue!, () =>
+                {
+                    Pass("real_main_pending_seek_updates_actual_progress_" + mode, () =>
+                    {
+                        Require(mainTimeline!.Begin(new SeekRequest(120_000, initial.TrackId, initial.Title)) != 0, "real_main_pending_seek_fixture_rejected");
+                        main!.RefreshAppearance(); ArrangeMain(width, height);
+                        Require(controller!.State.PositionMs == 50_000 && controller.DisplayPositionMs == 120_000, "real_main_pending_seek_changed_source");
+                        VerifyMainPosition(60, "2:00");
+                        Require(Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek").Snapshot?.Invoke().PositionMs == 120_000, "real_main_seek_snapshot_not_presentation");
+                        mainSamples.Add(new { mode, phase = "pending_seek", source_position_ms = controller.State.PositionMs, display_position_ms = controller.DisplayPositionMs, bar_value = Find<ProgressBar>(mode == "compact" ? "MiniProgress" : "Progress").Value, time_text = Find<PlayerText>(mode == "compact" ? "MiniPosition" : "PositionText").Text });
+                    });
+                    Pass("real_main_source_report_reconciles_seek_feedback_" + mode, () =>
+                    {
+                        AcceptMain(initial with { PositionMs = 120_500 }); ArrangeMain(width, height);
+                        Require(!mainTimeline!.IsPending && controller!.State.PositionMs == 120_500 && controller.DisplayPositionMs == 120_500, "real_main_source_report_not_reconciled");
+                        VerifyMainPosition(60.25, "2:00");
+                    });
+                    Pass("real_main_stale_revision_cannot_rewind_progress_" + mode, () =>
+                    {
+                        Require(acceptSource!.Invoke(controller, [new PollResult(mainRevision - 1, initial)]) is false, "real_main_old_revision_accepted");
+                        main!.RefreshAppearance(); ArrangeMain(width, height);
+                        Require(controller!.State.PositionMs == 120_500 && controller.DisplayPositionMs == 120_500, "real_main_stale_revision_rewound_source");
+                        VerifyMainPosition(60.25, "2:00");
+                        mainSamples.Add(new { mode, phase = "source_report_and_stale_rejected", source_revision = mainRevision, source_position_ms = controller.State.PositionMs, display_position_ms = controller.DisplayPositionMs, bar_value = Find<ProgressBar>(mode == "compact" ? "MiniProgress" : "Progress").Value, time_text = Find<PlayerText>(mode == "compact" ? "MiniPosition" : "PositionText").Text });
+                    });
+                });
+                RectInt32 oldProgressRegion = default;
+                step = "hide_real_main_progress_" + mode;
+                await OnUi(queue!, () =>
+                {
+                    ArrangeMain(width, height);
+                    var active = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
+                    oldProgressRegion = MainRegion(active, (FrameworkElement)main!.Content);
+                    active.BeginPointer(20, active.ActualWidth / 2, active.ActualWidth, true);
+                    Require(PendingRequest(active) != null, "real_main_pointer_fixture_not_captured");
+                    controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false });
+                    // Check the synchronous preference notification before layout
+                    // can unload controls and independently cancel the gesture.
+                    Require(PendingRequest(active) == null && !active.IsEnabled, "real_main_hidden_gesture_not_canceled_immediately");
+                    ArrangeMain(width, height);
+                });
+                await Settle(queue!);
+                await OnUi(queue!, () => Pass("real_main_progress_hidden_" + mode, () =>
+                {
+                    ArrangeMain(width, height);
+                    Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed, "real_main_progress_group_not_collapsed");
+                    foreach (var seek in new[] { Find<ProgressSeekButton>("ProgressSeek"), Find<ProgressSeekButton>("MiniProgressSeek") })
+                        Require(!seek.IsEnabled && PendingRequest(seek) == null, "real_main_hidden_seek_still_available");
+                    var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                    // Transport can move into the old progress strip. It must not
+                    // preserve a full-width hole that covered the old seek target.
+                    Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_hidden_progress_hole_remains");
+                    mainSamples.Add(new { mode, width, height, show_progress = false, old_seek_region = new[] { oldProgressRegion.X, oldProgressRegion.Y, oldProgressRegion.Width, oldProgressRegion.Height }, registered_passthrough_count = holes.Length });
+                }));
+            }
+            status = "passed";
         }
         catch (Exception error)
         {
@@ -163,6 +313,30 @@ internal static class SeekInputCheck
         }
         finally
         {
+            if (controller != null)
+            {
+                try
+                {
+                    await OnUi(queue!, () =>
+                    {
+                        Background();
+                        try { if (originalPreferences != null) controller.Preferences.Update(originalPreferences); }
+                        finally
+                        {
+                            if (preferencesCaptured)
+                            {
+                                if (originalPreferencesFile != null) File.WriteAllBytes(preferencesPath, originalPreferencesFile);
+                                else if (File.Exists(preferencesPath)) File.Delete(preferencesPath);
+                            }
+                        }
+                    });
+                }
+                catch (Exception error) { CleanupFailure(error); }
+                try { await controller.DisposeAsync(); }
+                catch (Exception error) { CleanupFailure(error); }
+                try { await OnUi(queue!, () => { Background(); main?.Close(); main = null; mainHwnd = 0; Background(); }); }
+                catch (Exception error) { CleanupFailure(error); }
+            }
             // Write while the only hidden window is alive: closing it first can
             // end the WinUI dispatcher before a continuation writes the report.
             void Finish()
@@ -176,14 +350,65 @@ internal static class SeekInputCheck
                     {
                         status, step, failure_code = failure, exception_type = exceptionType, hresult,
                         window_remained_hidden = remainedHidden, foreground_unchanged = foregroundUnchanged,
-                        receiver_created = false, shell_media_session_created = false, dispatched_fixture_requests = requests.Count,
-                        cases, scope = "hidden_seek_component_and_actual_sdk_regions; physical_pointer_and_phone_playback_not_tested"
+                        receiver_created = false, native_receiver_created = false, controller_created = controllerCreated,
+                        initialized_flag_is_fixture = initializedFlagIsFixture, receiver_initialize_method_called = false,
+                        shell_media_session_created = false, dispatched_fixture_requests = requests.Count,
+                        cases, main_samples = mainSamples,
+                        scope = "hidden_seek_component_and_real_main_show_progress_binding_and_actual_sdk_regions; physical_pointer_and_phone_playback_not_tested"
                     }, new JsonSerializerOptions { WriteIndented = true }));
                 }
                 finally { window?.Close(); }
             }
             if (queue == null || queue.HasThreadAccess) Finish(); else await OnUi(queue, Finish);
         }
+        void CleanupFailure(Exception error)
+        { status = "failed"; failure = "real_main_cleanup_failed"; exceptionType = error.GetType().Name; hresult = error.HResult.ToString("X8"); }
+        void AcceptMain(ReceiverSnapshot source)
+        {
+            Require(acceptSource!.Invoke(controller, [new PollResult(++mainRevision, source)]) is true, "source_fixture_not_accepted");
+        }
+        void VerifyMainPosition(double expectedPercent, string expectedTime)
+        {
+            foreach (var progressBar in new[] { Find<ProgressBar>("Progress"), Find<ProgressBar>("MiniProgress") })
+                Require(Math.Abs(progressBar.Value - expectedPercent) < 0.000001, "real_main_bar_ignored_display_position");
+            foreach (var text in new[] { Find<PlayerText>("PositionText"), Find<PlayerText>("MiniPosition") })
+                Require(text.Text == expectedTime, "real_main_time_ignored_display_position");
+        }
+        T Find<T>(string name) where T : FrameworkElement
+        {
+            var content = (FrameworkElement)main!.Content;
+            // FindName also reaches controls below an inactive layout whose
+            // Button template has not yet materialized its ContentPresenter.
+            return content.FindName(name) as T ?? Descendants(content).OfType<T>().FirstOrDefault(element => element.Name == name)
+                ?? throw new CheckFailure("real_main_named_element_missing");
+        }
+        void ArrangeMain(double width, double height)
+        {
+            Background();
+            Require(GetClientRect(mainHwnd, out var client), "real_main_client_rect_missing");
+            double scale = Math.Max(96, GetDpiForWindow(mainHwnd)) / 96.0;
+            Require(Math.Abs((client.Right - client.Left) / scale - width) <= 1 && Math.Abs((client.Bottom - client.Top) / scale - height) <= 1, "real_main_native_size_not_applied");
+            var content = (FrameworkElement)main!.Content;
+            content.Measure(new global::Windows.Foundation.Size(width, height)); content.Arrange(new global::Windows.Foundation.Rect(0, 0, width, height)); content.UpdateLayout();
+            main.RefreshAppearance(); content.UpdateLayout(); Background();
+        }
+        RectInt32 MainRegion(FrameworkElement element, FrameworkElement content)
+        {
+            Require(content.XamlRoot != null, "real_main_xaml_root_missing");
+            double scale = content.XamlRoot!.RasterizationScale;
+            var bounds = element.TransformToVisual(content).TransformBounds(new global::Windows.Foundation.Rect(0, 0, element.ActualWidth, element.ActualHeight));
+            int x = (int)Math.Floor(bounds.X * scale), y = (int)Math.Floor(bounds.Y * scale);
+            return new(x, y, (int)Math.Ceiling(bounds.Right * scale) - x, (int)Math.Ceiling(bounds.Bottom * scale) - y);
+        }
+    }
+    private static object? PendingRequest(ProgressSeekButton target)
+        => (typeof(ProgressSeekButton).GetField("pointerRequest", BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new CheckFailure("pending_pointer_fixture_field_missing")).GetValue(target);
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+    {
+        yield return parent;
+        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+            foreach (var child in Descendants(VisualTreeHelper.GetChild(parent, index))) yield return child;
     }
     private static bool Contains(RectInt32 a, RectInt32 b) => a.X <= b.X && a.Y <= b.Y && a.X + a.Width >= b.X + b.Width && a.Y + a.Height >= b.Y + b.Height;
     private static bool Overlaps(RectInt32 a, RectInt32 b) => a.X < b.X + b.Width && b.X < a.X + a.Width && a.Y < b.Y + b.Height && b.Y < a.Y + a.Height;
@@ -193,5 +418,9 @@ internal static class SeekInputCheck
         if (!queue.TryEnqueue(() => { try { action(); completion.SetResult(); } catch (Exception error) { completion.SetException(error); } }))
             completion.SetException(new CheckFailure("dispatcher_enqueue_failed"));
         return completion.Task;
+    }
+    private static async Task Settle(DispatcherQueue queue)
+    {
+        await OnUi(queue, () => { }); await Task.Delay(60); await OnUi(queue, () => { });
     }
 }

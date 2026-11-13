@@ -318,10 +318,10 @@ Check("appearance preferences: portable defaults, persistence and invalid-input 
 {
     using var temporary = new TemporaryDirectory();
     var preferences = new UiPreferencesStore(temporary.Path);
-    Assert(preferences.Value.ShowTransport && preferences.Value.ShowTaskbarIcon && preferences.Value.ShowTrayIcon, "unsafe default entry visibility");
+    Assert(preferences.Value.ShowTransport && preferences.Value.ShowProgress && preferences.Value.ShowTaskbarIcon && preferences.Value.ShowTrayIcon, "default controls, progress or entry visibility changed");
     Assert(preferences.Value.ProgressColorMode == "system" && preferences.Value.ProgressCustomColor == "#FFFFFF", "progress color defaults changed");
     int changes = 0; preferences.Changed += () => changes++;
-    var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowTaskbarIcon = false, ShowTrayIcon = false };
+    var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowProgress = false, ShowTaskbarIcon = false, ShowTrayIcon = false };
     preferences.Update(expected); preferences.Update(expected);
     Assert(changes == 1, "unchanged preferences notified twice");
     Assert(new UiPreferencesStore(temporary.Path).Value == expected, "portable UI state lost on reopen");
@@ -338,6 +338,13 @@ Check("appearance preferences: progress choices persist and invalid colors leave
         preferences.Update(expected);
         Assert(new UiPreferencesStore(temporary.Path).Value == expected, "progress choice or custom color was lost on reopen");
     }
+    var colored = preferences.Value with { ProgressColorMode = "custom", ProgressCustomColor = "#1234AB" };
+    preferences.Update(colored with { ShowProgress = false });
+    var hidden = new UiPreferencesStore(temporary.Path).Value;
+    Assert(!hidden.ShowProgress && hidden.ProgressColorMode == "custom" && hidden.ProgressCustomColor == colored.ProgressCustomColor,
+        "hiding progress lost its stored visibility or selected color");
+    preferences.Update(hidden with { ShowProgress = true });
+    Assert(new UiPreferencesStore(temporary.Path).Value == colored, "showing progress failed to restore its previous color");
     var saved = preferences.Value;
     string file = Path.Combine(temporary.Path, "ui-preferences.json"), savedJson = File.ReadAllText(file);
     int changes = 0; preferences.Changed += () => changes++;
@@ -408,7 +415,7 @@ Check("appearance preferences: malformed originals retained and partial older se
     Assert(File.ReadAllText(backup) == "{broken", "invalid preferences discarded");
     File.WriteAllText(file, "{\"language\":\"en\"}");
     var legacy = new UiPreferencesStore(temporary.Path).Value;
-    Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
+    Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowProgress && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
     Assert(legacy.ProgressColorMode == "system" && legacy.ProgressCustomColor == "#FFFFFF", "older preferences did not receive progress defaults");
     const string invalidColor = "{\"progress_color_mode\":\"custom\",\"progress_custom_color\":\"#80FF0000\"}";
     File.WriteAllText(file, invalidColor);
@@ -434,6 +441,7 @@ Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconn
     Assert(final.IsCancellationRequested, "application shutdown did not cancel cover loading");
     requests.Dispose(); requests.Cancel();
 });
+PlaybackTimelineTests.Register(Check);
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {

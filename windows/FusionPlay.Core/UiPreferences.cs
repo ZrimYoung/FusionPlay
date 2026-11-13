@@ -6,6 +6,7 @@ public sealed record UiPreferences
 {
     public string Language { get; init; } = "zh-Hans";
     public bool ShowTransport { get; init; } = true;
+    public bool ShowProgress { get; init; } = true;
     public bool AlwaysShowControls { get; init; }
     public bool Pinned { get; init; }
     public bool ShowPinButton { get; init; }

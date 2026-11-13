@@ -13,7 +13,8 @@ public sealed class ReceiverController : IAsyncDisposable
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private NativeReceiver? native;
-    private ulong revision;
+    private readonly PlaybackTimeline timeline = new();
+    private CancellationTokenSource? seekFeedbackExpiry;
     private long generation;
     private Task? polling;
     private readonly ArtworkRequestScope artworkRequests = new();
@@ -30,7 +31,8 @@ public sealed class ReceiverController : IAsyncDisposable
     public PortableStore Store { get; } = new(AppContext.BaseDirectory);
     public UiPreferencesStore Preferences { get; }
     public ReceiverSettings Settings { get; private set; } = new();
-    public ReceiverSnapshot State { get; private set; } = new();
+    public ReceiverSnapshot State => timeline.Source;
+    public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
     public NetworkInterface[] Networks { get; private set; } = [];
     public AudioDevice[] Outputs { get; private set; } = [];
     public bool Initialized { get; private set; }
@@ -90,6 +92,13 @@ public sealed class ReceiverController : IAsyncDisposable
         try { return await Task.Run(action, lifetime.Token); }
         finally { operations.Release(); }
     }
+    private Task<PollResult> ReadSnapshotAsync(ulong revision, CancellationToken cancellation)
+    {
+        // The native read clones a safe receiver handle and locks only shared state.
+        // A phone confirmation wait must not block source observations behind it.
+        var reader = native ?? throw new InvalidOperationException("Receiver is not initialized.");
+        return Task.Run(() => reader.Poll(revision), cancellation);
+    }
     public async Task InitializeAsync()
     {
         Busy = true; Error = ""; Notify();
@@ -131,6 +140,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private async Task ApplyLifecycleAsync()
     {
         long request = Interlocked.Increment(ref generation);
+        timeline.Cancel(); StopSeekFeedbackTimer();
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
         Busy = true; Error = ""; ControlMessage = ""; Notify();
@@ -138,9 +148,9 @@ public sealed class ReceiverController : IAsyncDisposable
         {
             var result = await Background(() =>
             {
-                if (request != Interlocked.Read(ref generation) || native == null) return (ReceiverSnapshot?)null;
+                if (request != Interlocked.Read(ref generation) || native == null) return (PollResult?)null;
                 if (start) native.Start(settings); else native.Stop();
-                return native.Poll().Snapshot;
+                return native.Poll();
             });
             if (request != Interlocked.Read(ref generation) || disposed) return;
             if (result != null) Accept(result);
@@ -165,20 +175,24 @@ public sealed class ReceiverController : IAsyncDisposable
                 var observedGeneration = Interlocked.Read(ref generation);
                 try
                 {
-                    var result = await Background(() => (native!.Poll(revision),
-                        devices ? NativeReceiver.Networks() : null, devices ? NativeReceiver.Outputs() : null));
+                    var observation = await ReadSnapshotAsync(timeline.Revision, cancellation);
                     await OnUi(() =>
                     {
                         if (disposed || observedGeneration != Interlocked.Read(ref generation)) return;
                         bool recovered = pollFailed;
                         pollFailed = false;
                         if (recovered && Error == PollError) Error = "";
-                        revision = result.Item1.Revision;
-                        if (result.Item1.Snapshot != null) Accept(result.Item1.Snapshot);
-                        else if (recovered) Notify();
-                        if (!devices) return;
-                        bool changed = !Networks.SequenceEqual(result.Item2!) || !Outputs.SequenceEqual(result.Item3!);
-                        Networks = result.Item2!; Outputs = result.Item3!;
+                        if (!Accept(observation) && recovered) Notify();
+                    });
+                    // Enumeration stays on the command queue, after publishing the
+                    // position. Skip it during a control wait instead of freezing UI progress.
+                    if (!devices || ControlBusy) continue;
+                    var discovered = await Background(() => (NativeReceiver.Networks(), NativeReceiver.Outputs()));
+                    await OnUi(() =>
+                    {
+                        if (disposed || observedGeneration != Interlocked.Read(ref generation)) return;
+                        bool changed = !Networks.SequenceEqual(discovered.Item1) || !Outputs.SequenceEqual(discovered.Item2);
+                        Networks = discovered.Item1; Outputs = discovered.Item2;
                         if (changed) DevicesChanged?.Invoke();
                         if (Busy || sleeping || !WantsReceiving) return;
                         string signature = Signature();
@@ -211,12 +225,17 @@ public sealed class ReceiverController : IAsyncDisposable
         var output = Outputs.FirstOrDefault(n => Settings.OutputDevice == "" ? n.IsDefault : n.Id == Settings.OutputDevice);
         return $"{network?.Name}/{network?.Address}/{output?.Id}";
     }
-    private void Accept(ReceiverSnapshot snapshot)
+    private bool Accept(PollResult observation)
     {
-        bool changedTrack = State.TrackId != snapshot.TrackId || State.Title != snapshot.Title;
-        State = snapshot; volume.Observe(snapshot.Volume);
+        var previous = State;
+        if (!timeline.Apply(observation)) return false;
+        var snapshot = State;
+        bool changedTrack = previous.TrackId != snapshot.TrackId || previous.Title != snapshot.Title;
+        if (!timeline.IsPending) StopSeekFeedbackTimer();
+        volume.Observe(snapshot.Volume);
         if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
         UpdateArtwork(snapshot); Notify();
+        return true;
     }
     public Task TogglePlaybackAsync() => ControlAsync(State.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
     public void DispatchControl(PlaybackCommand command) => ui.TryEnqueue(() => _ = ControlAsync(command));
@@ -234,11 +253,16 @@ public sealed class ReceiverController : IAsyncDisposable
         catch (Exception e) { if (!disposed) ControlMessage = "播放控制失败：" + Friendly(e); }
         finally { ControlBusy = false; if (!disposed) Notify(); }
     }
-    private sealed record SeekCompletion(ReceiverSnapshot Snapshot, CommandOutcome? Outcome, Exception? Error);
+    private sealed record SeekCompletion(PollResult Observation, CommandOutcome? Outcome, Exception? Error);
     public async Task SeekAsync(SeekRequest request)
     {
         if (!CanSeek || !Seeking.MatchesCurrent(State, request)) return;
         long requestedGeneration = Interlocked.Read(ref generation);
+        ulong feedback = timeline.Begin(request);
+        if (feedback == 0) return;
+        StartSeekFeedbackTimer(feedback, requestedGeneration);
+        var elapsed = Stopwatch.StartNew();
+        SeekDiagnostic("seek_requested");
         ControlBusy = true; ControlMessage = ""; Notify();
         bool StillCurrent() => !disposed && !sleeping && !Busy
             && requestedGeneration == Interlocked.Read(ref generation) && Seeking.MatchesCurrent(State, request);
@@ -246,32 +270,75 @@ public sealed class ReceiverController : IAsyncDisposable
         {
             var completed = await Background<SeekCompletion?>(() =>
             {
-                if (disposed || sleeping || Busy || native == null || requestedGeneration != Interlocked.Read(ref generation)) return null;
+                if (disposed || sleeping || Busy || native == null || requestedGeneration != Interlocked.Read(ref generation)
+                    || elapsed.Elapsed >= PlaybackTimeline.FeedbackTimeout) return null;
                 // The UI snapshot can lag behind the source while this command waits for the lock.
-                var current = native.Poll().Snapshot;
-                if (current == null || !Seeking.MatchesCurrent(current, request)) return null;
+                var current = native.Poll();
+                if (current.Snapshot == null) return null;
+                if (!Seeking.MatchesCurrent(current.Snapshot, request)) return new SeekCompletion(current, null, null);
                 CommandOutcome? outcome = null;
                 Exception? error = null;
                 try { outcome = native.Seek(request.PositionMs, request.ExpectedTrackId, request.ExpectedTitle); }
                 catch (Exception failure) { error = failure; }
                 // Suppress completion/error messages belonging to a song replaced during the command.
-                try { current = native.Poll().Snapshot ?? current; }
+                try { current = native.Poll(); }
                 catch (Exception) { /* Preserve the command result if only this follow-up observation failed. */ }
                 return new SeekCompletion(current, outcome, error);
             });
-            if (!StillCurrent() || completed == null || !Seeking.MatchesCurrent(completed.Snapshot, request)) return;
+            if (disposed || sleeping || Busy || requestedGeneration != Interlocked.Read(ref generation) || completed == null)
+            { timeline.Cancel(feedback); return; }
+            // This is actual phone-reported state, not the requested target.
+            // Revision ordering protects it from older queued poll continuations.
+            Accept(completed.Observation);
+            bool dispatched = completed.Outcome is { Dispatched: true } or { Confirmed: true };
+            timeline.Complete(feedback, dispatched && completed.Error == null);
+            bool nearSource = State.PositionMs is { } source && (source >= request.PositionMs ? source - request.PositionMs : request.PositionMs - source) <= 2_000;
+            SeekDiagnostic($"seek_completed:dispatched={dispatched}:confirmed={completed.Outcome?.Confirmed == true}:source_near_target={nearSource}:elapsed_ms={elapsed.ElapsedMilliseconds}");
+            if (!StillCurrent()) return;
             if (completed.Error != null)
                 ControlMessage = L.Text("跳转失败：", "Seek failed: ") + Friendly(completed.Error);
             else if (completed.Outcome is { Dispatched: false, Confirmed: false })
                 ControlMessage = L.Text("跳转未发送，请重试。", "Seek request was not sent. Try again.");
-            // PositionMs is deliberately unchanged: only subsequent source snapshots move the timeline.
+            // Only DisplayPositionMs may temporarily show the target. State and
+            // system media continue to expose authoritative phone observations.
         }
         catch (OperationCanceledException) when (disposed || lifetime.IsCancellationRequested) { }
         catch (Exception error)
         {
+            timeline.Cancel(feedback);
             if (StillCurrent()) ControlMessage = L.Text("跳转失败：", "Seek failed: ") + Friendly(error);
         }
-        finally { ControlBusy = false; if (!disposed) Notify(); }
+        finally { if (!timeline.IsPending) StopSeekFeedbackTimer(); ControlBusy = false; if (!disposed) Notify(); }
+    }
+    private void StartSeekFeedbackTimer(ulong token, long receiverGeneration)
+    {
+        StopSeekFeedbackTimer();
+        seekFeedbackExpiry = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+        _ = ExpireSeekFeedbackAsync(token, receiverGeneration, seekFeedbackExpiry.Token);
+    }
+    private async Task ExpireSeekFeedbackAsync(ulong token, long receiverGeneration, CancellationToken cancellation)
+    {
+        try
+        {
+            await Task.Delay(PlaybackTimeline.FeedbackTimeout, cancellation);
+            await OnUi(() =>
+            {
+                if (disposed || receiverGeneration != Interlocked.Read(ref generation) || !timeline.Expire(token)) return;
+                StopSeekFeedbackTimer(); SeekDiagnostic("seek_feedback_expired"); Notify();
+            });
+        }
+        catch (OperationCanceledException) { }
+    }
+    private void StopSeekFeedbackTimer()
+    {
+        var expiry = seekFeedbackExpiry; seekFeedbackExpiry = null;
+        if (expiry == null) return;
+        expiry.Cancel(); expiry.Dispose();
+    }
+    private void SeekDiagnostic(string stage)
+    {
+        // No titles, URLs, identities or exact playback positions are recorded.
+        try { Store.EventDiagnostic(stage); } catch { }
     }
     public void BeginVolume() { volumeGesture = true; volume.BeginEditing(); }
     public void EditVolume(double value)
@@ -407,6 +474,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
+        timeline.Cancel(); StopSeekFeedbackTimer();
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();

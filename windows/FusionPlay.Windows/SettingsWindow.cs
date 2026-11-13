@@ -47,7 +47,7 @@ internal sealed class SettingsWindow : Window
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer progressColorSaveTimer;
     private string? pendingProgressColor;
     private bool renderingProgressColorChoices;
-    private ToggleSwitch transport = null!, always = null!, pinned = null!, pinButton = null!, taskbar = null!, tray = null!;
+    private ToggleSwitch transport = null!, progress = null!, always = null!, pinned = null!, pinButton = null!, taskbar = null!, tray = null!;
     private OutputCalibration? calibration;
     private bool renderingCalibration, changingCalibration, renderingPreferences, renderingDevices, closed;
     private bool numericEditing, sliderDragging, draftDirty, syncButtonPointerDown;
@@ -162,6 +162,8 @@ internal sealed class SettingsWindow : Window
         page.Children.Add(Text("鼠标移出后仍显示歌曲信息、进度和已开启的控件。", true));
         transport = Toggle("显示播放控制", (p, value) => p with { ShowTransport = value }); page.Children.Add(transport);
         page.Children.Add(Text("显示上一首、播放/暂停和下一首按钮。", true));
+        progress = Toggle("显示进度条", (p, value) => p with { ShowProgress = value }); page.Children.Add(progress);
+        page.Children.Add(Text("显示进度条和时间，支持点击跳转。", true));
         Label(() => { progressColorMode.Header = L.Text("进度条颜色"); RefreshProgressColorChoices(); progressColor.Language = L.Language == "en" ? "en-US" : "zh-CN"; AutomationProperties.SetName(progressColor, L.Text("自定义进度条颜色")); });
         page.Children.Add(progressColorMode);
         progressColorMode.SelectionChanged += (_, _) =>
@@ -299,10 +301,12 @@ internal sealed class SettingsWindow : Window
             if (Content is FrameworkElement root) UiTypography.Apply(root, preferences);
             language.SelectedItem = ((Choice[])language.ItemsSource).First(x => x.Key == preferences.Language);
             transport.IsOn = preferences.ShowTransport; always.IsOn = preferences.AlwaysShowControls;
+            progress.IsOn = preferences.ShowProgress;
             pinned.IsOn = preferences.Pinned; pinButton.IsOn = preferences.ShowPinButton;
             taskbar.IsOn = preferences.ShowTaskbarIcon; tray.IsOn = preferences.ShowTrayIcon;
             if (progressColorMode.ItemsSource is Choice[] modes)
                 progressColorMode.SelectedItem = modes.First(item => item.Key == preferences.ProgressColorMode);
+            progressColorMode.IsEnabled = progressColor.IsEnabled = preferences.ShowProgress;
             progressColorEditor.Visibility = preferences.ProgressColorMode == "custom" ? Visibility.Visible : Visibility.Collapsed;
             // Other preference changes must not overwrite the latest color still waiting for its throttle tick.
             string hex = pendingProgressColor ?? preferences.ProgressCustomColor;

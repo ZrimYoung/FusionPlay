@@ -37,7 +37,9 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
         {
-            seek.Snapshot = () => model.State;
+            // Only the presentation position can be pending; track identity,
+            // duration and command validation always retain source metadata.
+            seek.Snapshot = () => model.State with { PositionMs = model.DisplayPositionMs };
             seek.SeekRequested += SeekRequested;
         }
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -115,6 +117,7 @@ public sealed partial class MainWindow : Window
         if (closed || miniBackdrop == null || backdrop == null) return;
         rendering = true;
         var state = model.State; var preferences = model.Preferences.Value;
+        ulong? displayPosition = model.DisplayPositionMs;
         UiTypography.Apply(RootGrid, preferences);
         MiniTitle.Text = TitleText.Text = state.Title.Length > 0 ? state.Title : L.Text(state.HasMedia ? "正在接收音乐" : "让音乐，连接此刻");
         string metadata = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => !string.IsNullOrWhiteSpace(x)));
@@ -157,20 +160,21 @@ public sealed partial class MainWindow : Window
         AutomationProperties.SetName(MiniCover, L.Text("专辑封面"));
         AutomationProperties.SetName(MiniProgress, L.Text("播放进度"));
         AutomationProperties.SetName(CoverImage, L.Text("专辑封面")); AutomationProperties.SetName(Progress, L.Text("播放进度"));
+        bool progress = preferences.ShowProgress && state.HasMedia && state.DurationMs is > 0 && displayPosition != null;
+        MiniProgressPanel.Visibility = ProgressPanel.Visibility = progress ? Visibility.Visible : Visibility.Collapsed;
         foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
         {
-            seek.IsEnabled = model.CanSeek;
+            seek.IsEnabled = progress && model.CanSeek;
+            if (!seek.IsEnabled) seek.CancelPointer();
             Label(seek, L.Text("播放进度，点击跳转"));
             AutomationProperties.SetHelpText(seek, L.Text("点击跳转；方向键前后 10 秒，Home 到开头，End 到结尾。"));
             seek.RefreshState();
         }
         ApplyProgressColor(preferences);
-        bool progress = state.HasMedia && state.DurationMs is > 0 && state.PositionMs != null;
-        MiniProgressPanel.Visibility = ProgressPanel.Visibility = progress ? Visibility.Visible : Visibility.Collapsed;
         if (progress)
         {
-            MiniProgress.Value = Progress.Value = Math.Clamp(100.0 * state.PositionMs!.Value / state.DurationMs!.Value, 0, 100);
-            MiniPosition.Text = PositionText.Text = FormatTime(state.PositionMs.Value); MiniDuration.Text = DurationText.Text = FormatTime(state.DurationMs.Value);
+            MiniProgress.Value = Progress.Value = Math.Clamp(100.0 * displayPosition!.Value / state.DurationMs!.Value, 0, 100);
+            MiniPosition.Text = PositionText.Text = FormatTime(displayPosition.Value); MiniDuration.Text = DurationText.Text = FormatTime(state.DurationMs.Value);
         }
         string error = preferenceError.Length > 0 ? preferenceError : model.Error;
         MigrationButton.Content = ExpandedMigrationButton.Content = L.Text("为此电脑建立独立身份");
@@ -307,6 +311,7 @@ public sealed partial class MainWindow : Window
         visible |= model.Preferences.Value.AlwaysShowControls || WindowSizing.ScreenReaderActive || focusInside || model.Error.Length > 0 || preferenceError.Length > 0 || model.MigrationRequired;
         if (visible == controlsShown) return;
         controlsShown = visible;
+        if (!visible) MiniProgressSeek.CancelPointer();
         // Let the artwork backdrop establish contrast before the information arrives.
         // On exit, information leaves first while the backdrop lingers underneath.
         AnimateVisibility(MiniBackdropLayer, visible, visible ? .70 : .65, visible ? 0 : .10);
