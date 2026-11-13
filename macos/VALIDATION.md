@@ -174,3 +174,13 @@
 - Status-icon refinement: idle retains double rings; playing and paused use one centered ring with an internal triangle or bars. The ring uses the same radius/scale and stroke as each default ring, with unchanged 20x16 canvas. Three-state rendering inspected and brand regression passed.
 
 - User accepted the installed single-ring playback-state revision and requested publication to main on 2026-11-12. This round includes the compact menu, thin volume track, artwork/title mini-player entry, and independent Dock/menu visibility preferences. Native build/signature, brand regression and volume-interaction regression passed; no new audio synchronization or physical recovery acceptance is implied.
+
+## Menu progress and expandable volume (2026-11-13)
+
+- Replaced the menu's volume line with playback progress. A footer volume button expands/collapses a horizontal thin volume control; Settings and Quit remain available.
+- Connected menu click/drag seeking to the existing SDK key-seek protocol. Dragging previews only; release dispatches once. Host rejects disconnected sessions, unavailable duration, out-of-range targets, and changed track ID/title. UI does not overwrite authoritative playback position; unconfirmed/failed seeks are reported. Other player/system progress interfaces remain unchanged.
+- Host regression: 13 passed, 2 network tests ignored. SDK: 107 passed, 1 ignored. Native build/signature passed. Audible seek behavior and sender-app compatibility require phone acceptance.
+
+- Menu follow-up: volume reveal now animates a leading-anchored clipped width, replacing the slide-in transition that crossed the left icons. The menu Quit button presents localized Cancel/Quit confirmation; cancellation leaves reception running. Native build/signature and translation syntax checked; visual interaction awaits acceptance.
+
+- User accepted the current menu revision and requested publication to main on 2026-11-13. This records UI acceptance of progress/expandable volume and quit confirmation; sender-side seek compatibility has not been separately confirmed by an explicit phone playback result.

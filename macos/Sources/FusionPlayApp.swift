@@ -141,6 +141,9 @@ private struct PlayerWindowBehavior: NSViewRepresentable {
 
 struct ReceiverPanel: View {
     @AppStorage("appLanguage") private var language = "zh-Hans"
+    @State private var volumeExpanded = false
+    @State private var confirmQuit = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: ReceiverModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
@@ -169,20 +172,46 @@ struct ReceiverPanel: View {
                     PlaybackControls(model: model)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            MenuVolumeBar(model: model)
+            MenuPlaybackProgress(model: model)
+            if !model.seekMessage.isEmpty {
+                Text(L(model.seekMessage)).font(.caption).foregroundStyle(.secondary)
+            }
             if !model.error.isEmpty {
                 Text(model.error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             } else if model.controlMessage.hasPrefix("播放控制失败") {
                 Text(model.controlMessage).font(.caption).foregroundStyle(.red)
             }
-            HStack {
+            HStack(spacing: 8) {
                 action("gearshape", label: L("设置")) {
                     openWindow(id: "settings"); NSApp.activate(ignoringOtherApps: true)
                 }
-                Spacer()
-                action("power", label: L("退出 FusionPlay")) { NSApp.terminate(nil) }
+                HStack(spacing: 8) {
+                    Button { volumeExpanded.toggle() } label: {
+                        Image(systemName: model.volume == 0 ? "speaker.slash" : "speaker.wave.2")
+                            .font(.system(size: 14)).frame(width: 28, height: 26)
+                    }.buttonStyle(MenuActionStyle())
+                        .help(volumeExpanded ? L("收起音量") : L("展开音量"))
+                        .accessibilityLabel(L("接收音量"))
+                        .accessibilityValue(volumeExpanded ? L("已开启") : L("已关闭"))
+                    MenuVolumeBar(model: model)
+                        .frame(width: 104)
+                        .frame(width: volumeExpanded ? 104 : 0, alignment: .leading)
+                        .clipped()
+                        .opacity(volumeExpanded ? 1 : 0)
+                        .allowsHitTesting(volumeExpanded)
+                        .accessibilityHidden(!volumeExpanded)
+                }
+                Spacer(minLength: 0)
+                action("power", label: L("退出 FusionPlay")) { confirmQuit = true }
             }.foregroundStyle(.secondary)
+                .animation(.easeInOut(duration: reduceMotion ? 0 : 0.25), value: volumeExpanded)
         }.padding(16).frame(width: 280)
+            .alert(L("退出 FusionPlay？"), isPresented: $confirmQuit) {
+                Button(L("取消"), role: .cancel) {}
+                Button(L("退出"), role: .destructive) { NSApp.terminate(nil) }
+            } message: {
+                Text(L("退出后将停止接收音乐。"))
+            }
     }
     private func openMiniPlayer() {
         model.miniPlayerRequest &+= 1
@@ -193,6 +222,67 @@ struct ReceiverPanel: View {
         Button(action: perform) {
             Image(systemName: symbol).font(.system(size: 14, weight: .regular)).frame(width: 28, height: 26)
         }.buttonStyle(MenuActionStyle()).help(label).accessibilityLabel(label)
+    }
+}
+
+private struct MenuPlaybackProgress: View {
+    @ObservedObject var model: ReceiverModel
+    @State private var dragFraction: Double?
+    @State private var dragTrack: String?
+    @State private var dragTitle = ""
+    private var sameTrack: Bool { dragTrack == model.snapshot?.trackId && dragTitle == model.snapshot?.title }
+    private var fraction: Double {
+        if let dragFraction, sameTrack { return dragFraction }
+        guard let state = model.snapshot, state.controlsAvailable,
+              let duration = state.durationMs, duration > 0,
+              let position = state.positionMs else { return 0 }
+        return min(1, Double(position) / Double(duration))
+    }
+    private func time(_ value: UInt64?) -> String {
+        guard let value else { return "–:––" }
+        return String(format: "%llu:%02llu", value / 60000, value / 1000 % 60)
+    }
+    private func target(_ fraction: Double) -> UInt64 {
+        let duration = model.snapshot?.durationMs ?? 0
+        if fraction >= 1 { return duration }
+        return UInt64((max(0, fraction) * Double(duration)).rounded(.down))
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(0.10))
+                Capsule().fill(Color.primary.opacity(0.45))
+                    .frame(width: geometry.size.width * fraction)
+            }.frame(height: 3).frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        guard model.canSeek, geometry.size.width > 0 else { return }
+                        if dragTrack == nil { dragTrack = model.snapshot?.trackId; dragTitle = model.snapshot?.title ?? "" }
+                        guard sameTrack else { return }
+                        dragFraction = min(1, max(0, Double(value.location.x / geometry.size.width)))
+                    }
+                    .onEnded { value in
+                        if model.canSeek, sameTrack, geometry.size.width > 0 {
+                            model.seek(to: target(min(1, max(0, Double(value.location.x / geometry.size.width)))))
+                        }
+                        dragFraction = nil; dragTrack = nil
+                    })
+        }.frame(height: 18)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(L("播放进度"))
+            .accessibilityValue(time(dragFraction == nil ? model.snapshot?.positionMs : target(fraction)) + " / " + time(model.snapshot?.durationMs))
+            .accessibilityAdjustableAction { direction in
+                guard model.canSeek, let duration = model.snapshot?.durationMs else { return }
+                let current = min(model.snapshot?.positionMs ?? 0, duration)
+                switch direction {
+                case .increment: model.seek(to: current + min(10000, duration - current))
+                case .decrement: model.seek(to: current > 10000 ? current - 10000 : 0)
+                @unknown default: break
+                }
+            }
+            .help(time(model.snapshot?.positionMs) + " / " + time(model.snapshot?.durationMs) + " · " + L("点击或拖动跳转，松手后发送到手机"))
+            .onDisappear { dragFraction = nil; dragTrack = nil }
     }
 }
 

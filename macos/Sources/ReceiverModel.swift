@@ -33,6 +33,7 @@ final class ReceiverModel: ObservableObject {
     @Published var initialized = false
     @Published var wantsReceiving = false
     @Published var controlBusy = false
+    @Published var seekMessage = ""
     @Published var controlMessage = ""
     @Published var artwork: NSImage?
     @Published var artworkStatus = "尚未连接"
@@ -111,6 +112,7 @@ final class ReceiverModel: ObservableObject {
     }
     func accept(_ state: Snapshot) {
         guard !terminating else { return }
+        if snapshot?.trackId != state.trackId || snapshot?.title != state.title || !state.controlsAvailable { seekMessage = "" }
         snapshot = state
         volumeInteraction.observe(Double(state.volume))
         if !state.controlsAvailable { controlMessage = "" }
@@ -139,6 +141,32 @@ final class ReceiverModel: ObservableObject {
                     guard let self, !self.terminating else { return }
                     self.controlBusy = false; self.controlMessage = "播放控制失败：\(error)"
                     self.accept(receiver.snapshot())
+                }
+            }
+        }
+    }
+    var canSeek: Bool { canControl && (snapshot?.durationMs ?? 0) > 0 }
+    func seek(to position: UInt64) {
+        guard let receiver, let state = snapshot, canSeek, let duration = state.durationMs else { return }
+        controlBusy = true; seekMessage = ""
+        systemMedia.update(state, busy: true, artwork: artworkLoading ? nil : artwork)
+        backend.async { [weak self] in
+            do {
+                let result = try receiver.seek(positionMs: min(position, duration), expectedTrackId: state.trackId, expectedTitle: state.title)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.terminating else { return }
+                    self.controlBusy = false
+                    self.accept(receiver.snapshot())
+                    if self.snapshot?.trackId == state.trackId && self.snapshot?.title == state.title && self.snapshot?.controlsAvailable == true {
+                        self.seekMessage = result.confirmed ? "" : "手机尚未确认跳转"
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.terminating else { return }
+                    self.controlBusy = false
+                    self.accept(receiver.snapshot())
+                    if self.snapshot?.controlsAvailable == true { self.seekMessage = "跳转失败，请重试" }
                 }
             }
         }

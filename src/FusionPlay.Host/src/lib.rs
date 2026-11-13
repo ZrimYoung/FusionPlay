@@ -497,6 +497,20 @@ impl Receiver {
             confirmed: outcome.confirmed,
         })
     }
+    /// Request a phone-side seek; never fabricate local playback progress.
+    pub fn seek(&self, position_ms: u64, expected_track_id: String, expected_title: String) -> Result<CommandOutcome> {
+        let _operation = self.operations.lock().map_err(storage)?;
+        let state = self.snapshot();
+        if !state.controls_available || state.track_id != expected_track_id || state.title != expected_title
+            || !matches!(state.duration_ms, Some(duration) if duration > 0 && position_ms <= duration) {
+            return Err(HostError::InvalidConfig { message: "Track changed, duration unavailable, or seek target out of range".into() });
+        }
+        let controller = self.core.lock().map_err(storage)?.as_ref()
+            .ok_or_else(|| receiver_error("Receiver is stopped"))?.controller();
+        let outcome = controller.send_confirmed(MediaAction::Seek(position_ms), Duration::from_millis(1500))
+            .map_err(receiver_error)?;
+        Ok(CommandOutcome { dispatched: outcome.dispatched, confirmed: outcome.confirmed })
+    }
     pub fn set_volume(&self, volume: u32) -> Result<()> {
         let _operation = self.operations.lock().unwrap();
         if volume > 100 {
@@ -878,6 +892,27 @@ fn write_diagnostic(dir: &Path, event: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn seek_rejects_disconnected_unknown_duration_stale_track_and_out_of_range() {
+        let dir = std::env::temp_dir().join(format!("fusionplay-seek-{}", uuid::Uuid::new_v4()));
+        let r = Receiver::new(dir.to_string_lossy().into()).unwrap();
+        assert!(matches!(r.seek(0, "a".into(), "Song".into()), Err(HostError::InvalidConfig { .. })));
+        {
+            let mut state = r.shared.state.lock().unwrap();
+            state.controls_available = true; state.track_id = "a".into(); state.title = "Song".into();
+        }
+        assert!(matches!(r.seek(0, "a".into(), "Song".into()), Err(HostError::InvalidConfig { .. })));
+        r.shared.state.lock().unwrap().duration_ms = Some(1000);
+        for (position, track, title) in [(1001, "a", "Song"), (0, "b", "Song"), (0, "a", "Other")] {
+            assert!(matches!(r.seek(position, track.into(), title.into()), Err(HostError::InvalidConfig { .. })));
+        }
+        // Valid boundaries reach the controller check, rather than failing validation.
+        for position in [0, 1000] {
+            assert!(matches!(r.seek(position, "a".into(), "Song".into()), Err(HostError::Receiver { .. })));
+        }
+        drop(r); fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn closing_an_old_media_generation_cannot_clear_the_new_track() {
         let mut active = 0;
