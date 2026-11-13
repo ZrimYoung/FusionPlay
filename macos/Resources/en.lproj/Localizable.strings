@@ -95,3 +95,12 @@
 "显示菜单栏图标" = "Show Menu Bar Icon";
 "两个入口都隐藏时，再次打开应用可进入设置。" = "When both icons are hidden, open the app again to access Settings.";
 "打开迷你播放器" = "Open Mini Player";
+"展开音量" = "Show Volume";
+"收起音量" = "Hide Volume";
+"手机尚未确认跳转" = "Phone has not confirmed the seek";
+"跳转失败，请重试" = "Seek failed; please try again";
+"点击或拖动跳转，松手后发送到手机" = "Click or drag to seek; release to send to your phone";
+"退出 FusionPlay？" = "Quit FusionPlay?";
+"取消" = "Cancel";
+"退出" = "Quit";
+"退出后将停止接收音乐。" = "Quitting will stop receiving music.";

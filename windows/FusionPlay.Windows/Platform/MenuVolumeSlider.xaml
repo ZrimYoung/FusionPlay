@@ -1,0 +1,70 @@
+<UserControl
+    x:Class="FusionPlay.Windows.Platform.MenuVolumeSlider"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Width="104" Height="28" MinHeight="28" IsTabStop="False">
+    <!-- Reuse WinUI's entire native Slider template and input/automation peer.
+         Only these local theme resources change its visual presentation. -->
+    <Slider x:Name="NativeSlider"
+            Width="104" Height="28" MinHeight="28" Padding="0"
+            Minimum="0" Maximum="100" Value="50" StepFrequency="1"
+            SmallChange="1" LargeChange="10" Orientation="Horizontal"
+            CornerRadius="1.5" UseSystemFocusVisuals="True" FocusVisualMargin="0"
+            Style="{StaticResource DefaultSliderStyle}">
+        <Slider.Resources>
+            <ResourceDictionary>
+                <ResourceDictionary.ThemeDictionaries>
+                    <ResourceDictionary x:Key="Default">
+                        <!-- A zero-width native thumb keeps the native track's
+                             0..100 mapping across the full 104 DIP width. The
+                             28 DIP transparent SliderContainer owns hit testing. -->
+                        <x:Double x:Key="SliderHorizontalThumbWidth">0</x:Double>
+                        <x:Double x:Key="SliderHorizontalThumbHeight">18</x:Double>
+                        <x:Double x:Key="SliderInnerThumbWidth">0</x:Double>
+                        <x:Double x:Key="SliderInnerThumbHeight">0</x:Double>
+                        <SolidColorBrush x:Key="SliderThumbBackground" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderThumbBackgroundPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderThumbBackgroundPressed" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderThumbBackgroundDisabled" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderThumbBorderBrush" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderOuterThumbBackground" Color="Transparent" />
+                        <SolidColorBrush x:Key="SliderTrackFill" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.10" />
+                        <SolidColorBrush x:Key="SliderTrackFillPointerOver" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.10" />
+                        <SolidColorBrush x:Key="SliderTrackFillPressed" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.10" />
+                        <SolidColorBrush x:Key="SliderTrackValueFill" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.45" />
+                        <SolidColorBrush x:Key="SliderTrackValueFillPointerOver" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.45" />
+                        <SolidColorBrush x:Key="SliderTrackValueFillPressed" Color="{ThemeResource SystemBaseHighColor}" Opacity="0.45" />
+                        <StaticResource x:Key="SliderTrackFillDisabled" ResourceKey="ControlStrongFillColorDisabledBrush" />
+                        <StaticResource x:Key="SliderTrackValueFillDisabled" ResourceKey="AccentFillColorDisabledBrush" />
+                    </ResourceDictionary>
+                    <ResourceDictionary x:Key="HighContrast">
+                        <!-- Respect system contrast colors and restore the native
+                             thumb as an additional position cue in contrast themes. -->
+                        <x:Double x:Key="SliderHorizontalThumbWidth">18</x:Double>
+                        <x:Double x:Key="SliderHorizontalThumbHeight">18</x:Double>
+                        <x:Double x:Key="SliderInnerThumbWidth">12</x:Double>
+                        <x:Double x:Key="SliderInnerThumbHeight">12</x:Double>
+                        <StaticResource x:Key="SliderThumbBackground" ResourceKey="SystemControlForegroundAccentBrush" />
+                        <StaticResource x:Key="SliderThumbBackgroundPointerOver" ResourceKey="SystemColorHighlightColorBrush" />
+                        <StaticResource x:Key="SliderThumbBackgroundPressed" ResourceKey="SystemColorHotlightColorBrush" />
+                        <StaticResource x:Key="SliderThumbBackgroundDisabled" ResourceKey="SystemControlDisabledChromeDisabledHighBrush" />
+                        <StaticResource x:Key="SliderThumbBorderBrush" ResourceKey="SystemControlForegroundAccentBrush" />
+                        <StaticResource x:Key="SliderOuterThumbBackground" ResourceKey="SystemControlForegroundAccentBrush" />
+                        <StaticResource x:Key="SliderTrackFill" ResourceKey="SystemControlForegroundBaseMediumLowBrush" />
+                        <StaticResource x:Key="SliderTrackFillPointerOver" ResourceKey="SystemControlForegroundBaseMediumBrush" />
+                        <StaticResource x:Key="SliderTrackFillPressed" ResourceKey="SystemControlForegroundBaseMediumLowBrush" />
+                        <StaticResource x:Key="SliderTrackValueFill" ResourceKey="SystemControlHighlightAccentBrush" />
+                        <StaticResource x:Key="SliderTrackValueFillPointerOver" ResourceKey="SystemControlHighlightAccentBrush" />
+                        <StaticResource x:Key="SliderTrackValueFillPressed" ResourceKey="SystemControlHighlightAccentBrush" />
+                        <StaticResource x:Key="SliderTrackFillDisabled" ResourceKey="SystemControlDisabledChromeDisabledHighBrush" />
+                        <StaticResource x:Key="SliderTrackValueFillDisabled" ResourceKey="SystemControlDisabledChromeDisabledHighBrush" />
+                    </ResourceDictionary>
+                </ResourceDictionary.ThemeDictionaries>
+                <x:Double x:Key="SliderTrackThemeHeight">3</x:Double>
+                <x:Double x:Key="SliderPreContentMargin">12.5</x:Double>
+                <x:Double x:Key="SliderPostContentMargin">12.5</x:Double>
+                <x:Double x:Key="SliderHorizontalHeight">28</x:Double>
+            </ResourceDictionary>
+        </Slider.Resources>
+    </Slider>
+</UserControl>

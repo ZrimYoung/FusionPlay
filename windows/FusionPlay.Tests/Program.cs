@@ -124,8 +124,93 @@ Check("wire: snapshot enums and missing progress round trip", () =>
     Assert(JsonSerializer.Serialize(PlaybackCommand.Next, WireJson.Options) == "\"Next\"", "command wire mismatch");
 });
 
+Check("seek: only an identified source timeline can be requested", () =>
+{
+    var source = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true, TrackId = "track-a", Title = "歌曲 A", DurationMs = 10_000, PositionMs = 1_250 };
+    Assert(Seeking.CanSeek(source) && Seeking.CanSeek(source with { Phase = ReceiverPhase.Paused }), "playing/paused timeline unavailable");
+    Assert(Seeking.CanSeek(source with { TrackId = "" }) && Seeking.CanSeek(source with { Title = "" }), "valid title/id fallback rejected");
+    foreach (var invalid in new[]
+    {
+        source with { ControlsAvailable = false }, source with { Phase = ReceiverPhase.Connected },
+        source with { Phase = ReceiverPhase.Failed }, source with { DurationMs = null },
+        source with { DurationMs = 0 }, source with { PositionMs = null },
+        source with { TrackId = "", Title = "  " }, source with { TrackId = null! }, source with { Title = null! }
+    })
+    {
+        Assert(!Seeking.CanSeek(invalid) && Seeking.AtFraction(invalid, 0.5) == null, "invalid timeline produced a command");
+    }
+    var requested = Seeking.AtFraction(source, 0.5)!;
+    Assert(requested == new SeekRequest(5_000, "track-a", "歌曲 A"), "captured track or target changed");
+    Assert(source.PositionMs == 1_250, "request fabricated local progress");
+});
+Check("seek: pointer endpoints and invalid dimensions are bounded before division", () =>
+{
+    var source = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true, TrackId = "track", DurationMs = 10_000, PositionMs = 0 };
+    foreach (var (x, expected) in new (double, ulong)[] { (-10, 0), (0, 0), (50, 5_000), (100, 10_000), (200, 10_000) })
+        Assert(Seeking.AtPoint(source, x, 100)?.PositionMs == expected, "pointer mapping lost an endpoint or midpoint");
+    foreach (double width in new[] { 0d, -1d, double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        Assert(Seeking.AtPoint(source, 10, width) == null, "invalid width accepted");
+    foreach (double x in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        Assert(Seeking.AtPoint(source, x, 100) == null, "non-finite coordinate accepted");
+    Assert(Seeking.AtPoint(source, double.MaxValue, double.Epsilon)?.PositionMs == 10_000, "tiny width overflowed division");
+    Assert(Seeking.AtPoint(source, double.MinValue, double.Epsilon)?.PositionMs == 0, "negative endpoint was not bounded");
+    Assert(Seeking.AtFraction(source, -10)?.PositionMs == 0 && Seeking.AtFraction(source, 10)?.PositionMs == 10_000, "finite fractions were not clamped");
+    foreach (double fraction in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity })
+        Assert(Seeking.AtFraction(source, fraction) == null, "non-finite fraction accepted");
+});
+Check("seek: full ulong durations keep exact endpoints and safe millisecond rounding", () =>
+{
+    var source = new ReceiverSnapshot { Phase = ReceiverPhase.Paused, ControlsAvailable = true, TrackId = "long", DurationMs = ulong.MaxValue, PositionMs = 0 };
+    Assert(Seeking.AtFraction(source, 0)?.PositionMs == 0, "left endpoint changed");
+    Assert(Seeking.AtFraction(source, 1)?.PositionMs == ulong.MaxValue, "ulong endpoint rounded beyond its range");
+    Assert(Seeking.AtFraction(source, 0.5)?.PositionMs == 1UL << 63, "ulong midpoint lost precision");
+    var nearEnd = Seeking.AtFraction(source, Math.BitDecrement(1d));
+    Assert(nearEnd != null && nearEnd.PositionMs <= ulong.MaxValue, "near-end fraction overflowed");
+    Assert(Seeking.AtFraction(source, double.MaxValue)?.PositionMs == ulong.MaxValue, "huge finite fraction overflowed decimal conversion");
+    Assert(Seeking.AtFraction(source with { DurationMs = 1 }, 0.5)?.PositionMs == 1, "half-millisecond rounding changed direction");
+    Assert(Seeking.AtFraction(source, double.Epsilon)?.PositionMs == 0, "sub-millisecond request exceeded the source range");
+});
+Check("seek: queued requests cannot target another track or a shortened timeline", () =>
+{
+    var source = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true, TrackId = "same-id", Title = "Song", DurationMs = 10_000, PositionMs = 100 };
+    var request = Seeking.AtFraction(source, 0.5)!;
+    Assert(Seeking.MatchesCurrent(source with { PositionMs = 8_000, Phase = ReceiverPhase.Paused }, request), "normal source progress invalidated its own track");
+    foreach (var replacement in new[]
+    {
+        source with { TrackId = "different-id" }, source with { Title = "Another Song" },
+        source with { TrackId = "SAME-ID" }, source with { DurationMs = 4_999 },
+        source with { ControlsAvailable = false }, source with { Phase = ReceiverPhase.Stopped }
+    }) Assert(!Seeking.MatchesCurrent(replacement, request), "stale request matched a replacement timeline");
+    Assert(Seeking.MatchesCurrent(source with { DurationMs = 5_000 }, request), "exact endpoint rejected");
+    Assert(!Seeking.MatchesCurrent(source, request with { ExpectedTitle = "song" }), "title identity comparison was not exact");
+    Assert(!Seeking.MatchesCurrent(source, request with { PositionMs = ulong.MaxValue }), "out-of-range queued target accepted");
+    using var json = JsonDocument.Parse(JsonSerializer.Serialize(request, WireJson.Options));
+    Assert(json.RootElement.GetProperty("position_ms").GetUInt64() == 5_000 && json.RootElement.GetProperty("expected_track_id").GetString() == "same-id"
+        && json.RootElement.GetProperty("expected_title").GetString() == "Song", "seek wire fields changed");
+});
+
 if (args.Contains("--native") || args.Contains("--network"))
 {
+    Check("native DLL: seek validates disconnected state without fabricating progress", () =>
+    {
+        using var temporary = new TemporaryDirectory();
+        using var receiver = new NativeReceiver(Path.Combine(temporary.Path, "seek-data"));
+        var before = receiver.Poll().Snapshot;
+        Assert(before is { Phase: ReceiverPhase.Stopped, PositionMs: null }, "test receiver did not expose its initial source state");
+        foreach (ulong target in new[] { 0UL, ulong.MaxValue })
+        {
+            bool rejected = false;
+            try { receiver.Seek(target, "captured-track", "Captured Song"); }
+            catch (ReceiverException error)
+            {
+                Assert(error.Code == "invalid_config" && error.Message == "Invalid configuration: Track changed, duration unavailable, or seek target out of range",
+                    "native DLL did not reach Host.seek validation; an older ABI-1 DLL may have rejected the unknown operation");
+                rejected = true;
+            }
+            Assert(rejected, "disconnected seek unexpectedly dispatched");
+        }
+        Assert(receiver.Poll().Snapshot == before, "rejected native seek changed source progress or playback state");
+    });
     AsyncCheck("native DLL: 10 managed create/GC/dispose cycles preserve identity and settings", async () =>
     {
         using var temporary = new TemporaryDirectory();

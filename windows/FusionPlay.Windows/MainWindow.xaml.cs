@@ -35,6 +35,11 @@ public sealed partial class MainWindow : Window
     {
         model = controller; settings = openSettings;
         InitializeComponent();
+        foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
+        {
+            seek.Snapshot = () => model.State;
+            seek.SeekRequested += SeekRequested;
+        }
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
             presenter.SetBorderAndTitleBar(false, false);
@@ -51,6 +56,7 @@ public sealed partial class MainWindow : Window
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         AppWindow.Closing += (_, args) =>
         {
+            ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer();
             if (AllowClose) return;
             args.Cancel = true; AppWindow.Hide(); ClosingToTray?.Invoke();
         };
@@ -82,6 +88,7 @@ public sealed partial class MainWindow : Window
             backdrop.Changed -= Render; miniBackdrop.Changed -= Render; loadingBackdrop.Changed -= Render;
             backdrop.Failed -= LogBackdropFailure; miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
+            ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
             hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose();
         };
         Render(); ScheduleHide();
@@ -148,8 +155,15 @@ public sealed partial class MainWindow : Window
         VolumeSlider.IsEnabled = model.Initialized; VolumeSlider.Value = model.Volume;
         AutomationProperties.SetName(VolumeSlider, L.Text("接收音量"));
         AutomationProperties.SetName(MiniCover, L.Text("专辑封面"));
-        AutomationProperties.SetName(MiniProgress, L.Text("播放进度，只读"));
-        AutomationProperties.SetName(CoverImage, L.Text("专辑封面")); AutomationProperties.SetName(Progress, L.Text("播放进度，只读"));
+        AutomationProperties.SetName(MiniProgress, L.Text("播放进度"));
+        AutomationProperties.SetName(CoverImage, L.Text("专辑封面")); AutomationProperties.SetName(Progress, L.Text("播放进度"));
+        foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
+        {
+            seek.IsEnabled = model.CanSeek;
+            Label(seek, L.Text("播放进度，点击跳转"));
+            AutomationProperties.SetHelpText(seek, L.Text("点击跳转；方向键前后 10 秒，Home 到开头，End 到结尾。"));
+            seek.RefreshState();
+        }
         ApplyProgressColor(preferences);
         bool progress = state.HasMedia && state.DurationMs is > 0 && state.PositionMs != null;
         MiniProgressPanel.Visibility = ProgressPanel.Visibility = progress ? Visibility.Visible : Visibility.Collapsed;
@@ -212,6 +226,7 @@ public sealed partial class MainWindow : Window
         CoverFrame.Width = CoverFrame.Height = side;
         if (changed)
         {
+            ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer();
             hideTimer?.Stop(); Render();
             if (compact)
             {
@@ -246,6 +261,7 @@ public sealed partial class MainWindow : Window
         if (!compact)
         {
             Add(SettingsButton); Add(MiniButton); Add(ExpandedCloseButton); Add(VolumeSlider); Add(ExpandedMigrationButton);
+            if (ProgressPanel.Visibility == Visibility.Visible) Add(ProgressSeek);
             if (TransportPanel.Visibility == Visibility.Visible && TransportPanel.ActualHeight > 0) { Add(PreviousButton); Add(PlayButton); Add(NextButton); }
         }
         else
@@ -253,6 +269,7 @@ public sealed partial class MainWindow : Window
             if (captionShown) { Add(CloseButton); Add(PinButton); }
             if (controlsShown)
             {
+                if (MiniProgressPanel.Visibility == Visibility.Visible) Add(MiniProgressSeek);
                 if (MiniTransport.Visibility == Visibility.Visible && MiniTransport.ActualHeight > 0) { Add(MiniPreviousButton); Add(MiniPlayButton); Add(MiniNextButton); }
                 Add(MigrationButton);
             }
@@ -353,6 +370,7 @@ public sealed partial class MainWindow : Window
     private async void Previous_Click(object sender, RoutedEventArgs e) => await model.ControlAsync(PlaybackCommand.Previous);
     private async void Next_Click(object sender, RoutedEventArgs e) => await model.ControlAsync(PlaybackCommand.Next);
     private async void Play_Click(object sender, RoutedEventArgs e) => await model.TogglePlaybackAsync();
+    private void SeekRequested(SeekRequest request) => _ = model.SeekAsync(request);
     private async void Migration_Click(object sender, RoutedEventArgs e)
     {
         var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = L.Text("为此电脑建立独立身份"), Content = L.Text("将保留名称、音量等设置，并备份旧设备身份。此电脑会作为新的接收设备出现在手机上。"), PrimaryButtonText = L.Text("备份并建立"), CloseButtonText = L.Text("取消"), DefaultButton = ContentDialogButton.Close };

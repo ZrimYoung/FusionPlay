@@ -86,5 +86,7 @@ public sealed class NativeReceiver : IDisposable
     public void Stop() => Invoke(new { op = "stop" });
     public void SetVolume(uint volume) => Invoke(new { op = "volume", volume });
     public CommandOutcome Control(PlaybackCommand command) => Invoke(new { op = "control", command }).Deserialize<CommandOutcome>(WireJson.Options)!;
+    public CommandOutcome Seek(ulong positionMs, string expectedTrackId, string expectedTitle) =>
+        Invoke(new { op = "seek", position_ms = positionMs, expected_track_id = expectedTrackId, expected_title = expectedTitle }).Deserialize<CommandOutcome>(WireJson.Options)!;
     public void Dispose() => handle.Dispose();
 }

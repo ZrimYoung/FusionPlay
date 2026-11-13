@@ -47,6 +47,25 @@ public partial class App : Application
         if (Environment.GetCommandLineArgs().Contains("--typography-check"))
         {
             try { await TypographyCheck.Run(Path.Combine(AppContext.BaseDirectory, "typography-check")); }
+            catch (Exception error) { StartupRecord("typography_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--seek-input-check"))
+        {
+            // Separate, hidden seek-target check; never contacts the running app,
+            // creates a receiver, or enters visible startup/fallback handling.
+            try { await SeekInputCheck.Run(Path.Combine(AppContext.BaseDirectory, "seek-input-check.json")); }
+            catch (Exception error) { StartupRecord("seek_input_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
+        if (Environment.GetCommandLineArgs().Contains("--tray-layout-check"))
+        {
+            // This isolated diagnostic never enters single-instance notification,
+            // receiver initialization, shell-media registration or visible launch.
+            try { await TrayLayoutCheck.Run(Path.Combine(AppContext.BaseDirectory, "tray-layout-check.json")); }
+            catch (Exception error) { StartupRecord("tray_layout_check_failed", error); }
             finally { Exit(); }
             return;
         }

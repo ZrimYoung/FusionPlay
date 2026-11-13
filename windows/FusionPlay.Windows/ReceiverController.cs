@@ -48,6 +48,7 @@ public sealed class ReceiverController : IAsyncDisposable
     public bool Suspended => sleeping;
     public double Volume => volume.Value;
     public bool CanControl => State.ControlsAvailable && !Busy && !ControlBusy && !sleeping && !disposed;
+    public bool CanSeek => Initialized && CanControl && Seeking.CanSeek(State);
     public event Action? Changed;
     public event Action? DevicesChanged;
     public ReceiverController(DispatcherQueue dispatcher)
@@ -212,8 +213,9 @@ public sealed class ReceiverController : IAsyncDisposable
     }
     private void Accept(ReceiverSnapshot snapshot)
     {
+        bool changedTrack = State.TrackId != snapshot.TrackId || State.Title != snapshot.Title;
         State = snapshot; volume.Observe(snapshot.Volume);
-        if (!snapshot.ControlsAvailable) ControlMessage = "";
+        if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
         UpdateArtwork(snapshot); Notify();
     }
     public Task TogglePlaybackAsync() => ControlAsync(State.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
@@ -230,6 +232,45 @@ public sealed class ReceiverController : IAsyncDisposable
             ControlMessage = outcome.Dispatched || outcome.Confirmed ? "" : L.Text("播放控制未发送，请重试。", "Playback command was not sent. Try again.");
         }
         catch (Exception e) { if (!disposed) ControlMessage = "播放控制失败：" + Friendly(e); }
+        finally { ControlBusy = false; if (!disposed) Notify(); }
+    }
+    private sealed record SeekCompletion(ReceiverSnapshot Snapshot, CommandOutcome? Outcome, Exception? Error);
+    public async Task SeekAsync(SeekRequest request)
+    {
+        if (!CanSeek || !Seeking.MatchesCurrent(State, request)) return;
+        long requestedGeneration = Interlocked.Read(ref generation);
+        ControlBusy = true; ControlMessage = ""; Notify();
+        bool StillCurrent() => !disposed && !sleeping && !Busy
+            && requestedGeneration == Interlocked.Read(ref generation) && Seeking.MatchesCurrent(State, request);
+        try
+        {
+            var completed = await Background<SeekCompletion?>(() =>
+            {
+                if (disposed || sleeping || Busy || native == null || requestedGeneration != Interlocked.Read(ref generation)) return null;
+                // The UI snapshot can lag behind the source while this command waits for the lock.
+                var current = native.Poll().Snapshot;
+                if (current == null || !Seeking.MatchesCurrent(current, request)) return null;
+                CommandOutcome? outcome = null;
+                Exception? error = null;
+                try { outcome = native.Seek(request.PositionMs, request.ExpectedTrackId, request.ExpectedTitle); }
+                catch (Exception failure) { error = failure; }
+                // Suppress completion/error messages belonging to a song replaced during the command.
+                try { current = native.Poll().Snapshot ?? current; }
+                catch (Exception) { /* Preserve the command result if only this follow-up observation failed. */ }
+                return new SeekCompletion(current, outcome, error);
+            });
+            if (!StillCurrent() || completed == null || !Seeking.MatchesCurrent(completed.Snapshot, request)) return;
+            if (completed.Error != null)
+                ControlMessage = L.Text("跳转失败：", "Seek failed: ") + Friendly(completed.Error);
+            else if (completed.Outcome is { Dispatched: false, Confirmed: false })
+                ControlMessage = L.Text("跳转未发送，请重试。", "Seek request was not sent. Try again.");
+            // PositionMs is deliberately unchanged: only subsequent source snapshots move the timeline.
+        }
+        catch (OperationCanceledException) when (disposed || lifetime.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            if (StillCurrent()) ControlMessage = L.Text("跳转失败：", "Seek failed: ") + Friendly(error);
+        }
         finally { ControlBusy = false; if (!disposed) Notify(); }
     }
     public void BeginVolume() { volumeGesture = true; volume.BeginEditing(); }

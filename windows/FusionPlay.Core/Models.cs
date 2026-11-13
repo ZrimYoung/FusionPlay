@@ -7,6 +7,7 @@ public sealed record ReceiverSettings(string Name = "FusionPlay-Windows", string
 public enum ReceiverPhase { Stopped, Starting, Ready, Connected, Playing, Paused, Failed }
 public enum PlaybackCommand { Play, Pause, Previous, Next }
 public sealed record CommandOutcome(bool Dispatched, bool Confirmed);
+public sealed record SeekRequest(ulong PositionMs, string ExpectedTrackId, string ExpectedTitle);
 public sealed record OutputCalibration(string OutputDeviceId, int OffsetMs);
 public sealed record NetworkInterface(string Name, string Address)
 {
