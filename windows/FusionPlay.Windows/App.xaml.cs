@@ -36,6 +36,8 @@ public partial class App : Application
         UnhandledException += (_, args) =>
         {
             StartupRecord("unhandled_exception", args.Exception);
+            if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))
+            { SettingsLayoutCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--typography-check"))
             { TypographyCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
         };
@@ -44,6 +46,15 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))
+        {
+            // Isolated hidden settings check; return before single-instance,
+            // identity, media-session or native-receiver initialization.
+            try { await SettingsLayoutCheck.Run(Path.Combine(AppContext.BaseDirectory, "settings-layout-check")); }
+            catch (Exception error) { StartupRecord("settings_layout_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--typography-check"))
         {
             try { await TypographyCheck.Run(Path.Combine(AppContext.BaseDirectory, "typography-check")); }

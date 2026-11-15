@@ -103,7 +103,7 @@ internal static class TypographyCheck
             int chosenWeight = family.Weights.Max(); panel.WeightSelector.SelectedValue = chosenWeight;
             Require(store.Value.UiFontFamily == family.Name && store.Value.UiFontWeight == chosenWeight, "separate_family_weight_selection_not_saved");
             Require(panel.WeightSelector.Items.Count == family.Weights.Length, "weight_choices_do_not_match_installed_faces");
-            panel.RenderingSelector.SelectedValue = "system";
+            panel.RenderingSelector.SelectedItem = panel.RenderingSelector.Items.First(item => item.Tag as string == "system");
             Require(store.Value.PlayerTextRendering == "system", "renderer_selection_not_saved");
             UiTypography.Apply(root, store.Value, force: true);
             Require(!text.Enhanced && text.FontFamily.Source == family.Name, "player_did_not_follow_typography_preferences");

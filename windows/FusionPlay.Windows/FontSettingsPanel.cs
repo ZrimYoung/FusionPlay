@@ -1,6 +1,7 @@
 using FusionPlay.Core;
 using FusionPlay.Windows.Platform;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 
@@ -10,12 +11,14 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
 {
     private sealed record FamilyChoice(string Name, string Label, int[] Weights);
     private sealed record WeightChoice(int Weight, string Label);
-    private sealed record RenderingChoice(string Key, string Label);
     private readonly UiPreferencesStore preferences;
     private readonly Func<Func<UiPreferences, UiPreferences>, bool> update;
     private readonly ComboBox family = new() { DisplayMemberPath = "Label", SelectedValuePath = "Name", IsTextSearchEnabled = true, MaxDropDownHeight = 320, HorizontalAlignment = HorizontalAlignment.Stretch, IsEnabled = false };
     private readonly ComboBox weight = new() { DisplayMemberPath = "Label", SelectedValuePath = "Weight", HorizontalAlignment = HorizontalAlignment.Stretch };
-    private readonly ComboBox rendering = new() { DisplayMemberPath = "Label", SelectedValuePath = "Key", HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly SelectorBar rendering = new() { HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly SelectorBarItem enhancedRendering = new() { Tag = "enhanced" };
+    private readonly SelectorBarItem systemRendering = new() { Tag = "system" };
+    private readonly TextBlock renderingHeader = new() { FontSize = 14 };
     private readonly TextBlock description = new() { FontSize = 13, Opacity = 0.85, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock availability = new() { FontSize = 13, TextWrapping = TextWrapping.Wrap };
     private readonly PlayerText preview = new() { Text = "FusionPlay · 让音乐，连接此刻 0123456789", FontSize = 16, MaxLines = 2, TextWrapping = TextWrapping.Wrap };
@@ -26,7 +29,7 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
     internal Task FontLoading { get; }
     internal ComboBox FamilySelector => family;
     internal ComboBox WeightSelector => weight;
-    internal ComboBox RenderingSelector => rendering;
+    internal SelectorBar RenderingSelector => rendering;
 
     public FontSettingsPanel(UiPreferencesStore store, Func<Func<UiPreferences, UiPreferences>, bool> save)
     {
@@ -36,7 +39,10 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
         selectors.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         selectors.Children.Add(family); Grid.SetColumn(weight, 1); selectors.Children.Add(weight);
         Children.Add(selectors); Children.Add(description); Children.Add(availability);
-        Children.Add(rendering); Children.Add(preview); Children.Add(reset);
+        rendering.Items.Add(enhancedRendering); rendering.Items.Add(systemRendering);
+        var renderingSection = new StackPanel { Spacing = 4 };
+        renderingSection.Children.Add(renderingHeader); renderingSection.Children.Add(rendering);
+        Children.Add(renderingSection); Children.Add(preview); Children.Add(reset);
         family.SelectionChanged += (_, _) =>
         {
             if (refreshing || family.SelectedItem is not FamilyChoice selected) return;
@@ -48,7 +54,7 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
         };
         rendering.SelectionChanged += (_, _) =>
         {
-            if (!refreshing && rendering.SelectedItem is RenderingChoice selected) update(p => p with { PlayerTextRendering = selected.Key });
+            if (!refreshing && rendering.SelectedItem?.Tag is string selected) update(p => p with { PlayerTextRendering = selected });
         };
         reset.Click += (_, _) => update(p => p with { UiFontFamily = "", UiFontWeight = 400, PlayerTextRendering = "enhanced" });
         Loaded += (_, _) => UiTypography.Apply(this, preferences.Value, force: true);
@@ -64,7 +70,8 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
     }
     public void Localize()
     {
-        family.Header = L.Text("界面字体"); weight.Header = L.Text("字重"); rendering.Header = L.Text("播放器文字效果");
+        family.Header = L.Text("界面字体"); weight.Header = L.Text("字重"); renderingHeader.Text = L.Text("播放器文字效果");
+        AutomationProperties.SetName(rendering, renderingHeader.Text);
         description.Text = L.Text("按字族选择已安装字体；标题自动使用同字族较粗的字重。可在字体列表中键入名称定位。");
         reset.Content = L.Text("恢复默认字体与文字效果"); choicesKey = ""; Refresh();
     }
@@ -83,7 +90,7 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
                 if (value.UiFontFamily.Length > 0 && !choices.Any(f => f.Name.Equals(value.UiFontFamily, StringComparison.OrdinalIgnoreCase)))
                     choices.Add(new(value.UiFontFamily, value.UiFontFamily + " · " + L.Text("未安装"), [value.UiFontWeight]));
                 family.ItemsSource = choices;
-                rendering.ItemsSource = new[] { new RenderingChoice("enhanced", L.Text("柔和")), new RenderingChoice("system", L.Text("系统默认")) };
+                enhancedRendering.Text = L.Text("柔和"); systemRendering.Text = L.Text("系统默认");
                 choicesKey = key;
             }
             var families = (List<FamilyChoice>)family.ItemsSource;
@@ -92,7 +99,7 @@ internal sealed class FontSettingsPanel : StackPanel, IDisposable
             var weights = chosen.Weights.Select(number => new WeightChoice(number, WeightLabel(number))).ToArray();
             weight.ItemsSource = weights;
             weight.SelectedItem = weights.First(w => w.Weight == FontSelection.NearestWeight(chosen.Weights, value.UiFontWeight));
-            rendering.SelectedItem = ((RenderingChoice[])rendering.ItemsSource).First(r => r.Key == value.PlayerTextRendering);
+            rendering.SelectedItem = value.PlayerTextRendering == "enhanced" ? enhancedRendering : systemRendering;
             bool missing = value.UiFontFamily.Length > 0 && fonts.Length > 0 && !fonts.Any(f => f.Name.Equals(value.UiFontFamily, StringComparison.OrdinalIgnoreCase));
             availability.Text = fontLoadFailed ? L.Text("无法读取字体列表，当前使用系统字体。") : missing ? L.Text("此字体未安装，当前使用系统字体；已保留原来的选择。") : "";
             availability.Visibility = availability.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
