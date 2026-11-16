@@ -35,6 +35,8 @@ jobs:
         run: bash macos/scripts/test-brand.sh
       - name: Test volume interaction and feedback ordering
         run: bash macos/scripts/test-volume.sh
+      - name: Test seek preview and confirmation lifecycle
+        run: bash macos/scripts/test-timeline.sh
       - name: Archive app
         id: package
         shell: bash

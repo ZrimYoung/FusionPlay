@@ -14,6 +14,19 @@ final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
     @Published var miniPlayerRequest = 0
     @Published var snapshot: Snapshot?
+    @Published private(set) var playbackTimeline = PlaybackTimeline()
+    @Published private(set) var scrubbing = false
+    @Published private(set) var volumeIsEditing = false
+    private var scrubbers = Set<UUID>()
+    private var seekExpiryTask: Task<Void, Never>?
+    private var activeSeek: UInt64?
+    var playerInteractionActive: Bool { scrubbing || volumeIsEditing }
+    var displayedPositionMs: UInt64? { playbackTimeline.displayPosition(now: ProcessInfo.processInfo.systemUptime) }
+    var seekPending: Bool { playbackTimeline.isPending }
+    func setScrubbing(_ id: UUID, _ active: Bool) {
+        if active { scrubbers.insert(id) } else { scrubbers.remove(id) }
+        scrubbing = !scrubbers.isEmpty
+    }
     @Published var name = "FusionPlay-Mac"
     @Published var interfaceName = ""
     @Published var outputDevice = ""
@@ -53,6 +66,21 @@ final class ReceiverModel: ObservableObject {
     private var artworkKey = ""
     private var terminating = false
 
+#if FUSIONPLAY_UI_CHECKS
+    // Render production views in an isolated test process without starting a receiver,
+    // observing workspace events, or registering a system media session.
+    static func preview(_ state: Snapshot, artwork: NSImage?, root: URL) -> ReceiverModel {
+        ReceiverModel(preview: state, artwork: artwork, root: root)
+    }
+    private init(preview state: Snapshot, artwork: NSImage?, root: URL) {
+        self.root = root; self.snapshot = state; self.artwork = artwork
+        self.initialized = true; self.wantsReceiving = true
+        self.networks = []; self.outputs = []
+        self.playbackTimeline.observe(PlaybackObservation(trackID: state.trackId, title: state.title,
+            duration: state.durationMs, position: state.positionMs, connected: state.controlsAvailable,
+            playing: state.phase == .playing), now: ProcessInfo.processInfo.systemUptime)
+    }
+#endif
     private init() {
         root = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/FusionPlay", isDirectory: true)
@@ -114,6 +142,10 @@ final class ReceiverModel: ObservableObject {
         guard !terminating else { return }
         if snapshot?.trackId != state.trackId || snapshot?.title != state.title || !state.controlsAvailable { seekMessage = "" }
         snapshot = state
+        playbackTimeline.observe(PlaybackObservation(trackID: state.trackId, title: state.title,
+            duration: state.durationMs, position: state.positionMs,
+            connected: state.controlsAvailable, playing: state.phase == .playing), now: ProcessInfo.processInfo.systemUptime)
+        if !playbackTimeline.isPending { seekExpiryTask?.cancel() }
         volumeInteraction.observe(Double(state.volume))
         if !state.controlsAvailable { controlMessage = "" }
         updateArtwork(state)
@@ -145,37 +177,64 @@ final class ReceiverModel: ObservableObject {
             }
         }
     }
-    var canSeek: Bool { canControl && (snapshot?.durationMs ?? 0) > 0 }
+    var canSeek: Bool { canControl && (snapshot?.durationMs ?? 0) > 0 && snapshot?.positionMs != nil }
     func seek(to position: UInt64) {
-        guard let receiver, let state = snapshot, canSeek, let duration = state.durationMs else { return }
+        guard let receiver, let state = snapshot, canSeek, let duration = state.durationMs,
+              let token = playbackTimeline.begin(target: min(position, duration), now: ProcessInfo.processInfo.systemUptime) else { return }
+        activeSeek = token
         controlBusy = true; seekMessage = ""
+        seekExpiryTask?.cancel()
+        seekExpiryTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            guard let self, !self.terminating,
+                  self.playbackTimeline.expire(token, now: ProcessInfo.processInfo.systemUptime) else { return }
+            self.seekMessage = "手机尚未确认跳转"
+        }
         systemMedia.update(state, busy: true, artwork: artworkLoading ? nil : artwork)
         backend.async { [weak self] in
             do {
                 let result = try receiver.seek(positionMs: min(position, duration), expectedTrackId: state.trackId, expectedTitle: state.title)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, !self.terminating else { return }
-                    self.controlBusy = false
+                    guard let self, !self.terminating, self.activeSeek == token else { return }
+                    self.controlBusy = false; self.activeSeek = nil
                     self.accept(receiver.snapshot())
-                    if self.snapshot?.trackId == state.trackId && self.snapshot?.title == state.title && self.snapshot?.controlsAvailable == true {
-                        self.seekMessage = result.confirmed ? "" : "手机尚未确认跳转"
+                    self.playbackTimeline.complete(token, dispatched: result.dispatched || result.confirmed)
+                    if !result.dispatched && !result.confirmed,
+                       self.snapshot?.trackId == state.trackId, self.snapshot?.title == state.title {
+                        self.seekMessage = "跳转失败，请重试"
                     }
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, !self.terminating else { return }
-                    self.controlBusy = false
+                    guard let self, !self.terminating, self.activeSeek == token else { return }
+                    self.controlBusy = false; self.activeSeek = nil
                     self.accept(receiver.snapshot())
-                    if self.snapshot?.controlsAvailable == true { self.seekMessage = "跳转失败，请重试" }
+                    self.playbackTimeline.complete(token, dispatched: false)
+                    if self.snapshot?.controlsAvailable == true,
+                       self.snapshot?.trackId == state.trackId, self.snapshot?.title == state.title {
+                        self.seekMessage = "跳转失败，请重试"
+                    }
                 }
             }
+        }
+    }
+    private func clearArtwork() {
+        artwork = nil; artworkLoading = false
+    }
+    private func replaceArtwork(_ image: NSImage) {
+        // One shared SwiftUI transaction starts every artwork surface together.
+        // Native transitions retain their outgoing layers and reverse/rebase on
+        // rapid replacements; there is no delayed cleanup that can erase a new cover.
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        withAnimation(reduce ? nil : .easeInOut(duration: 0.35)) {
+            artwork = image; artworkLoading = false
         }
     }
     private func updateArtwork(_ state: Snapshot) {
         let key = state.controlsAvailable ? "\(state.trackId)|\(state.artworkUrl)" : ""
         guard key != artworkKey else { return }
         artworkKey = key; artworkTask?.cancel(); artworkLoading = false
-        guard state.controlsAvailable else { artwork = nil; artworkStatus = "尚未连接"; return }
+        guard state.controlsAvailable else { clearArtwork(); artworkStatus = "尚未连接"; return }
         let source = state.artworkUrl
         let kind = ArtworkLoader.kind(of: source)
         guard kind != "missing" else {
@@ -188,7 +247,7 @@ final class ReceiverModel: ObservableObject {
                 do { try await Task.sleep(nanoseconds: 2_000_000_000) }
                 catch { return }
                 guard !Task.isCancelled, let self, self.artworkKey == key, !self.terminating else { return }
-                self.artwork = nil; self.artworkLoading = false
+                self.clearArtwork()
                 self.artworkStatus = "手机未提供封面"
                 if let state = self.snapshot, !self.busy, !self.sleeping {
                     self.systemMedia.update(state, busy: self.controlBusy, artwork: nil, force: true)
@@ -202,8 +261,8 @@ final class ReceiverModel: ObservableObject {
                 do {
                     let cgImage = try await ArtworkLoader.load(source)
                     guard !Task.isCancelled, let self, self.artworkKey == key, !self.terminating else { return }
-                    self.artwork = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-                    self.artworkLoading = false; self.artworkStatus = "已加载"
+                    self.replaceArtwork(NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height)))
+                    self.artworkStatus = "已加载"
                     self.recordArtwork(kind: kind, result: "loaded", attempt: attempt)
                     if let state = self.snapshot, !self.busy, !self.sleeping {
                         self.systemMedia.update(state, busy: self.controlBusy, artwork: self.artwork, force: true)
@@ -216,7 +275,7 @@ final class ReceiverModel: ObservableObject {
                     self.recordArtwork(kind: kind, result: code, attempt: attempt)
                     let retry = attempt < 3 && (known?.retryable ?? (error is URLError))
                     self.artworkStatus = retry ? "加载失败，正在重试" : "封面加载失败（\(code)）"
-                    if !retry { self.artwork = nil; self.artworkLoading = false; return }
+                    if !retry { self.clearArtwork(); return }
                     do { try await Task.sleep(nanoseconds: UInt64(attempt) * 2_000_000_000) }
                     catch { return }
                 }
@@ -281,6 +340,7 @@ final class ReceiverModel: ObservableObject {
     private func start(_ settings: Settings) {
         guard let receiver, !busy, !sleeping, !terminating else { return }
         busy = true; error = ""
+        seekExpiryTask?.cancel(); playbackTimeline.cancel()
         systemMedia.clear()
         backend.async { [weak self] in
             do {
@@ -303,6 +363,7 @@ final class ReceiverModel: ObservableObject {
     private func stopCore() {
         guard let receiver else { return }
         busy = true
+        seekExpiryTask?.cancel(); playbackTimeline.cancel()
         systemMedia.clear()
         backend.async { [weak self] in
             receiver.stop()
@@ -313,6 +374,7 @@ final class ReceiverModel: ObservableObject {
         }
     }
     func volumeEditingChanged(_ editing: Bool) {
+        volumeIsEditing = editing
         if editing { volumeInteraction.beginEditing() }
         else { setVolume() }
     }
@@ -376,7 +438,8 @@ final class ReceiverModel: ObservableObject {
     }
     func openLogs() { NSWorkspace.shared.open(root.appendingPathComponent("logs")) }
     func terminate(completion: @escaping @MainActor @Sendable () -> Void) {
-        terminating = true; artworkTask?.cancel(); volumeAckTask?.cancel(); systemMedia.shutdown()
+        terminating = true; artworkTask?.cancel(); volumeAckTask?.cancel()
+        seekExpiryTask?.cancel(); playbackTimeline.cancel(); systemMedia.shutdown()
         timer?.invalidate(); timer = nil; wantsReceiving = false
         // AppKit must receive the termination reply after terminateLater returns,
         // including when startup failed before a receiver was constructed.

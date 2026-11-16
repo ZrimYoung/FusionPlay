@@ -184,3 +184,16 @@
 - Menu follow-up: volume reveal now animates a leading-anchored clipped width, replacing the slide-in transition that crossed the left icons. The menu Quit button presents localized Cancel/Quit confirmation; cancellation leaves reception running. Native build/signature and translation syntax checked; visual interaction awaits acceptance.
 
 - User accepted the current menu revision and requested publication to main on 2026-11-13. This records UI acceptance of progress/expandable volume and quit confirmation; sender-side seek compatibility has not been separately confirmed by an explicit phone playback result.
+
+
+## 0.3.1 Mac UI refinement (2026-11-16)
+
+- Independent `feat/macos-ui-refinement` branch starts from main `720571df6a3a315a86a27937cfac15a0c26e175f`, including shared same-track seek confirmation and paused/late-seek jump guards. No additional shared audio/Android/Windows behavior changes were made for the UI work.
+- Common menu/expanded/mini seeking with UI-only target preview, guarded confirmation and five-second expiry. New pure Swift tests cover stale completions, ordinary nearby ticks, backward seeks, pause, track changes, disconnect, missing duration/position and bounds. Receiver and system media retain source-reported time.
+- Native resizable sidebar Settings (four existing categories), progress/time visibility and color preferences; old keys/defaults retained. Advanced sync remains expanded and diagnostics remain collapsed. Menu cover adapts within bounds and includes artist/album.
+- Separate backdrop/content fades, delayed pointer exit, interaction hold, reversible transitions, clipped section-height animations, short layout crossfade and restrained button feedback. Existing 1:1 mini mode and measured 1.35x progressive blur up to 40 pt retained. Native artwork surfaces update in one animation transaction.
+- Mac SDK: 114 passed, 1 explicit audio endpoint test ignored. Host: 13 passed, 2 explicit network tests ignored. Android arm64 SDK check passed with the installed NDK. Timeline, volume, brand and isolated settings/bridge checks passed; Python cleanup/installation: 5 passed.
+- Isolated production-view check: 22 render cases across Chinese/English, 660/820-wide Settings, all four pages, 260/420/760-wide player layouts, hidden sections and custom color. Native sidebar row counts checked. Offscreen bitmap capture does not fully reproduce native vibrancy/glass/blur; these checks are not live mouse or phone acceptance.
+- No phone casting, acoustic sync or long-run claims added. Actual hover timing, resizing, interactive preferences, rapid track changes and remote seeking require user confirmation after installation.
+
+- Installed 0.3.1 build 11 to /Applications on 2026-11-16, strict signature verified, process running. Before/after identity/settings/sync file hashes and six existing UI preference values matched. Installed process had zero open paths on the external volume. Previous binary retained at project tmp/installed-before-0.3.1-ui-refinement.app. User accepted the installed UI revision and authorized committing, merging into main and publishing on 2026-11-16. This does not independently establish phone-side seek, acoustic synchronization or physical recovery acceptance.

@@ -104,3 +104,15 @@
 "取消" = "Cancel";
 "退出" = "Quit";
 "退出后将停止接收音乐。" = "Quitting will stop receiving music.";
+"设备与网络" = "Device & Network";
+"播放显示" = "Playback Display";
+"显示进度与时间" = "Show Progress and Time";
+"进度条颜色" = "Progress Color";
+"白色" = "White";
+"跟随系统" = "System";
+"自定义" = "Custom";
+"自定义颜色" = "Custom Color";
+"控件显示" = "Controls";
+"悬浮显示" = "On Hover";
+"始终显示" = "Always Visible";
+"查看许可证" = "View License";

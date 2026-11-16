@@ -22,14 +22,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @MainActor
-private func applyDockVisibility(_ visible: Bool) {
+func applyDockVisibility(_ visible: Bool) {
     let policy: NSApplication.ActivationPolicy = visible ? .regular : .accessory
     guard NSApp.activationPolicy() != policy else { return }
     NSApp.setActivationPolicy(policy)
     if visible { AppBrand.applyDockIcon() }
 }
 
+#if !FUSIONPLAY_UI_CHECKS
 @main
+#endif
 struct FusionPlayApp: App {
     @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("appLanguage") private var language = "zh-Hans"
@@ -55,8 +57,8 @@ struct FusionPlayApp: App {
         Window(L("FusionPlay 设置"), id: "settings") {
             SettingsPanel(model: model)
                 .environment(\.locale, Locale(identifier: language))
-        }.defaultSize(width: 480, height: 430)
-          .windowResizability(.contentSize)
+        }.defaultSize(width: 820, height: 620)
+          .windowResizability(.contentMinSize)
     }
 }
 
@@ -143,12 +145,13 @@ struct ReceiverPanel: View {
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @State private var volumeExpanded = false
     @State private var confirmQuit = false
+    @State private var menuInfoHeight: CGFloat = 72
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: ReceiverModel
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         VStack(spacing: 10) {
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
                 Button(action: openMiniPlayer) {
                     Group {
                         if let artwork = model.artwork {
@@ -157,7 +160,7 @@ struct ReceiverPanel: View {
                             RoundedRectangle(cornerRadius: 10).fill(.quaternary)
                                 .overlay(Image(systemName: "music.note").foregroundStyle(.secondary))
                         }
-                    }.frame(width: 72, height: 72).clipShape(RoundedRectangle(cornerRadius: 10))
+                    }.frame(width: min(96, max(72, menuInfoHeight)), height: min(96, max(72, menuInfoHeight))).clipShape(RoundedRectangle(cornerRadius: 10))
                 }.buttonStyle(.plain).help(L("打开迷你播放器"))
                     .accessibilityLabel(L("打开迷你播放器"))
                 VStack(alignment: .leading, spacing: 6) {
@@ -165,14 +168,19 @@ struct ReceiverPanel: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.snapshot?.title.isEmpty == false ? model.snapshot!.title : "FusionPlay")
                                 .font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                            Text(model.snapshot?.artist.isEmpty == false ? model.snapshot!.artist : L(model.phaseLabel))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(menuSubtitle)
                                 .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                         }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                     }.buttonStyle(.plain).help(L("打开迷你播放器"))
                     PlaybackControls(model: model)
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .background { GeometryReader { proxy in Color.clear.preference(key: MenuInfoHeight.self, value: proxy.size.height) } }
+            }.onPreferenceChange(MenuInfoHeight.self) { height in
+                let height = min(96, max(72, height))
+                if abs(menuInfoHeight - height) > 0.5 { menuInfoHeight = height }
             }
-            MenuPlaybackProgress(model: model)
+            PlaybackProgressView(model: model, showsTime: false, menu: true)
             if !model.seekMessage.isEmpty {
                 Text(L(model.seekMessage)).font(.caption).foregroundStyle(.secondary)
             }
@@ -213,6 +221,10 @@ struct ReceiverPanel: View {
                 Text(L("退出后将停止接收音乐。"))
             }
     }
+    private var menuSubtitle: String {
+        let values = [model.snapshot?.artist ?? "", model.snapshot?.album ?? ""].filter { !$0.isEmpty }
+        return values.isEmpty ? L(model.phaseLabel) : values.joined(separator: " - ")
+    }
     private func openMiniPlayer() {
         model.miniPlayerRequest &+= 1
         openWindow(id: "player")
@@ -225,65 +237,9 @@ struct ReceiverPanel: View {
     }
 }
 
-private struct MenuPlaybackProgress: View {
-    @ObservedObject var model: ReceiverModel
-    @State private var dragFraction: Double?
-    @State private var dragTrack: String?
-    @State private var dragTitle = ""
-    private var sameTrack: Bool { dragTrack == model.snapshot?.trackId && dragTitle == model.snapshot?.title }
-    private var fraction: Double {
-        if let dragFraction, sameTrack { return dragFraction }
-        guard let state = model.snapshot, state.controlsAvailable,
-              let duration = state.durationMs, duration > 0,
-              let position = state.positionMs else { return 0 }
-        return min(1, Double(position) / Double(duration))
-    }
-    private func time(_ value: UInt64?) -> String {
-        guard let value else { return "–:––" }
-        return String(format: "%llu:%02llu", value / 60000, value / 1000 % 60)
-    }
-    private func target(_ fraction: Double) -> UInt64 {
-        let duration = model.snapshot?.durationMs ?? 0
-        if fraction >= 1 { return duration }
-        return UInt64((max(0, fraction) * Double(duration)).rounded(.down))
-    }
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.10))
-                Capsule().fill(Color.primary.opacity(0.45))
-                    .frame(width: geometry.size.width * fraction)
-            }.frame(height: 3).frame(maxHeight: .infinity)
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        guard model.canSeek, geometry.size.width > 0 else { return }
-                        if dragTrack == nil { dragTrack = model.snapshot?.trackId; dragTitle = model.snapshot?.title ?? "" }
-                        guard sameTrack else { return }
-                        dragFraction = min(1, max(0, Double(value.location.x / geometry.size.width)))
-                    }
-                    .onEnded { value in
-                        if model.canSeek, sameTrack, geometry.size.width > 0 {
-                            model.seek(to: target(min(1, max(0, Double(value.location.x / geometry.size.width)))))
-                        }
-                        dragFraction = nil; dragTrack = nil
-                    })
-        }.frame(height: 18)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(L("播放进度"))
-            .accessibilityValue(time(dragFraction == nil ? model.snapshot?.positionMs : target(fraction)) + " / " + time(model.snapshot?.durationMs))
-            .accessibilityAdjustableAction { direction in
-                guard model.canSeek, let duration = model.snapshot?.durationMs else { return }
-                let current = min(model.snapshot?.positionMs ?? 0, duration)
-                switch direction {
-                case .increment: model.seek(to: current + min(10000, duration - current))
-                case .decrement: model.seek(to: current > 10000 ? current - 10000 : 0)
-                @unknown default: break
-                }
-            }
-            .help(time(model.snapshot?.positionMs) + " / " + time(model.snapshot?.durationMs) + " · " + L("点击或拖动跳转，松手后发送到手机"))
-            .onDisappear { dragFraction = nil; dragTrack = nil }
-    }
+private struct MenuInfoHeight: PreferenceKey {
+    static var defaultValue: CGFloat = 72
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 private struct MenuVolumeBar: View {
@@ -344,6 +300,7 @@ private struct MenuActionStyle: ButtonStyle {
 }
 
 struct PlaybackControls: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: ReceiverModel
     var body: some View {
         HStack(spacing: 12) {
@@ -351,6 +308,8 @@ struct PlaybackControls: View {
                 .help(L("上一曲")).accessibilityLabel(L("上一曲"))
             Button { model.togglePlayback() } label: {
                 Image(systemName: model.snapshot?.phase == .playing ? "pause.fill" : "play.fill")
+                    .contentTransition(.opacity)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: model.snapshot?.phase == .playing)
                     .font(.system(size: 16)).frame(width: 28, height: 26)
             }.help(model.snapshot?.phase == .playing ? L("暂停") : L("播放"))
                 .accessibilityLabel(model.snapshot?.phase == .playing ? L("暂停") : L("播放"))
@@ -366,6 +325,7 @@ struct PlayerView: View {
     @AppStorage("playerShowsPinButton") private var showPinButton = false
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
+    @AppStorage("playerShowsProgress") private var showProgress = true
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -373,7 +333,7 @@ struct PlayerView: View {
     @State private var hovering = false
     @State private var pointerInside = false
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
-    private var showMiniControls: Bool { hovering || controlsAlwaysVisible || voiceOver }
+    private var showMiniControls: Bool { hovering || controlsAlwaysVisible || voiceOver || model.playerInteractionActive }
     private var playing: Bool { model.snapshot?.phase == .playing }
     private var title: String {
         if let title = model.snapshot?.title, !title.isEmpty { return title }
@@ -397,11 +357,11 @@ struct PlayerView: View {
     }
     var body: some View {
         GeometryReader { geometry in
-            if geometry.size.width >= 600 && geometry.size.height >= 360 {
-                expanded(size: geometry.size)
-            } else {
-                mini(size: geometry.size)
-            }
+            let compact = geometry.size.width < 600 || geometry.size.height < 360
+            ZStack {
+                if compact { mini(size: geometry.size).transition(.opacity) }
+                else { expanded(size: geometry.size).transition(.opacity) }
+            }.animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: compact)
             PlayerWindowBehavior(square: geometry.size.width < 600 || geometry.size.height < 360,
                                  miniRequest: model.miniPlayerRequest,
                                  dimButtons: (geometry.size.width < 600 || geometry.size.height < 360) && !showMiniControls,
@@ -412,7 +372,8 @@ struct PlayerView: View {
             .foregroundStyle(.white)
             .background { backdrop.ignoresSafeArea() }
             .environment(\.colorScheme, .dark)
-            .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: showPlaybackControls)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showPlaybackControls)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showProgress)
     }
     private func expanded(size: CGSize) -> some View {
         let side = min(360, size.height - 80, size.width * 0.37)
@@ -434,24 +395,27 @@ struct PlayerView: View {
                         .lineLimit(2).help(model.error).padding(.bottom, 10)
                 }
                 progress
-                if showPlaybackControls {
-                    HStack(spacing: 28) {
-                        Spacer(minLength: 0)
-                        transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
-                        Button { model.togglePlayback() } label: {
-                            Image(systemName: playing ? "pause.fill" : "play.fill")
-                                .font(.system(size: 23, weight: .semibold))
-                                .offset(x: playing ? 0 : 1)
-                                .frame(width: 62, height: 62)
-                                .modifier(PlayerGlass())
-                        }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
-                            .opacity(model.canControl ? 1 : 0.45)
-                            .help(playing ? L("暂停") : L("播放")).accessibilityLabel(playing ? L("暂停") : L("播放"))
-                        transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
-                        Spacer(minLength: 0)
-                    }.padding(.top, 6)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                }
+                HStack(spacing: 28) {
+                    Spacer(minLength: 0)
+                    transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
+                    Button { model.togglePlayback() } label: {
+                        Image(systemName: playing ? "pause.fill" : "play.fill")
+                            .contentTransition(.opacity)
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: playing)
+                            .font(.system(size: 23, weight: .semibold))
+                            .offset(x: playing ? 0 : 1)
+                            .frame(width: 62, height: 62)
+                            .modifier(PlayerGlass())
+                    }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
+                        .opacity(model.canControl ? 1 : 0.45)
+                        .help(playing ? L("暂停") : L("播放")).accessibilityLabel(playing ? L("暂停") : L("播放"))
+                    transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
+                    Spacer(minLength: 0)
+                }.frame(height: 62)
+                    .frame(height: showPlaybackControls ? 62 : 0, alignment: .top).clipped()
+                    .opacity(showPlaybackControls ? 1 : 0)
+                    .allowsHitTesting(showPlaybackControls).accessibilityHidden(!showPlaybackControls)
+                    .padding(.top, showPlaybackControls ? 6 : 0)
             }.frame(maxWidth: 440).frame(height: side)
         }.padding(.horizontal, 28)
             .frame(width: size.width, height: size.height, alignment: .center)
@@ -468,51 +432,60 @@ struct PlayerView: View {
                     .foregroundStyle(.white.opacity(0.4))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text(title).font(.system(size: 19, weight: .semibold)).lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
-                        .lineLimit(1).help(subtitle)
-                }
-                VStack(spacing: 2) {
-                    progress.padding(.top, 4)
-                    if showPlaybackControls {
-                        HStack {
-                            Spacer(minLength: 0)
-                            transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
-                            transport(playing ? "pause.fill" : "play.fill", label: playing ? L("暂停") : L("播放")) { model.togglePlayback() }
-                            transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
-                            Spacer(minLength: 0)
-                        }.transition(.opacity.combined(with: .move(edge: .bottom)))
+            VStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(title).font(.system(size: 19, weight: .semibold)).lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentTransition(.opacity)
+                    if !subtitle.isEmpty {
+                        Text(subtitle).font(.system(size: 12)).foregroundStyle(.white.opacity(0.75))
+                            .lineLimit(1).help(subtitle).padding(.top, 5).contentTransition(.opacity)
                     }
-                }
+                    progress.padding(.top, showProgress ? 8 : 0)
+                    HStack {
+                        Spacer(minLength: 0)
+                        transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
+                        transport(playing ? "pause.fill" : "play.fill", label: playing ? L("暂停") : L("播放")) { model.togglePlayback() }
+                        transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
+                        Spacer(minLength: 0)
+                    }.frame(height: 44)
+                        .frame(height: showPlaybackControls ? 44 : 0, alignment: .top).clipped()
+                        .opacity(showPlaybackControls ? 1 : 0)
+                        .allowsHitTesting(showPlaybackControls).accessibilityHidden(!showPlaybackControls)
+                        .padding(.top, showPlaybackControls ? 2 : 0)
+                }.opacity(showControls ? 1 : 0)
+                    .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+                    .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.36 : 0.42)
+                        .delay(showControls ? 0.1 : 0), value: showControls)
             }.padding(16)
                 .background {
                     GeometryReader { geometry in
                         miniBackdrop(size: size, controlsHeight: geometry.size.height)
                             .frame(width: size.width, height: size.height)
                             .offset(y: geometry.size.height - size.height)
+                            .opacity(showControls ? 1 : 0)
+                            .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.42 : 0.65)
+                                .delay(showControls ? 0 : 0.08), value: showControls)
                     }.allowsHitTesting(false).accessibilityHidden(true)
                 }
-                .opacity(showControls ? 1 : 0)
-                .allowsHitTesting(showControls).accessibilityHidden(!showControls)
         }.frame(width: size.width, height: size.height).clipped()
             .overlay(alignment: .topTrailing) {
                 if showPinButton {
-                Button { pinned.toggle() } label: {
-                    Image(systemName: pinned ? "pin.fill" : "pin")
-                        .font(.system(size: 12, weight: .regular))
-                        .rotationEffect(.degrees(35))
-                        .foregroundStyle(.white.opacity(pinned ? 1 : 0.65))
-                        .frame(width: 28, height: 28)
-                }.buttonStyle(PlayerTransportStyle())
-                    .help(pinned ? L("取消置顶") : L("置顶窗口"))
-                    .accessibilityLabel(pinned ? L("取消置顶") : L("置顶窗口"))
-                    .accessibilityValue(pinned ? L("已开启") : L("已关闭"))
-                    .padding(12)
-                    .opacity(showControls ? 1 : 0)
-                    .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+                    Button { pinned.toggle() } label: {
+                        Image(systemName: pinned ? "pin.fill" : "pin")
+                            .font(.system(size: 12, weight: .regular))
+                            .rotationEffect(.degrees(35))
+                            .foregroundStyle(.white.opacity(pinned ? 1 : 0.65))
+                            .frame(width: 28, height: 28)
+                    }.buttonStyle(PlayerTransportStyle())
+                        .help(pinned ? L("取消置顶") : L("置顶窗口"))
+                        .accessibilityLabel(pinned ? L("取消置顶") : L("置顶窗口"))
+                        .accessibilityValue(pinned ? L("已开启") : L("已关闭"))
+                        .padding(12)
+                        .opacity(showControls ? 1 : 0)
+                        .allowsHitTesting(showControls).accessibilityHidden(!showControls)
+                        .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.36 : 0.42)
+                            .delay(showControls ? 0.1 : 0), value: showControls)
                 }
             }
             .contentShape(Rectangle())
@@ -529,7 +502,8 @@ struct PlayerView: View {
             }
             .onDisappear { pointerInside = false; hovering = false }
             .accessibilityLabel(L("迷你播放器") + ", " + title)
-            .animation(.easeInOut(duration: reduceMotion ? 0 : (showControls ? 0.25 : 0.65)), value: showControls)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: title)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: subtitle)
     }
     private func miniBackdrop(size: CGSize, controlsHeight: CGFloat) -> some View {
         // The background uses the same container geometry as the controls.
@@ -594,25 +568,16 @@ struct PlayerView: View {
             .accessibilityLabel(model.artwork == nil ? L("暂无专辑封面") : L("专辑封面"))
     }
     private var progress: some View {
-        let duration = model.snapshot?.durationMs
-        let position = model.snapshot?.positionMs
-        let fraction = duration.flatMap { duration in
-            position.map { duration > 0 ? min(Double($0) / Double(duration), 1) : 0 }
-        } ?? 0
-        return VStack(spacing: 7) {
-            GeometryReader { geometry in
-                Capsule().fill(.white.opacity(0.18))
-                Capsule().fill(.white.opacity(0.85)).frame(width: geometry.size.width * fraction)
-            }.frame(height: 3).accessibilityLabel(L("播放进度"))
-                .accessibilityValue("\(time(position)) / \(time(duration))")
-            HStack {
-                Text(time(position)); Spacer(); Text(time(duration))
-            }.font(.system(size: 10).monospacedDigit()).foregroundStyle(.white.opacity(0.55))
-        }.help(L("进度随手机上报更新，暂不支持拖动"))
+        PlaybackProgressView(model: model, visible: showProgress)
+            .frame(height: showProgress ? 36 : 0, alignment: .top).clipped()
+            .opacity(showProgress ? 1 : 0)
+            .allowsHitTesting(showProgress).accessibilityHidden(!showProgress)
     }
     private func transport(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol).font(.system(size: 20, weight: .medium)).frame(width: 44, height: 44)
+                .contentTransition(.opacity)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: symbol)
         }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
             .opacity(model.canControl ? 0.9 : 0.3).help(label).accessibilityLabel(label)
     }
@@ -627,10 +592,8 @@ private struct ArtworkSurface: View {
         ZStack {
             Image(nsImage: artwork).resizable().aspectRatio(contentMode: mode)
                 .id(ObjectIdentifier(artwork)).transition(.opacity)
-        }
-        .blur(radius: loading ? 10 : 0)
-        .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: loading)
-        .animation(.easeInOut(duration: reduceMotion ? 0 : 0.35), value: ObjectIdentifier(artwork))
+        }.blur(radius: loading ? 10 : 0)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: loading)
     }
 }
 
@@ -659,202 +622,11 @@ private struct PlayerGlass: ViewModifier {
 }
 
 struct PlayerTransportStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.contentShape(Rectangle())
             .opacity(configuration.isPressed ? 0.6 : 1)
-            .scaleEffect(configuration.isPressed ? 0.96 : 1)
-    }
-}
-
-struct SettingsPanel: View {
-    @AppStorage("showDockIcon") private var showDockIcon = true
-    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
-    @AppStorage("playerControlsAlwaysVisible") private var controlsAlwaysVisible = false
-    @AppStorage("playerWindowPinned") private var pinned = false
-    @AppStorage("playerShowsPinButton") private var showPinButton = false
-    @AppStorage("playerShowsTransport") private var showPlaybackControls = true
-    @AppStorage("appLanguage") private var language = "zh-Hans"
-    @State private var diagnosticsExpanded = false
-    @ObservedObject var model: ReceiverModel
-    var body: some View {
-        TabView {
-            Form {
-            Section(L("接收设置")) {
-                TextField(L("设备名称"), text: $model.name)
-                Picker(L("网络接口"), selection: $model.interfaceName) {
-                    Text(L("自动选择局域网")).tag("")
-                    ForEach(model.networks, id: \.address) { item in Text("\(item.name) · \(item.address)").tag(item.name) }
-                    if !model.interfaceName.isEmpty && !model.networks.contains(where: { $0.name == model.interfaceName }) {
-                        Text(model.interfaceName + " (" + L("不可用") + ")").tag(model.interfaceName)
-                    }
-                }
-                Picker(L("声音输出"), selection: $model.outputDevice) {
-                    Text(L("跟随系统输出")).tag("")
-                    ForEach(model.outputs, id: \.id) { item in Text(item.name).tag(item.id) }
-                    if !model.outputDevice.isEmpty && !model.outputs.contains(where: { $0.id == model.outputDevice }) {
-                        Text(L("所选设备已断开")).tag(model.outputDevice)
-                    }
-                }
-                Button(model.wantsReceiving ? L("保存并重新连接") : L("保存并启动接收")) { model.start() }
-                    .disabled(model.busy || !model.initialized)
-                if model.wantsReceiving {
-                    Button(L("停止接收")) { model.stop() }.disabled(model.busy)
-                }
-                Text(L("重新连接后，可能需要在手机上重新选择此设备。全屋播放请在手机中添加 Mac。")).font(.caption).foregroundStyle(.secondary)
-            }
-                if !model.error.isEmpty {
-                    Text(model.error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
-                }
-            }.formStyle(.grouped).tabItem { Label(L("接收"), systemImage: "antenna.radiowaves.left.and.right") }
-            Form {
-                Section(L("播放窗口")) {
-                    Toggle(L("控件常驻"), isOn: $controlsAlwaysVisible)
-                    Text(L("鼠标移出后仍显示歌曲信息、进度和已开启的控件。"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    Toggle(L("显示播放控制"), isOn: $showPlaybackControls)
-                    Text(L("显示上一首、播放/暂停和下一首按钮。")).font(.caption).foregroundStyle(.secondary)
-                }
-                Section(L("应用入口")) {
-                    Toggle(L("显示 Dock 图标"), isOn: $showDockIcon)
-                        .onChange(of: showDockIcon) { _, visible in applyDockVisibility(visible) }
-                    Toggle(L("显示菜单栏图标"), isOn: $showMenuBarIcon)
-                    if !showDockIcon && !showMenuBarIcon {
-                        Text(L("两个入口都隐藏时，再次打开应用可进入设置。"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Section(L("窗口")) {
-                    Toggle(L("窗口置顶"), isOn: $pinned)
-                    Toggle(L("显示置顶按钮"), isOn: $showPinButton)
-                }
-                Section(L("语言")) {
-                    Picker(L("界面语言"), selection: $language) {
-                        Text(L("简体中文")).tag("zh-Hans")
-                        Text("English").tag("en")
-                    }
-                }
-            }.formStyle(.grouped).tabItem { Label(L("外观"), systemImage: "paintbrush") }
-            Form {
-                Section(L("同步微调")) {
-                    SyncAdjustmentControl(model: model)
-                    Text(L("提前幅度受已接收音频限制。调整时会短暂重新同步；如出现断音，请减小幅度或恢复默认。"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    if !model.syncAdjustmentError.isEmpty {
-                        Text(model.syncAdjustmentError).font(.caption).foregroundStyle(.red)
-                    }
-                }
-                Section {
-                    DisclosureGroup(L("同步诊断"), isExpanded: $diagnosticsExpanded) {
-                LabeledContent(L("状态"), value: L(model.phaseLabel))
-                LabeledContent(L("专辑封面"), value: L(model.artworkStatus))
-                if model.snapshot?.controlsAvailable == true && model.artwork == nil {
-                    Button(L("重新加载封面")) { model.reloadArtwork() }.disabled(model.artworkLoading)
-                }
-                if let s = model.snapshot {
-                    LabeledContent(L("输出设备"), value: s.output.isEmpty ? L("尚未输出") : s.output)
-                    LabeledContent(L("音频缓冲"), value: String(format: "%.1f ms", s.queueMs))
-                    LabeledContent(L("设备输出延迟"), value: String(format: "%.1f ms", s.outputLatencyMs))
-                    LabeledContent(L("调度误差"), value: String(format: "%.1f ms", s.scheduleErrorMs))
-                    LabeledContent(L("欠载 / 重新同步"), value: "\(s.underruns) / \(s.resyncs)")
-                }
-                Text(L("调度误差是软件内部指标，不代表与其他音箱的实测声音偏差。")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                Section(L("数据与日志")) {
-                    Button(L("打开日志")) { model.openLogs() }
-                    Button(L("打开数据与卸载目录")) { NSWorkspace.shared.open(model.root) }
-                }
-            }.formStyle(.grouped).tabItem { Label(L("高级"), systemImage: "slider.horizontal.3") }
-            VStack(spacing: 14) {
-                AboutBrandIcon().frame(width: 80, height: 80).accessibilityHidden(true)
-                Text("FusionPlay").font(.title2.bold())
-                Text(L("Mac 妙播接收器")).foregroundStyle(.secondary)
-                Text("v" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""))
-                    .font(.caption).foregroundStyle(.secondary)
-                Link(L("项目主页"), destination: URL(string: "https://github.com/ZrimYoung/FusionPlay")!)
-                Text(L("开源许可：AGPL-3.0-only")).font(.caption).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-                .tabItem { Label(L("关于"), systemImage: "info.circle") }
-        }.padding(12).frame(width: 560, height: 540)
-    }
-}
-
-
-private struct SyncAdjustmentControl: View {
-    @ObservedObject var model: ReceiverModel
-    @AppStorage("appLanguage") private var language = "zh-Hans"
-    @State private var input = "0"
-    @State private var invalidInput = false
-    @FocusState private var editingValue: Bool
-    private var unavailable: Bool { !model.initialized || model.syncAdjustmentBusy }
-    var body: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Text(L("播放时间偏移"))
-                Spacer()
-                TextField("", text: $input, prompt: Text("0"))
-                    .labelsHidden()
-                    .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing)
-                    .monospacedDigit().frame(width: 76)
-                    .focused($editingValue).onSubmit { commitInput() }
-                    .accessibilityLabel(L("播放时间偏移"))
-                    .disabled(unavailable)
-                Text("ms").foregroundStyle(.secondary)
-            }
-            HStack(spacing: 12) {
-                Button { adjust(by: -10) } label: {
-                    Image(systemName: "minus").frame(width: 24, height: 24)
-                }.disabled(unavailable || model.syncAdjustment <= -200)
-                    .help(L("提前 10 ms")).accessibilityLabel(L("提前 10 ms"))
-                Slider(value: $model.syncAdjustment, in: -200...200) { editing in
-                    if !editing {
-                        model.syncAdjustment = model.syncAdjustment.rounded()
-                        refreshInput()
-                        model.saveSyncAdjustment()
-                    }
-                }.labelsHidden().frame(maxWidth: .infinity)
-                    .accessibilityLabel(L("播放时间偏移")).disabled(unavailable)
-                Button { adjust(by: 10) } label: {
-                    Image(systemName: "plus").frame(width: 24, height: 24)
-                }.disabled(unavailable || model.syncAdjustment >= 200)
-                    .help(L("延后 10 ms")).accessibilityLabel(L("延后 10 ms"))
-            }.buttonStyle(.borderless)
-            HStack {
-                Text(L("提前")).font(.caption)
-                Spacer()
-                Button(L("恢复默认")) { apply(0) }
-                    .disabled(unavailable || model.syncAdjustment == 0)
-                Spacer()
-                Text(L("延后")).font(.caption)
-            }
-            Text(L("负值提前，正值延后。输入后回车确认；加减按钮每次调整 10 ms。"))
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-            if invalidInput {
-                Text(L("请输入 −200 到 200 之间的整数。"))
-                    .font(.caption).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }.frame(maxWidth: .infinity)
-            .onAppear { refreshInput() }
-            .onChange(of: model.syncAdjustment) { _, _ in if !editingValue { refreshInput() } }
-            .onChange(of: editingValue) { _, focused in if !focused { commitInput() } }
-    }
-    private func refreshInput() {
-        input = String(Int(model.syncAdjustment.rounded())); invalidInput = false
-    }
-    private func commitInput() {
-        guard !unavailable else { return }
-        guard let value = Int(input.trimmingCharacters(in: .whitespacesAndNewlines)),
-              (-200...200).contains(value) else { invalidInput = true; return }
-        apply(value)
-    }
-    private func adjust(by step: Int) {
-        apply(min(200, max(-200, Int(model.syncAdjustment.rounded()) + step)))
-    }
-    private func apply(_ value: Int) {
-        guard !unavailable else { return }
-        let changed = model.syncAdjustment != Double(value)
-        model.syncAdjustment = Double(value)
-        refreshInput(); editingValue = false
-        if changed { model.saveSyncAdjustment() }
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.13), value: configuration.isPressed)
     }
 }
