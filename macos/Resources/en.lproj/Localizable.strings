@@ -116,3 +116,24 @@
 "悬浮显示" = "On Hover";
 "始终显示" = "Always Visible";
 "查看许可证" = "View License";
+"显示歌词" = "Show Lyrics";
+"歌词由手机提供；带时间戳的歌词随播放滚动。" = "Lyrics come from your phone. Timed lyrics follow playback.";
+"暂无歌词" = "No Lyrics";
+"歌词由手机提供" = "Lyrics are provided by your phone";
+"正在载入歌词…" = "Loading Lyrics…";
+"回到当前歌词" = "Back to Current Lyrics";
+"跳转到此歌词" = "Play from This Line";
+"当前歌词" = "Current Lyric";
+"纯音乐" = "Instrumental";
+"歌词" = "Lyrics";
+"歌词间隔" = "Instrumental";
+"显示侧栏" = "Show Sidebar";
+"隐藏侧栏" = "Hide Sidebar";
+
+"自动" = "Automatic";
+"始终开启" = "Always On";
+"始终关闭" = "Always Off";
+"自动：有歌词时显示，无歌词时隐藏。歌词由手机提供。" = "Automatic shows lyrics when available and hides them otherwise. Lyrics come from your phone.";
+"切换全屏" = "Toggle Full Screen";
+
+"设置导航" = "Settings navigation";
