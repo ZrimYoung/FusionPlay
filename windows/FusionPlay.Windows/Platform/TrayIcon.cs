@@ -30,6 +30,8 @@ internal sealed class TrayIcon : IDisposable
     public Action? TogglePanel { get; set; }
     public Action? ShowPlayer { get; set; }
     public Action? ShowSettings { get; set; }
+    public Action? ToggleFullScreen { get; set; }
+    public Func<bool>? IsFullScreen { get; set; }
     public Action? ToggleReceiving { get; set; }
     public Action? Quit { get; set; }
     public Action? Suspend { get; set; }
@@ -101,6 +103,7 @@ internal sealed class TrayIcon : IDisposable
         {
             Native.AppendMenu(menu, 0, 1, L.Text("显示播放窗口"));
             Native.AppendMenu(menu, 0, 2, L.Text("设置"));
+            Native.AppendMenu(menu, 0, 5, L.Text(IsFullScreen?.Invoke() == true ? "退出全屏" : "全屏播放", IsFullScreen?.Invoke() == true ? "Exit full screen" : "Full screen") + "\tF11");
             Native.AppendMenu(menu, 0, 3, L.Text(Receiving ? "停止接收" : "启动接收"));
             Native.AppendMenu(menu, 0x800, 0, "");
             Native.AppendMenu(menu, 0, 4, L.Text("退出"));
@@ -113,6 +116,7 @@ internal sealed class TrayIcon : IDisposable
                 case 2: ShowSettings?.Invoke(); break;
                 case 3: ToggleReceiving?.Invoke(); break;
                 case 4: Quit?.Invoke(); break;
+                case 5: ToggleFullScreen?.Invoke(); break;
             }
         }
         finally { Native.DestroyMenu(menu); }

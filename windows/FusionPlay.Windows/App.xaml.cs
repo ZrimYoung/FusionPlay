@@ -36,6 +36,8 @@ public partial class App : Application
         UnhandledException += (_, args) =>
         {
             StartupRecord("unhandled_exception", args.Exception);
+            if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
+            { LyricsPlayerCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))
             { SettingsLayoutCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--typography-check"))
@@ -46,6 +48,13 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
+        {
+            try { await LyricsPlayerCheck.Run(Path.Combine(AppContext.BaseDirectory, "lyrics-player-check")); }
+            catch (Exception error) { StartupRecord("lyrics_player_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))
         {
             // Isolated hidden settings check; return before single-instance,
@@ -139,6 +148,7 @@ public partial class App : Application
         tray = new TrayIcon(hwnd, Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"))
         {
             ShowPlayer = ShowPlayer, ShowSettings = OpenSettings, Quit = () => _ = QuitAsync(),
+            ToggleFullScreen = TogglePlayerFullScreen, IsFullScreen = () => player?.IsFullScreen == true,
             ToggleReceiving = () => _ = controller.WantsReceiving ? controller.StopAsync() : controller.StartAsync(),
             TogglePanel = TogglePanel, Suspend = () => { panel?.HidePanel(); media?.Clear(); controller.Suspend(); },
             Resume = () => controller.Resume(), AppearanceChanged = () => player.RefreshAppearance()
@@ -164,7 +174,7 @@ public partial class App : Application
     {
         if (player == null) return;
         panel?.HidePanel(); player.AppWindow.Show();
-        TrayIcon.Native.ShowWindow(WinRT.Interop.WindowNative.GetWindowHandle(player), 9);
+        if (!player.IsFullScreen) TrayIcon.Native.ShowWindow(WinRT.Interop.WindowNative.GetWindowHandle(player), 9);
         player.Activate();
     }
     private void Reopen()
@@ -173,6 +183,11 @@ public partial class App : Application
         else ShowPlayer();
     }
     private void ShowMiniPlayer() { player?.RequestMiniPlayer(); ShowPlayer(); }
+    private void TogglePlayerFullScreen()
+    {
+        if (player == null) return;
+        panel?.HidePanel(); player.AppWindow.Show(); player.Activate(); player.ToggleFullScreen();
+    }
     private void OpenSettings()
     {
         if (controller == null) return;

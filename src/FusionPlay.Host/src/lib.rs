@@ -815,7 +815,11 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 state.position_ms = Some(ms);
             }
         }
-        "progress" if state.controls_available => state.position_ms = value["position_ms"].as_u64(),
+        "progress" if state.controls_available => {
+            if let Some(position) = value["position_ms"].as_u64() {
+                state.position_ms = Some(position);
+            }
+        }
         "volume" => state.volume = value["percent"].as_u64().unwrap_or(50).min(100) as u32,
         "audio_output_ready" => state.output = text("device_name"),
         // Discovery/control sockets are independent of the media stream. The
@@ -1159,6 +1163,15 @@ mod tests {
             &serde_json::json!({"event":"progress", "position_ms":8000}),
         );
         assert_eq!(state.position_ms, Some(8000));
+        for update in [
+            serde_json::json!({"event":"progress"}),
+            serde_json::json!({"event":"progress", "position_ms":null}),
+        ] {
+            reduce(&mut state, &update);
+            assert_eq!(state.position_ms, Some(8000));
+        }
+        reduce(&mut state, &serde_json::json!({"event":"progress", "position_ms":0}));
+        assert_eq!(state.position_ms, Some(0));
         reduce(
             &mut state,
             &serde_json::json!({"event":"media_channel_closed"}),

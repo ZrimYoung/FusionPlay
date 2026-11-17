@@ -48,7 +48,7 @@ internal sealed class SettingsWindow : Window
         later = new() { Name = "CalibrationLater", Content = "+", Width = 34, Height = 34, Padding = new Thickness(0), FontSize = 22 },
         reset = new() { Name = "CalibrationReset", HorizontalAlignment = HorizontalAlignment.Right };
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
-    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" };
+    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
     private readonly ToggleButton pinned = new() { Name = "Pinned", MinWidth = 94, Padding = new Thickness(12, 7, 12, 7) };
@@ -292,6 +292,19 @@ internal sealed class SettingsWindow : Window
         ConfigureCard(transport, "播放控制", "Playback controls", (p, value) => p with { ShowTransport = value });
         ConfigureCard(progress, "进度与时间", "Progress & time", (p, value) => p with { ShowProgress = value });
         ConfigureCard(pinButton, "置顶按钮", "Pin button", (p, value) => p with { ShowPinButton = value });
+        AddSegment(lyricsDisplayMode, "automatic", "自动", "Automatic");
+        AddSegment(lyricsDisplayMode, "always", "始终开启", "Always on");
+        AddSegment(lyricsDisplayMode, "never", "始终关闭", "Always off");
+        Label(() => AutomationProperties.SetName(lyricsDisplayMode, L.Text("显示歌词", "Show lyrics")));
+        lyricsDisplayMode.SelectionChanged += (_, _) =>
+        {
+            if (!renderingPreferences && SegmentKey(lyricsDisplayMode) is string key)
+                UpdatePreferences(p => p with { LyricsDisplayMode = key });
+        };
+        var lyricsLabel = new StackPanel { Spacing = 4 };
+        lyricsLabel.Children.Add(Text("显示歌词", "Show lyrics"));
+        lyricsLabel.Children.Add(Text("自动模式在收到有效歌词后显示。", "Automatic shows lyrics when they are available.", true));
+        var lyricsSurface = Surface(Row(lyricsLabel, lyricsDisplayMode));
         AddSegment(progressColorMode, "system", "跟随系统", "System"); AddSegment(progressColorMode, "white", "始终白色", "Always white"); AddSegment(progressColorMode, "custom", "自定义", "Custom");
         Label(() =>
         {
@@ -322,7 +335,7 @@ internal sealed class SettingsWindow : Window
             // Save the newest color at most every 300 ms during continuous dragging.
             if (!progressColorSaveTimer.IsRunning) progressColorSaveTimer.Start();
         };
-        var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), progressColorSurface,
+        var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
             Text("播放控制与进度设置适用于大小播放器；进度条支持点击跳转。", "Playback controls and progress settings apply to both layouts. Click the progress bar to seek.", true));
         page.Children.Add(display);
         AddSegment(miniVisibility, "hover", "鼠标移入显示", "Show on hover"); AddSegment(miniVisibility, "always", "始终显示", "Always show");
@@ -477,6 +490,7 @@ internal sealed class SettingsWindow : Window
             var preferences = model.Preferences.Value;
             fontSettings.Refresh(); if (Content is FrameworkElement root) UiTypography.Apply(root, preferences);
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
+            SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");
             taskbar.IsChecked = preferences.ShowTaskbarIcon; tray.IsChecked = preferences.ShowTrayIcon;

@@ -43,7 +43,7 @@ internal static class SettingsLayoutCheck
         Window? anchor = null;
         SettingsWindow? settings = null;
         ReceiverController? controller = null;
-        bool hidden = true, focus = true, capturedPreferences = false, preferencesRestored = false;
+        bool hidden = true, focus = true, foregroundNotTaken = true, capturedPreferences = false, preferencesRestored = false;
         bool initializedFixture = false, controllerCreated = false;
         string status = "failed", step = "create_hidden_anchor", failure = "", exception = "", hresult = "";
         string originalLanguage = L.Language;
@@ -71,9 +71,10 @@ internal static class SettingsLayoutCheck
         void Background()
         {
             hidden &= handles.All(hwnd => !IsWindowVisible(hwnd));
-            focus &= GetForegroundWindow() == foreground;
+            nint current = GetForegroundWindow(); focus &= current == foreground;
+            foregroundNotTaken &= !handles.Contains(current);
             Require(hidden, "settings_window_became_visible");
-            Require(focus, "settings_foreground_changed");
+            Require(foregroundNotTaken, "settings_check_took_foreground");
             if (controller != null)
             {
                 Require(typeof(ReceiverController).GetField("native", PrivateInstance)!.GetValue(controller) == null, "native_receiver_was_created");
@@ -217,7 +218,7 @@ internal static class SettingsLayoutCheck
             double scale = Root().XamlRoot?.RasterizationScale ?? Math.Max(96, GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(settings!))) / 96.0;
             double clientWidth = (client.Right - client.Left) / scale, clientHeight = (client.Bottom - client.Top) / scale;
             Require(Math.Abs(clientWidth - width) <= 2 && Math.Abs(clientHeight - height) <= 2, "settings_client_size_changed");
-            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ProgressColorMode", "ProgressCustomColor", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
             var controls = Descendants(Root()).OfType<FrameworkElement>().Where(element => controlNames.Contains(element.Name) && Visible(element)
                 && (element is ButtonBase or ComboBox or SelectorBar or TextBox or Slider or Expander)).ToArray();
             var boxes = new List<object>();
@@ -365,6 +366,11 @@ internal static class SettingsLayoutCheck
                 Require(!Visible(Find<FrameworkElement>("ProgressColorGroup")) && controller.Preferences.Value.ProgressCustomColor == "#F17E91", "hidden_progress_lost_color_or_editor_remained");
                 Require(new UiPreferencesStore(store.Data).Value.ProgressCustomColor == "#F17E91", "pending_color_not_persisted_when_hiding_progress");
                 Toggle("ShowProgress");
+                foreach (string mode in new[] { "always", "never", "automatic" })
+                {
+                    SelectSegment("LyricsDisplayMode", mode);
+                    Require(controller.Preferences.Value.LyricsDisplayMode == mode && new UiPreferencesStore(store.Data).Value.LyricsDisplayMode == mode, "lyrics_mode_not_saved");
+                }
                 SelectSegment("MiniControlsVisibility", "always"); Require(controller.Preferences.Value.AlwaysShowControls, "mini_segment_not_saved");
             }));
             await OnUi(queue!, () => Navigate("general"));
@@ -480,7 +486,7 @@ internal static class SettingsLayoutCheck
                     File.WriteAllText(Path.Combine(directory, "settings-layout-check.json"), JsonSerializer.Serialize(new
                     {
                         status, step, failure_code = failure, exception_type = exception, hresult, cases, layout_samples = layouts, captures,
-                        window_remained_hidden = hidden, foreground_unchanged = focus, preferences_restored = preferencesRestored,
+                        window_remained_hidden = hidden, foreground_unchanged = focus, foreground_not_taken = foregroundNotTaken, preferences_restored = preferencesRestored,
                         controller_created = controllerCreated, initialized_flag_is_fixture = initializedFixture,
                         receiver_initialize_method_called = false, native_receiver_created = false, receiver_polling_started = false,
                         system_media_session_created = false, single_instance_notification_sent = false,

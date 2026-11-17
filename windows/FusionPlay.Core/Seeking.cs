@@ -27,7 +27,16 @@ public static class Seeking
     }
 
     public static bool MatchesCurrent(ReceiverSnapshot snapshot, SeekRequest request) =>
-        request != null && CanSeek(snapshot) && request.PositionMs <= snapshot.DurationMs!.Value
-        && string.Equals(snapshot.TrackId, request.ExpectedTrackId, StringComparison.Ordinal)
-        && string.Equals(snapshot.Title, request.ExpectedTitle, StringComparison.Ordinal);
+        request != null && request.ExpectedTrackId != null && request.ExpectedTitle != null
+        && CanSeek(snapshot) && request.PositionMs <= snapshot.DurationMs!.Value
+        && (request.ExpectedTrackId.Length > 0
+            ? string.Equals(snapshot.TrackId, request.ExpectedTrackId, StringComparison.Ordinal)
+            : snapshot.TrackId.Length == 0 && string.Equals(snapshot.Title, request.ExpectedTitle, StringComparison.Ordinal));
+
+    /// <summary>A stable sender ID wins over changing per-line lyric captions.</summary>
+    public static bool SameTrack(ReceiverSnapshot left, ReceiverSnapshot right) =>
+        left.ControlsAvailable && right.ControlsAvailable
+        && (!string.IsNullOrEmpty(left.TrackId) || !string.IsNullOrEmpty(right.TrackId)
+            ? !string.IsNullOrEmpty(left.TrackId) && string.Equals(left.TrackId, right.TrackId, StringComparison.Ordinal)
+            : string.Equals(left.Title, right.Title, StringComparison.Ordinal));
 }

@@ -14,6 +14,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private readonly CancellationTokenSource lifetime = new();
     private NativeReceiver? native;
     private readonly PlaybackTimeline timeline = new();
+    private readonly LyricsState lyrics = new();
     private CancellationTokenSource? seekFeedbackExpiry;
     private long generation;
     private Task? polling;
@@ -33,6 +34,10 @@ public sealed class ReceiverController : IAsyncDisposable
     public ReceiverSettings Settings { get; private set; } = new();
     public ReceiverSnapshot State => timeline.Source;
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
+    public LyricsDocument Lyrics => lyrics.Document;
+    public bool LyricsLoading => lyrics.Loading;
+    public bool LyricsAvailable => lyrics.Available;
+    public ulong? LyricsPositionMs => lyrics.Position(DisplayPositionMs, State.ControlsAvailable && !sleeping && !disposed);
     public NetworkInterface[] Networks { get; private set; } = [];
     public AudioDevice[] Outputs { get; private set; } = [];
     public bool Initialized { get; private set; }
@@ -141,6 +146,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         long request = Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
+        lyrics.Clear();
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
         Busy = true; Error = ""; ControlMessage = ""; Notify();
@@ -230,12 +236,30 @@ public sealed class ReceiverController : IAsyncDisposable
         var previous = State;
         if (!timeline.Apply(observation)) return false;
         var snapshot = State;
-        bool changedTrack = previous.TrackId != snapshot.TrackId || previous.Title != snapshot.Title;
+        bool changedTrack = !Seeking.SameTrack(previous, snapshot);
         if (!timeline.IsPending) StopSeekFeedbackTimer();
         volume.Observe(snapshot.Volume);
         if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
+        if (lyrics.Observe(snapshot) is { } parse) _ = ParseLyricsAsync(parse);
         UpdateArtwork(snapshot); Notify();
         return true;
+    }
+    private async Task ParseLyricsAsync(LyricsParseRequest request)
+    {
+        // Only memory is involved. Publication is guarded against replacement,
+        // disconnect and lifecycle cancellation by LyricsState's version.
+        var cancellation = lifetime.Token;
+        try
+        {
+            var document = await Task.Run(() => LyricsDocument.Parse(request.Source), cancellation);
+            if (cancellation.IsCancellationRequested) return;
+            await OnUi(() =>
+            {
+                if (disposed || !lyrics.Complete(request, document)) return;
+                Notify();
+            });
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
     }
     public Task TogglePlaybackAsync() => ControlAsync(State.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
     public void DispatchControl(PlaybackCommand command) => ui.TryEnqueue(() => _ = ControlAsync(command));
@@ -475,6 +499,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
+        lyrics.Clear();
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();

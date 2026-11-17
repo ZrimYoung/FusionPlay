@@ -66,7 +66,7 @@ internal static class PlaybackTimelineTests
         {
             foreach (var replacement in new[]
             {
-                Initial with { TrackId = "next", PositionMs = 500 }, Initial with { Title = "Other", PositionMs = 700 },
+                Initial with { TrackId = "next", PositionMs = 500 },
                 Initial with { ControlsAvailable = false, Phase = ReceiverPhase.Ready, PositionMs = null },
                 Initial with { DurationMs = 30_000, PositionMs = 3_000 }
             })

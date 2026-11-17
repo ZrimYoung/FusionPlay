@@ -45,7 +45,7 @@ internal static class SeekInputCheck
         bool preferencesCaptured = false, controllerCreated = false, initializedFlagIsFixture = false;
         string status = "failed", step = "create_hidden_window", failure = "", exceptionType = "", hresult = "";
         string fixtureXamlError = "";
-        bool remainedHidden = true, foregroundUnchanged = true;
+        bool remainedHidden = true, foregroundUnchanged = true, foregroundNotTaken = true;
         var cases = new List<string>();
         var mainSamples = new List<object>();
         var indicatorSamples = new List<object>();
@@ -60,8 +60,9 @@ internal static class SeekInputCheck
         {
             remainedHidden &= hwnd == 0 || !IsWindowVisible(hwnd);
             remainedHidden &= mainHwnd == 0 || !IsWindowVisible(mainHwnd);
-            foregroundUnchanged &= GetForegroundWindow() == foreground;
-            Require(remainedHidden, "window_became_visible"); Require(foregroundUnchanged, "foreground_changed");
+            nint current = GetForegroundWindow(); foregroundUnchanged &= current == foreground;
+            foregroundNotTaken &= (hwnd == 0 || current != hwnd) && (mainHwnd == 0 || current != mainHwnd);
+            Require(remainedHidden, "window_became_visible"); Require(foregroundNotTaken, "seek_check_took_foreground");
         }
         void Pass(string name, Action check) { Background(); check(); Background(); cases.Add(name); }
         void NoRequest(string name, Action check) => Pass(name, () => { int count = requests.Count; check(); Require(requests.Count == count, name); });
@@ -114,7 +115,7 @@ internal static class SeekInputCheck
                 });
                 foreach (var invalid in new[]
                 {
-                    initial with { TrackId = "other-track" }, initial with { Title = "Other" },
+                    initial with { TrackId = "other-track" }, initial with { TrackId = "" },
                     initial with { Phase = ReceiverPhase.Ready, ControlsAvailable = false },
                     initial with { DurationMs = null }, initial with { PositionMs = null }, initial with { ControlsAvailable = false }
                 })
@@ -125,6 +126,19 @@ internal static class SeekInputCheck
                         target.RefreshState(); Require(!target.CommitPointerClick(), "stale_request_dispatched");
                     });
                 }
+                Pass("stable_track_caption_does_not_cancel_captured_seek", () =>
+                {
+                    snapshot = initial; target!.BeginPointer(20, 150, 300, true);
+                    snapshot = initial with { Title = "Current lyric caption" }; target.RefreshState();
+                    int before = requests.Count;
+                    Require(target.CommitPointerClick() && requests.Count == before + 1 && requests[^1].ExpectedTrackId == initial.TrackId, "caption_cancelled_stable_track_seek");
+                });
+                NoRequest("title_fallback_rejects_replacement_without_stable_id", () =>
+                {
+                    snapshot = initial with { TrackId = "" }; target!.BeginPointer(21, 150, 300, true);
+                    snapshot = snapshot with { Title = "Replacement" }; target.RefreshState();
+                    Require(!target.CommitPointerClick(), "fallback_title_change_dispatched");
+                });
                 snapshot = initial;
                 NoRequest("disabled_target_rejected", () => { target!.BeginPointer(3, 150, 300, true); target.IsEnabled = false; Require(!target.CommitPointerClick(), "disabled_request_dispatched"); target.IsEnabled = true; });
                 NoRequest("canceled_pointer_rejected", () => { target!.BeginPointer(4, 150, 300, true); target.CancelPointer(); Require(!target.CommitPointerClick(), "canceled_request_dispatched"); });
@@ -196,7 +210,7 @@ internal static class SeekInputCheck
                 preferencesCaptured = true;
                 controller = new ReceiverController(queue!); controllerCreated = true;
                 originalPreferences = controller.Preferences.Value;
-                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, Pinned = false, ShowPinButton = false });
+                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, Pinned = false, ShowPinButton = false, LyricsDisplayMode = "never" });
                 var initialized = typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized));
                 Require(initialized?.GetSetMethod(nonPublic: true) != null, "initialized_fixture_setter_missing");
                 initialized!.SetValue(controller, true); initializedFlagIsFixture = true;
@@ -468,7 +482,7 @@ internal static class SeekInputCheck
                     File.WriteAllText(outputFile, JsonSerializer.Serialize(new
                     {
                         status, step, failure_code = failure, exception_type = exceptionType, hresult, fixture_xaml_error = fixtureXamlError,
-                        window_remained_hidden = remainedHidden, foreground_unchanged = foregroundUnchanged,
+                        window_remained_hidden = remainedHidden, foreground_unchanged = foregroundUnchanged, foreground_not_taken = foregroundNotTaken,
                         receiver_created = false, native_receiver_created = false, controller_created = controllerCreated,
                         initialized_flag_is_fixture = initializedFlagIsFixture, receiver_initialize_method_called = false,
                         shell_media_session_created = false, dispatched_fixture_requests = requests.Count,

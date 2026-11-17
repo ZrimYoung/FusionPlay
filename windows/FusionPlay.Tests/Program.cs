@@ -177,12 +177,13 @@ Check("seek: queued requests cannot target another track or a shortened timeline
     Assert(Seeking.MatchesCurrent(source with { PositionMs = 8_000, Phase = ReceiverPhase.Paused }, request), "normal source progress invalidated its own track");
     foreach (var replacement in new[]
     {
-        source with { TrackId = "different-id" }, source with { Title = "Another Song" },
+        source with { TrackId = "different-id" },
         source with { TrackId = "SAME-ID" }, source with { DurationMs = 4_999 },
         source with { ControlsAvailable = false }, source with { Phase = ReceiverPhase.Stopped }
     }) Assert(!Seeking.MatchesCurrent(replacement, request), "stale request matched a replacement timeline");
     Assert(Seeking.MatchesCurrent(source with { DurationMs = 5_000 }, request), "exact endpoint rejected");
-    Assert(!Seeking.MatchesCurrent(source, request with { ExpectedTitle = "song" }), "title identity comparison was not exact");
+    Assert(Seeking.MatchesCurrent(source with { Title = "Current caption" }, request), "stable ID was invalidated by a display caption");
+    Assert(!Seeking.MatchesCurrent(source with { TrackId = "" }, request with { ExpectedTrackId = "", ExpectedTitle = "song" }), "title fallback comparison was not exact");
     Assert(!Seeking.MatchesCurrent(source, request with { PositionMs = ulong.MaxValue }), "out-of-range queued target accepted");
     using var json = JsonDocument.Parse(JsonSerializer.Serialize(request, WireJson.Options));
     Assert(json.RootElement.GetProperty("position_ms").GetUInt64() == 5_000 && json.RootElement.GetProperty("expected_track_id").GetString() == "same-id"
@@ -442,6 +443,8 @@ Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconn
     requests.Dispose(); requests.Cancel();
 });
 PlaybackTimelineTests.Register(Check);
+LyricsDocumentTests.Register(Check);
+LyricsPreferenceTests.Register(Check);
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {

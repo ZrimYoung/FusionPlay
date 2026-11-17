@@ -25,6 +25,7 @@ public sealed record ReceiverSnapshot
     public string Album { get; init; } = "";
     public string TrackId { get; init; } = "";
     public string ArtworkUrl { get; init; } = "";
+    public string LyricsText { get; init; } = "";
     public ulong? DurationMs { get; init; }
     public ulong? PositionMs { get; init; }
     public bool ControlsAvailable { get; init; }
