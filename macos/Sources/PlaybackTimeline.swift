@@ -10,7 +10,10 @@ struct PlaybackObservation: Equatable {
     var playing: Bool
     var canSeek: Bool { connected && (duration ?? 0) > 0 && position != nil }
     func sameTrack(as other: Self) -> Bool {
-        connected && other.connected && trackID == other.trackID && title == other.title && duration == other.duration
+        let identityMatches = !trackID.isEmpty || !other.trackID.isEmpty
+            ? !trackID.isEmpty && trackID == other.trackID
+            : title == other.title
+        return connected && other.connected && identityMatches && duration == other.duration
     }
 }
 

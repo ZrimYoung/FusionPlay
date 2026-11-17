@@ -113,6 +113,7 @@ pub struct Snapshot {
     pub album: String,
     pub track_id: String,
     pub artwork_url: String,
+    pub lyrics_text: String,
     pub duration_ms: Option<u64>,
     pub position_ms: Option<u64>,
     pub controls_available: bool,
@@ -136,6 +137,7 @@ impl Default for Snapshot {
             album: String::new(),
             track_id: String::new(),
             artwork_url: String::new(),
+            lyrics_text: String::new(),
             duration_ms: None,
             position_ms: None,
             controls_available: false,
@@ -501,7 +503,7 @@ impl Receiver {
     pub fn seek(&self, position_ms: u64, expected_track_id: String, expected_title: String) -> Result<CommandOutcome> {
         let _operation = self.operations.lock().map_err(storage)?;
         let state = self.snapshot();
-        if !state.controls_available || state.track_id != expected_track_id || state.title != expected_title
+        if !state.controls_available || !matches_expected_track(&state, &expected_track_id, &expected_title)
             || !matches!(state.duration_ms, Some(duration) if duration > 0 && position_ms <= duration) {
             return Err(HostError::InvalidConfig { message: "Track changed, duration unavailable, or seek target out of range".into() });
         }
@@ -514,7 +516,7 @@ impl Receiver {
         // track's state confirms this request against the preceding metadata.
         let current = self.snapshot();
         let confirmed = outcome.confirmed && current.controls_available
-            && current.track_id == expected_track_id && current.title == expected_title;
+            && matches_expected_track(&current, &expected_track_id, &expected_title);
         Ok(CommandOutcome { dispatched: outcome.dispatched, confirmed })
     }
     pub fn set_volume(&self, volume: u32) -> Result<()> {
@@ -681,6 +683,11 @@ fn accept_media_generation(active: &mut u64, value: &Value) -> bool {
     true
 }
 
+fn matches_expected_track(state: &Snapshot, id: &str, title: &str) -> bool {
+    if !id.is_empty() { state.track_id == id }
+    else { state.track_id.is_empty() && state.title == title }
+}
+
 fn reduce(state: &mut Snapshot, value: &Value) {
     let text = |key| value[key].as_str().unwrap_or("").to_owned();
     match value["event"].as_str().unwrap_or("") {
@@ -758,23 +765,46 @@ fn reduce(state: &mut Snapshot, value: &Value) {
             state.message = "音频会话已结束，等待重新投送".into();
         }
         "media_info" => {
-            let id = text("track_id");
+            let mut id = text("track_id");
+            let incoming_lyrics = value["lyrics_text"].as_str().filter(|text| !text.is_empty());
+            let changed_lyrics = incoming_lyrics.is_some_and(|text| !state.lyrics_text.is_empty() && text != state.lyrics_text);
+            let fallback = value["track_id_source"].as_str().is_some_and(|source| source != "explicit");
+            let same_metadata = !state.title.is_empty() && value["title"].as_str() == Some(state.title.as_str())
+                && [("artist", &state.artist), ("album", &state.album)].into_iter().all(|(key, existing)| {
+                    value[key].as_str().is_none_or(|text| text.is_empty() || existing.is_empty() || text == existing)
+                });
+            let caption = !changed_lyrics && (fallback || id.is_empty() || id == state.track_id)
+                && fusionplay_miplay_sdk::protocol::is_lyric_caption(value["title"].as_str().unwrap_or(""), &state.lyrics_text);
+            // A phone can omit id/mLrc in its per-line caption refresh. Keep the
+            // current identity rather than treating the caption hash as a song.
+            if fallback && !state.track_id.is_empty() && !changed_lyrics && (same_metadata || caption
+                || incoming_lyrics.is_some_and(|text| text == state.lyrics_text)) {
+                id = state.track_id.clone();
+            }
             if !id.is_empty() && id != state.track_id {
                 state.title.clear();
                 state.artist.clear();
                 state.album.clear();
                 state.artwork_url.clear();
+                state.lyrics_text.clear();
                 state.duration_ms = None;
                 state.position_ms = None;
                 state.track_id = id;
             }
+            let caption_lyrics = if caption { state.lyrics_text.clone() } else { String::new() };
             for (field, key) in [
                 (&mut state.title, "title"),
                 (&mut state.artist, "artist"),
                 (&mut state.album, "album"),
                 (&mut state.artwork_url, "artwork"),
+                (&mut state.lyrics_text, "lyrics_text"),
             ] {
-                if let Some(value) = value[key].as_str().filter(|v| !v.is_empty()) {
+                let caption_header = if caption {
+                    match key { "title" => Some("ti"), "artist" => Some("ar"), "album" => Some("al"), _ => None }
+                } else { None };
+                if let Some(header) = caption_header {
+                    if let Some(canonical) = fusionplay_miplay_sdk::protocol::lyric_header(&caption_lyrics, header) { *field = canonical.into(); }
+                } else if let Some(value) = value[key].as_str().filter(|v| !v.is_empty()) {
                     *field = value.into();
                 }
             }
@@ -808,6 +838,7 @@ fn clear_media(state: &mut Snapshot) {
     state.album.clear();
     state.track_id.clear();
     state.artwork_url.clear();
+    state.lyrics_text.clear();
     state.duration_ms = None;
     state.position_ms = None;
 }
@@ -909,12 +940,13 @@ mod tests {
         }
         assert!(matches!(r.seek(0, "a".into(), "Song".into()), Err(HostError::InvalidConfig { .. })));
         r.shared.state.lock().unwrap().duration_ms = Some(1000);
-        for (position, track, title) in [(1001, "a", "Song"), (0, "b", "Song"), (0, "a", "Other")] {
+        for (position, track, title) in [(1001, "a", "Song"), (0, "b", "Song")] {
             assert!(matches!(r.seek(position, track.into(), title.into()), Err(HostError::InvalidConfig { .. })));
         }
-        // Valid boundaries reach the controller check, rather than failing validation.
-        for position in [0, 1000] {
-            assert!(matches!(r.seek(position, "a".into(), "Song".into()), Err(HostError::Receiver { .. })));
+        // Valid boundaries and changed display captions with the same stable ID
+        // reach the controller rather than being rejected as a different song.
+        for (position, title) in [(0, "Song"), (1000, "Song"), (0, "New caption")] {
+            assert!(matches!(r.seek(position, "a".into(), title.into()), Err(HostError::Receiver { .. })));
         }
         drop(r); fs::remove_dir_all(dir).unwrap();
     }
@@ -1139,6 +1171,92 @@ mod tests {
         );
         assert_eq!(state.position_ms, None);
     }
+    #[test]
+    fn lyrics_follow_track_and_session_without_empty_update_flicker() {
+        let mut state = Snapshot::default();
+        reduce(
+            &mut state,
+            &serde_json::json!({"event":"interconnect_stage", "stage":"media_session_established"}),
+        );
+        reduce(
+            &mut state,
+            &serde_json::json!({"event":"media_info", "track_id":"one", "lyrics_text":"[00:01.00]First"}),
+        );
+        for update in [
+            serde_json::json!({"event":"media_info", "track_id":"one", "lyrics_text":""}),
+            serde_json::json!({"event":"media_info", "lyrics_text":null}),
+            serde_json::json!({"event":"media_info", "track_id":"one", "position_ms":2000}),
+        ] {
+            reduce(&mut state, &update);
+            assert_eq!(state.lyrics_text, "[00:01.00]First");
+        }
+        reduce(
+            &mut state,
+            &serde_json::json!({"event":"media_info", "track_id":"two", "title":"Second"}),
+        );
+        assert!(state.lyrics_text.is_empty());
+        reduce(
+            &mut state,
+            &serde_json::json!({"event":"media_info", "lyrics_text":"[00:02.00]Second"}),
+        );
+        assert_eq!(state.track_id, "two");
+        assert_eq!(state.lyrics_text, "[00:02.00]Second");
+        let populated = state;
+        for event in [
+            serde_json::json!({"event":"media_channel_closed"}),
+            serde_json::json!({"event":"stream_stopped"}),
+            serde_json::json!({"event":"playback_state", "playing":false, "session_active":false}),
+            serde_json::json!({"event":"host_error", "message":"example"}),
+        ] {
+            let mut state = populated.clone();
+            reduce(&mut state, &event);
+            assert!(state.lyrics_text.is_empty());
+        }
+    }
+
+    #[test]
+    fn caption_partial_updates_keep_track_metadata_progress_and_lyrics() {
+        let mut state = Snapshot { track_id: "stable-song".into(), title: "Synthetic Song".into(),
+            artist: "Artist".into(), album: "Album".into(), duration_ms: Some(180_000), position_ms: Some(60_000),
+            lyrics_text: "[ti:Synthetic Song]\n[ar:Artist]\n[al:Album]\n[00:01]First caption\n[00:03]Second caption".into(),
+            controls_available: true, ..Snapshot::default() };
+        for update in [
+            serde_json::json!({"event":"media_info", "track_id":"stable-song", "track_id_source":"explicit", "title":"First caption", "lyrics_text":null}),
+            serde_json::json!({"event":"media_info", "track_id":"metadata:caption-hash", "track_id_source":"metadata", "title":"Second caption", "lyrics_text":""}),
+            serde_json::json!({"event":"media_info", "track_id":"metadata:other-hash", "track_id_source":"metadata", "title":"Synthetic Song", "artist":"Artist", "album":"Album"}),
+        ] {
+            reduce(&mut state, &update);
+            assert_eq!(state.track_id, "stable-song");
+            assert_eq!(state.title, "Synthetic Song");
+            assert_eq!(state.artist, "Artist");
+            assert_eq!(state.duration_ms, Some(180_000));
+            assert_eq!(state.position_ms, Some(60_000));
+            assert!(!state.lyrics_text.is_empty());
+        }
+        reduce(&mut state, &serde_json::json!({"event":"media_info", "track_id":"metadata:new-document", "track_id_source":"lyrics_metadata",
+            "title":"Next Song", "lyrics_text":"[ti:Next Song]\n[00:01]Next caption"}));
+        assert_eq!(state.track_id, "metadata:new-document");
+        assert_eq!(state.title, "Next Song");
+        assert_eq!(state.position_ms, None);
+        // A real new explicit ID must not be swallowed just because its title
+        // happens to appear in the preceding song's lyrics.
+        reduce(&mut state, &serde_json::json!({"event":"media_info", "track_id":"explicit-new", "track_id_source":"explicit", "title":"Next caption"}));
+        assert_eq!(state.track_id, "explicit-new");
+        assert_eq!(state.title, "Next caption");
+        assert!(state.lyrics_text.is_empty());
+    }
+
+    #[test]
+    fn seek_identity_prefers_stable_id_and_uses_title_only_without_one() {
+        let mut state = Snapshot { track_id: "stable".into(), title: "Current caption".into(), ..Snapshot::default() };
+        assert!(super::matches_expected_track(&state, "stable", "Earlier caption"));
+        assert!(!super::matches_expected_track(&state, "different", "Current caption"));
+        assert!(!super::matches_expected_track(&state, "", "Current caption"));
+        state.track_id.clear();
+        assert!(super::matches_expected_track(&state, "", "Current caption"));
+        assert!(!super::matches_expected_track(&state, "", "Earlier caption"));
+    }
+
     #[test]
     fn pause_survives_buffered_audio_and_resume_waits_for_output() {
         let mut state = Snapshot {
