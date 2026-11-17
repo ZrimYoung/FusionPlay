@@ -1,6 +1,10 @@
 use aes::Aes128;
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit, block_padding::NoPadding};
 use anyhow::{Context, Result, bail};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+};
 use cbc::{Decryptor, Encryptor};
 use hmac::{Hmac, Mac};
 use md5::{Digest, Md5};
@@ -195,6 +199,7 @@ struct RemoteEffectState {
     track_revision: u64,
     position_revision: u64,
     track_identity: Option<String>,
+    track_lyrics: String,
     last_position: Option<(u64, u64)>,
     pending: HashMap<u64, PendingRemoteEffect>,
     recent_seek_jumps: Vec<RecentSeekJump>,
@@ -559,6 +564,7 @@ impl ControlHub {
         drop(active);
         if let Ok(mut effects) = self.remote_effects.lock() {
             effects.track_identity = None;
+            effects.track_lyrics.clear();
             effects.last_position = None;
             effects.recent_seek_jumps.clear();
         }
@@ -616,19 +622,43 @@ impl ControlHub {
     }
 
     fn observe_media_info(&self, id: u64, body: &[u8]) {
-        let identity = media_identity(body);
+        let Some(value) = media_info_value(body) else {
+            return;
+        };
+        let lyrics = media_lyrics(&value);
         let completions = {
             let Ok(mut effects) = self.remote_effects.lock() else {
                 return;
+            };
+            // Some music apps publish the active lyric as DISPLAY_TITLE and
+            // HyperOS copies it to mTitle. Caption-only updates are not tracks.
+            let title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
+            let cached_lyrics = lyrics.is_none()
+                && (is_lyric_caption(title, &effects.track_lyrics)
+                    || lyric_header(&effects.track_lyrics, "ti") == Some(title));
+            let omitted_id =
+                json_string_field(&value, &["mAudioId", "audioId", "mId", "id", "mediaId"])
+                    .is_none();
+            let same_lyrics = lyrics
+                .as_ref()
+                .is_some_and(|text| text == &effects.track_lyrics);
+            let identity = if omitted_id && (cached_lyrics || same_lyrics) {
+                effects.track_identity.clone()
+            } else {
+                media_track_id(&value, lyrics.as_deref()).0
             };
             let changed = identity
                 .as_ref()
                 .is_some_and(|identity| effects.track_identity.as_ref() != Some(identity));
             if changed {
                 effects.track_identity = identity;
+                effects.track_lyrics.clear();
                 effects.track_revision = effects.track_revision.wrapping_add(1);
                 effects.last_position = None;
                 effects.recent_seek_jumps.clear();
+            }
+            if let Some(lyrics) = lyrics {
+                effects.track_lyrics = lyrics;
             }
             let revision = effects.track_revision;
             drain_matching_effects(&mut effects, id, |expected| {
@@ -2267,26 +2297,168 @@ fn media_info_value(body: &[u8]) -> Option<Value> {
     Some(value)
 }
 
+#[cfg(test)]
 fn media_identity(body: &[u8]) -> Option<String> {
     let value = media_info_value(body)?;
-    let id =
-        json_string_field(&value, &["mAudioId", "audioId", "mId", "id", "mediaId"]).unwrap_or("");
-    let title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
-    let artist = json_string_field(&value, &["mArtist", "artist"]).unwrap_or("");
-    let album = json_string_field(&value, &["mAlbum", "album"]).unwrap_or("");
-    if id.is_empty() && title.is_empty() && artist.is_empty() && album.is_empty() {
+    let lyrics = media_lyrics(&value);
+    media_track_id(&value, lyrics.as_deref()).0
+}
+
+// Lyrics belong to the current media snapshot only. Bound the decoded text
+// before forwarding it to platform UIs, and never add it to diagnostic events.
+const MAX_LYRICS_BYTES: usize = 256 * 1024;
+const MAX_ENCODED_LYRICS_BYTES: usize = MAX_LYRICS_BYTES.div_ceil(3) * 4;
+
+fn media_lyrics(value: &Value) -> Option<String> {
+    if let Some(encoded) = json_string_field(value, &["mLrc"]) {
+        // HyperOS MediaMetaData.mLrc is Base64-encoded UTF-8, not literal LRC.
+        // An invalid encoded value must not become visible as gibberish lyrics.
+        if encoded.len() > MAX_ENCODED_LYRICS_BYTES {
+            return None;
+        }
+        let bytes = STANDARD
+            .decode(encoded)
+            .or_else(|_| STANDARD_NO_PAD.decode(encoded))
+            .ok()?;
+        if bytes.len() > MAX_LYRICS_BYTES {
+            return None;
+        }
+        let text = String::from_utf8(bytes).ok()?;
+        return (!text.trim().is_empty()).then_some(text);
+    }
+    // Explicit text aliases are used by non-Xiaomi callers. Do not guess that
+    // arbitrary untagged text is Base64; valid plain lyrics may look like it.
+    json_string_field(value, &["lrc", "lyrics"])
+        .filter(|text| text.len() <= MAX_LYRICS_BYTES)
+        .map(str::to_owned)
+}
+
+/// Read bounded LRC metadata without exposing platform UIs to diagnostic JSON.
+pub fn lyric_header<'a>(lyrics: &'a str, key: &str) -> Option<&'a str> {
+    if lyrics.len() > MAX_LYRICS_BYTES {
         return None;
     }
-    Some(format!("{id}\u{1f}{title}\u{1f}{artist}\u{1f}{album}"))
+    lyrics.lines().find_map(|line| {
+        let line = line.trim().trim_start_matches('\u{feff}');
+        let tag = line.strip_prefix('[')?.split_once(']')?.0;
+        let (name, text) = tag.split_once(':')?;
+        (name.eq_ignore_ascii_case(key) && !text.trim().is_empty()).then_some(text.trim())
+    })
+}
+
+/// Only an exact timed lyric row is a caption. Do not infer from short titles,
+/// punctuation, or frequently changing metadata alone.
+pub fn is_lyric_caption(title: &str, lyrics: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() || lyrics.len() > MAX_LYRICS_BYTES {
+        return false;
+    }
+    lyrics.lines().any(|line| {
+        let mut row = line.trim();
+        let mut timed = false;
+        while let Some(rest) = row.strip_prefix('[') {
+            let Some((tag, body)) = rest.split_once(']') else {
+                break;
+            };
+            let Some((minutes, seconds)) = tag.split_once(':') else {
+                break;
+            };
+            if minutes.is_empty()
+                || !minutes.bytes().all(|byte| byte.is_ascii_digit())
+                || seconds
+                    .parse::<f64>()
+                    .ok()
+                    .is_none_or(|value| !(0.0..60.0).contains(&value))
+            {
+                break;
+            }
+            row = body;
+            timed = true;
+        }
+        timed && row.trim() == title
+    })
+}
+
+fn metadata_identity(title: &str, artist: &str, album: &str) -> Option<String> {
+    if title.is_empty() && artist.is_empty() && album.is_empty() {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    for part in [title, artist, album] {
+        digest.update(part.trim().as_bytes());
+        digest.update([0]);
+    }
+    Some(format!(
+        "metadata:{}",
+        hex::encode(&digest.finalize()[..16])
+    ))
+}
+
+fn media_track_id(value: &Value, lyrics: Option<&str>) -> (Option<String>, &'static str) {
+    if let Some(id) = json_string_field(value, &["mAudioId", "audioId", "mId", "id", "mediaId"]) {
+        return (Some(id.to_owned()), "explicit");
+    }
+    let title = json_string_field(value, &["mTitle", "title"]).unwrap_or("");
+    let artist = json_string_field(value, &["mArtist", "artist"]).unwrap_or("");
+    let album = json_string_field(value, &["mAlbum", "album"]).unwrap_or("");
+    if let Some(lyrics) = lyrics {
+        if let Some(title) = lyric_header(lyrics, "ti") {
+            return (
+                metadata_identity(
+                    title,
+                    lyric_header(lyrics, "ar").unwrap_or(artist),
+                    lyric_header(lyrics, "al").unwrap_or(album),
+                ),
+                "lyrics_metadata",
+            );
+        }
+        // A headerless full document is still stable while mTitle is a caption.
+        return (
+            Some(format!(
+                "lyrics:{}",
+                hex::encode(&Sha256::digest(lyrics.as_bytes())[..16])
+            )),
+            "lyrics",
+        );
+    }
+    (metadata_identity(title, artist, album), "metadata")
 }
 
 fn emit_media_info(body: &[u8], events: &EventEmitter) {
     let Some(value) = media_info_value(body) else {
         return;
     };
-    let title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
-    let artist = json_string_field(&value, &["mArtist", "artist"]).unwrap_or("");
-    let album = json_string_field(&value, &["mAlbum", "album"]).unwrap_or("");
+    let lyrics = media_lyrics(&value);
+    let raw_title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
+    let caption = lyrics
+        .as_deref()
+        .is_some_and(|lyrics| is_lyric_caption(raw_title, lyrics));
+    let title = if caption || raw_title.is_empty() {
+        lyrics
+            .as_deref()
+            .and_then(|lyrics| lyric_header(lyrics, "ti"))
+            .unwrap_or("")
+    } else {
+        raw_title
+    };
+    let artist = if caption {
+        lyrics
+            .as_deref()
+            .and_then(|lyrics| lyric_header(lyrics, "ar"))
+    } else {
+        None
+    }
+    .or_else(|| json_string_field(&value, &["mArtist", "artist"]))
+    .unwrap_or("");
+    let album = if caption {
+        lyrics
+            .as_deref()
+            .and_then(|lyrics| lyric_header(lyrics, "al"))
+    } else {
+        None
+    }
+    .or_else(|| json_string_field(&value, &["mAlbum", "album"]))
+    .unwrap_or("");
     let duration_ms = json_u64_field(
         &value,
         &["mDuration", "duration", "durationMs", "duration_ms"],
@@ -2297,27 +2469,9 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
     // Treating that placeholder as authoritative repeatedly muted the native
     // audio gain after connection and after every metadata refresh. Receiver
     // volume is synchronized exclusively through SET_VOLUME / GET_VOLUME.
-    // Xiaomi's public MediaMetaData model serializes the stable song id as
-    // `mAudioId` (and older TV senders may use `mId`).  Falling back to a
-    // title-derived id is still useful for sources which omit both fields,
-    // but that fallback must not include duration: duration commonly arrives
-    // in a later partial update and previously made one song look like two.
-    let explicit_track_id =
-        json_string_field(&value, &["mAudioId", "audioId", "mId", "id", "mediaId"]);
-    let track_id = explicit_track_id.map(str::to_owned).or_else(|| {
-        if title.is_empty() && artist.is_empty() && album.is_empty() {
-            return None;
-        }
-        let mut digest = Sha256::new();
-        for identity_part in [title, artist, album] {
-            digest.update(identity_part.trim().as_bytes());
-            digest.update([0]);
-        }
-        Some(format!(
-            "metadata:{}",
-            hex::encode(&digest.finalize()[..16])
-        ))
-    });
+    // Stable song IDs have precedence. Header metadata/document identity must
+    // not vary when a sender uses the current lyric line as its display title.
+    let (track_id, track_id_source) = media_track_id(&value, lyrics.as_deref());
     let artwork = json_string_field(
         &value,
         &["mArt", "mCoverUrl", "artwork", "artworkUrl", "coverUrl"],
@@ -2328,6 +2482,8 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
         "event": "media_info",
         "source": "xiaomi",
         "track_id": track_id,
+        "track_id_source": track_id_source,
+        "title_is_lyric": caption,
         "title": title,
         "artist": artist,
         "album": album,
@@ -2337,6 +2493,7 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
             &["mPosition", "position", "positionMs", "position_ms"],
         ),
         "artwork": artwork,
+        "lyrics_text": lyrics,
         "metadata_change_type": json_u64_field(
             &value,
             &["mMetaChangeType", "metaChangeType"],
@@ -2417,13 +2574,13 @@ fn emit_playback(playing: bool, session_active: bool, events: &EventEmitter) {
 mod tests {
     use super::{
         ControlCipher, ControlHub, DeviceIdentity, FIRST_ENCRYPTED_NOTIFICATION_SEQUENCE,
-        GET_MEDIA_INFO, MOBILE_AUDIO_STREAMING_MODE_ACK, MediaAction, MediaControlOutcome, NOTIFY,
-        SAFETY_AUTH, SAFETY_AUTH_ACK, SAFETY_INFO, SAFETY_INFO_ACK, allocate_notification_sequence,
-        bind_control_listener, build_device_info, decode_playback_state, decode_volume_percent,
-        emit_media_info, empty_media_info_notification, encode_get_volume_ack,
-        encode_set_volume_ack, generate_auth_key, hmac_sha256_hex, parse_json_payload,
-        parse_wfd_url, read_frame, run_session, unwrap_payload, volume_notification, wrap_payload,
-        write_frame,
+        GET_MEDIA_INFO, MAX_LYRICS_BYTES, MOBILE_AUDIO_STREAMING_MODE_ACK, MediaAction,
+        MediaControlOutcome, NOTIFY, SAFETY_AUTH, SAFETY_AUTH_ACK, SAFETY_INFO, SAFETY_INFO_ACK,
+        allocate_notification_sequence, bind_control_listener, build_device_info,
+        decode_playback_state, decode_volume_percent, emit_media_info,
+        empty_media_info_notification, encode_get_volume_ack, encode_set_volume_ack,
+        generate_auth_key, hmac_sha256_hex, media_lyrics, parse_json_payload, parse_wfd_url,
+        read_frame, run_session, unwrap_payload, volume_notification, wrap_payload, write_frame,
     };
     use crate::MiPlayDeviceType;
     use crate::media::{EventEmitter, StreamKeys};
@@ -3518,6 +3675,163 @@ mod tests {
         );
         assert_eq!(events[0]["track_id"], events[1]["track_id"]);
         assert_eq!(events[1]["duration_ms"], 180_000);
+    }
+
+    #[test]
+    fn media_lyrics_decodes_bounded_utf8_and_keeps_text_aliases_literal() {
+        use base64::{
+            Engine as _,
+            engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+        };
+        let lyrics = "[00:01.25]Example line\n[00:03.00]第二句";
+        for encoded in [STANDARD.encode(lyrics), STANDARD_NO_PAD.encode(lyrics)] {
+            assert_eq!(
+                media_lyrics(&serde_json::json!({"mLrc": encoded})).as_deref(),
+                Some(lyrics)
+            );
+        }
+        assert_eq!(
+            media_lyrics(&serde_json::json!({"lrc": lyrics})).as_deref(),
+            Some(lyrics)
+        );
+        assert_eq!(
+            media_lyrics(&serde_json::json!({"lyrics": "Tune"})).as_deref(),
+            Some("Tune")
+        );
+        assert_eq!(
+            media_lyrics(&serde_json::json!({"mLrc": "", "lrc": lyrics})).as_deref(),
+            Some(lyrics)
+        );
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"mLrc": ""}),
+            serde_json::json!({"mLrc": "%%%"}),
+            serde_json::json!({"mLrc": "https://example.invalid/lyrics"}),
+            serde_json::json!({"mLrc": ["unsupported"]}),
+            serde_json::json!({"mLrc": {"text": "unsupported"}}),
+            serde_json::json!({"mLrc": STANDARD.encode([0xff, 0xfe])}),
+            serde_json::json!({"mLrc": STANDARD.encode(" \r\n")}),
+        ] {
+            assert!(media_lyrics(&value).is_none());
+        }
+        let limit = "a".repeat(MAX_LYRICS_BYTES);
+        assert_eq!(
+            media_lyrics(&serde_json::json!({"mLrc": STANDARD.encode(&limit)}))
+                .unwrap()
+                .len(),
+            MAX_LYRICS_BYTES
+        );
+        let oversized = "a".repeat(MAX_LYRICS_BYTES + 1);
+        assert!(media_lyrics(&serde_json::json!({"mLrc": STANDARD.encode(&oversized)})).is_none());
+        assert!(media_lyrics(&serde_json::json!({"lyrics": oversized})).is_none());
+    }
+
+    #[test]
+    fn media_info_forwards_decoded_lyrics_in_nested_and_partial_updates() {
+        let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let sink = Arc::clone(&recorded);
+        let events: EventEmitter = Arc::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+        emit_media_info(
+            br#"{"mediaInfoEx":{"mAudioId":"lyrics-track","mLrc":"WzAwOjAxLjAwXUV4YW1wbGU="}}"#,
+            &events,
+        );
+        emit_media_info(br#"{"mLrc":"","mPosition":2000}"#, &events);
+        let recorded = recorded.lock().unwrap();
+        assert_eq!(recorded[0]["track_id"], "lyrics-track");
+        assert_eq!(recorded[0]["lyrics_text"], "[00:01.00]Example");
+        assert!(recorded[1]["lyrics_text"].is_null());
+        assert!(recorded[1]["track_id"].is_null());
+    }
+
+    #[test]
+    fn lyric_captions_keep_explicit_ids_and_restore_canonical_metadata() {
+        let lyrics = "[ti:Synthetic Song]\n[ar:Synthetic Artist]\n[al:Synthetic Album]\n[00:01.00]First caption\n[00:03.00]Second caption";
+        assert!(super::is_lyric_caption("First caption", lyrics));
+        assert!(!super::is_lyric_caption("First", lyrics));
+        assert!(!super::is_lyric_caption("Synthetic Song", lyrics));
+        let recorded = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let sink = Arc::clone(&recorded);
+        let events: EventEmitter = Arc::new(move |event| {
+            sink.lock().unwrap().push(event);
+        });
+        for caption in ["First caption", "Second caption"] {
+            let value = serde_json::json!({"mAudioId":"stable-song", "mTitle":caption,
+                "mArtist":"Rendered description", "lyrics":lyrics});
+            let body = serde_json::to_vec(&value).unwrap();
+            emit_media_info(&body, &events);
+            assert_eq!(super::media_identity(&body).as_deref(), Some("stable-song"));
+        }
+        let recorded = recorded.lock().unwrap();
+        for event in recorded.iter() {
+            assert_eq!(event["track_id"], "stable-song");
+            assert_eq!(event["title"], "Synthetic Song");
+            assert_eq!(event["artist"], "Synthetic Artist");
+            assert_eq!(event["album"], "Synthetic Album");
+            assert_eq!(event["title_is_lyric"], true);
+        }
+        assert_eq!(
+            super::media_identity(br#"{"mAudioId":"stable-song","mTitle":"Another caption"}"#)
+                .as_deref(),
+            Some("stable-song")
+        );
+        assert_ne!(
+            super::media_identity(br#"{"mAudioId":"next-song","mTitle":"Another caption"}"#)
+                .as_deref(),
+            Some("stable-song")
+        );
+    }
+
+    #[test]
+    fn missing_id_uses_lyrics_identity_and_changes_for_a_real_new_song() {
+        for prefix in ["[ti:Synthetic Song]\n[ar:Artist]\n", ""] {
+            let lyrics = format!("{prefix}[00:01]First caption\n[00:03]Second caption");
+            let first =
+                serde_json::to_vec(&serde_json::json!({"mTitle":"First caption", "lyrics":lyrics}))
+                    .unwrap();
+            let second = serde_json::to_vec(
+                &serde_json::json!({"mTitle":"Second caption", "lyrics":lyrics}),
+            )
+            .unwrap();
+            assert_eq!(
+                super::media_identity(&first),
+                super::media_identity(&second)
+            );
+            let next = serde_json::to_vec(&serde_json::json!({"mTitle":"A new caption", "lyrics":"[ti:Next Song]\n[00:01]A new caption"})).unwrap();
+            assert_ne!(super::media_identity(&first), super::media_identity(&next));
+        }
+    }
+
+    #[test]
+    fn lyric_caption_refreshes_do_not_confirm_next_or_invalidate_seek_track() {
+        let (hub, _) = seek_confirmation_fixture();
+        let before = hub.remote_effects.lock().unwrap().track_revision;
+        hub.observe_media_info(
+            17,
+            br#"{"mAudioId":"track-a","mTitle":"A changing caption"}"#,
+        );
+        assert_eq!(hub.remote_effects.lock().unwrap().track_revision, before);
+        assert_eq!(
+            hub.remote_effects.lock().unwrap().last_position,
+            Some((17, 1_000))
+        );
+
+        hub.observe_media_info(17, br#"{"mTitle":"First caption","lyrics":"[ti:Synthetic]\n[00:01]First caption\n[00:03]Second caption"}"#);
+        let before = hub.remote_effects.lock().unwrap().track_revision;
+        let identity = hub.remote_effects.lock().unwrap().track_identity.clone();
+        hub.observe_media_info(17, br#"{"mTitle":"Second caption","mLrc":""}"#);
+        assert_eq!(hub.remote_effects.lock().unwrap().track_revision, before);
+        assert_eq!(hub.remote_effects.lock().unwrap().track_identity, identity);
+        assert!(!hub.remote_effects.lock().unwrap().track_lyrics.is_empty());
+        hub.observe_media_info(
+            17,
+            br#"{"mTitle":"Next caption","lyrics":"[ti:Next Synthetic]\n[00:01]Next caption"}"#,
+        );
+        assert_eq!(
+            hub.remote_effects.lock().unwrap().track_revision,
+            before + 1
+        );
     }
 
     #[test]
