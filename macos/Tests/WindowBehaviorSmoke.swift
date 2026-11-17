@@ -53,13 +53,22 @@ private final class FullScreenTestWindow: NSWindow {
         precondition(abs(contentSize().width - contentSize().height) < 1)
         // Enabling lyrics on the square mini expands once into a portrait.
         apply(square: false, request: 1, lyrics: true); settle(); assertFree()
-        precondition(contentSize().height > contentSize().width && window.contentMinSize.height == contentSize().width + 136)
+        precondition(contentSize().height > contentSize().width && window.contentMinSize.height == 260)
         // Subsequent updates must retain a manually chosen portrait size.
         window.setContentSize(NSSize(width: 360, height: 620))
         apply(square: false, request: 1, lyrics: true, pinned: true); settle(); assertFree()
         precondition(window.level == .floating && abs(contentSize().height - 620) < 1)
         apply(square: false, request: 2, lyrics: true); settle(); assertFree()
         precondition(contentSize().height > contentSize().width)
+        // An actual no-lyrics interval must not erase the manually expanded
+        // lyric pane when a later track starts supplying lyrics again.
+        window.setContentSize(NSSize(width: 360, height: 800))
+        apply(square: false, request: 2, lyrics: true); settle()
+        apply(square: true, request: 2, lyrics: false); settle()
+        precondition(contentSize() == NSSize(width: 360, height: 360))
+        apply(square: false, request: 2, lyrics: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 360, height: 800),
+                     "A no-lyrics gap replaced the user's lyric pane height with the default ratio")
 
         apply(square: true, request: 2); settle()
         precondition(window.contentAspectRatio == NSSize(width: 1, height: 1))
@@ -83,7 +92,7 @@ private final class FullScreenTestWindow: NSWindow {
         apply(square: false, request: 2, lyrics: true); settle(); assertFree()
         precondition(abs(contentSize().width - 590) < 1 && abs(contentSize().height - 800) < 1,
                      "Crossing the mini boundary unexpectedly replaced a valid user height")
-        precondition(window.contentMinSize.height == 726, "Lyrics minimum did not track cover width")
+        precondition(window.contentMinSize.height == 260, "Native minimum must stay independent of measured cover width")
         window.setContentSize(NSSize(width: 590, height: 400))
         apply(square: false, request: 2, lyrics: true); settle(); assertFree()
         precondition(abs(contentSize().height - 726) < 1,
@@ -105,7 +114,7 @@ private final class FullScreenTestWindow: NSWindow {
         settle(); assertFree()
         precondition(abs(contentSize().width - 360) < 1 && abs(contentSize().height - 500) < 1,
                      "Cold-launch lyrics changed the restored window height")
-        precondition(window.contentMinSize.height == 496)
+        precondition(window.contentMinSize.height == 260)
         window.setContentSize(NSSize(width: 365, height: 440))
         restoredCoordinator.update(view, policy: PlayerWindowBehavior(square: false, miniRequest: 0,
             miniLyrics: true, dimButtons: false, pinned: false, duration: 0))

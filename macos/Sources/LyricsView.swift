@@ -3,6 +3,7 @@ import SwiftUI
 
 /// A source-only lyric presentation. It never downloads or persists lyrics.
 struct LyricsView: View {
+    @Environment(\.appTypography) private var typography
     let document: LyricsDocument
     let positionMs: UInt64?
     let loading: Bool
@@ -17,7 +18,9 @@ struct LyricsView: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @Environment(\.colorSchemeContrast) private var contrast
     @State private var browsing = false
+    @GestureState private var dragging = false
     @State private var browsingRevision = 0
+    @State private var followRequestRevision: Int?
     @State private var followPosition = LyricsFollowPosition()
 
     private var activeIndex: Int? {
@@ -69,31 +72,18 @@ struct LyricsView: View {
                     .background {
                         LyricsScrollActivity { userBeganBrowsing() }
                     }
-                    .simultaneousGesture(DragGesture(minimumDistance: 6).onChanged { _ in userBeganBrowsing() })
+                    .simultaneousGesture(DragGesture(minimumDistance: 6)
+                        .updating($dragging) { _, dragging, _ in dragging = true }
+                        .onChanged { _ in userBeganBrowsing() })
+                    .onChange(of: dragging) { _, dragging in
+                        if !dragging && browsing { userBeganBrowsing() }
+                    }
                     .mask(LinearGradient(stops: [
                         .init(color: .clear, location: 0),
                         .init(color: .black, location: 0.09),
                         .init(color: .black, location: 0.91),
                         .init(color: .clear, location: 1)
                     ], startPoint: .top, endPoint: .bottom))
-                    .overlay(alignment: .bottomTrailing) {
-                        if browsing && document.isTimed {
-                            Button {
-                                browsing = false
-                                browsingRevision &+= 1
-                                follow(proxy, animated: true)
-                            } label: {
-                                Label(L("回到当前歌词"), systemImage: "arrow.uturn.backward")
-                                    .font(.system(size: compact ? 10 : 11, weight: .medium))
-                                    .padding(.horizontal, 10).padding(.vertical, 6)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                    .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 0.5))
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.bottom, 2).padding(.trailing, horizontalBleed)
-                            .transition(.opacity)
-                        }
-                    }
                     .onAppear {
                         DispatchQueue.main.async { follow(proxy, animated: false) }
                     }
@@ -108,13 +98,21 @@ struct LyricsView: View {
                     .onChange(of: document) { _, _ in
                         DispatchQueue.main.async { follow(proxy, animated: false) }
                     }
+                    .onChange(of: followRequestRevision) { _, revision in
+                        guard let revision, revision == browsingRevision, !browsing, !voiceOver else { return }
+                        // Resolve the target from the latest playback value,
+                        // not the view captured before the inactivity delay.
+                        follow(proxy, animated: true)
+                    }
                     .task(id: browsingRevision) {
                         guard browsing else { return }
-                        do { try await Task.sleep(nanoseconds: 6_000_000_000) }
+                        do { try await Task.sleep(nanoseconds: 5_000_000_000) }
                         catch { return }
-                        guard !Task.isCancelled else { return }
+                        // A held drag may be stationary for longer than the
+                        // delay. Its end starts a fresh inactivity countdown.
+                        guard !Task.isCancelled, !dragging else { return }
                         browsing = false
-                        if !voiceOver { follow(proxy, animated: true) }
+                        followRequestRevision = browsingRevision
                     }
                     .accessibilityElement(children: .contain)
                     .accessibilityLabel(L("歌词"))
@@ -128,14 +126,12 @@ struct LyricsView: View {
         }
         .onChange(of: connected) { _, connected in
             followPosition.observe(positionMs, connected: connected)
+            if !connected { resetBrowsing() }
         }
+        .onDisappear { resetBrowsing() }
         // Keep the reset outside the empty/nonempty branch: switching tracks
         // briefly clears the document while the next LRC is parsed.
-        .onChange(of: document) { _, _ in
-            browsing = false
-            browsingRevision &+= 1
-        }
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: browsing)
+        .onChange(of: document) { _, _ in resetBrowsing() }
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -143,20 +139,20 @@ struct LyricsView: View {
             if loading {
                 ProgressView().controlSize(.small).tint(.white.opacity(0.7))
                 Text(L("正在载入歌词…"))
+                    .font(typography.font(size: compact ? 13 : 15))
             } else {
                 Image(systemName: connected ? "quote.bubble" : "music.note")
                     .font(.system(size: compact ? 23 : 28, weight: .light))
                     .padding(.bottom, 3)
                 Text(L(connected ? "暂无歌词" : "等待你的音乐"))
-                    .fontWeight(.medium)
+                    .font(typography.font(size: compact ? 13 : 15, weight: .medium))
                 if connected {
                     Text(L("歌词由手机提供"))
-                        .font(.system(size: compact ? 11 : 12))
+                        .font(typography.font(size: compact ? 11 : 12))
                         .foregroundStyle(.white.opacity(0.45))
                 }
             }
         }
-        .font(.system(size: compact ? 13 : 15))
         .foregroundStyle(.white.opacity(0.65))
         .multilineTextAlignment(.center)
         .accessibilityElement(children: .combine)
@@ -168,8 +164,7 @@ struct LyricsView: View {
             // disables controls; changing Button to text can reset native scroll.
             Button {
                 guard canSeek else { return }
-                browsing = false
-                browsingRevision &+= 1
+                resetBrowsing()
                 seek(time)
             } label: { rowContent(line, index: index, width: width) }
                 .buttonStyle(LyricsRowButtonStyle())
@@ -196,18 +191,18 @@ struct LyricsView: View {
         return VStack(alignment: .leading, spacing: compact ? 5 : 7) {
             if line.text.isEmpty {
                 Text("•••")
-                    .font(.system(size: size, weight: .semibold))
+                    .font(typography.font(size: size, weight: .semibold))
                     .tracking(5)
                     .accessibilityLabel(L("歌词间隔"))
             } else {
                 Text(line.text)
-                    .font(.system(size: size, weight: .bold))
+                    .font(typography.font(size: size, weight: .bold))
                     .fixedSize(horizontal: false, vertical: true)
                     .lineSpacing(compact ? 1 : 3)
             }
             if let translation = line.translation, !translation.isEmpty {
                 Text(translation)
-                    .font(.system(size: compact ? max(12, size * 0.56) : size * 0.6, weight: .semibold))
+                    .font(typography.font(size: compact ? max(12, size * 0.56) : size * 0.6, weight: .semibold))
                     .opacity(0.78)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -236,9 +231,14 @@ struct LyricsView: View {
     }
 
     private func userBeganBrowsing() {
-        guard document.isTimed else { return }
+        guard document.isTimed, connected else { return }
         browsing = true
         browsingRevision &+= 1
+    }
+    private func resetBrowsing() {
+        browsing = false
+        browsingRevision &+= 1
+        followRequestRevision = nil
     }
     private func follow(_ proxy: ScrollViewProxy, animated: Bool) {
         // Unknown progress is not an instruction to jump to the first line.
@@ -285,7 +285,8 @@ private struct LyricsScrollActivity: NSViewRepresentable {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
                 guard let self, let window = self.window, event.window === window,
                       self.bounds.contains(self.convert(event.locationInWindow, from: nil)),
-                      event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 else { return event }
+                      event.scrollingDeltaX != 0 || event.scrollingDeltaY != 0 ||
+                        !event.phase.isEmpty || !event.momentumPhase.isEmpty else { return event }
                 self.onScroll?()
                 return event
             }

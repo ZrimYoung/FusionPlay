@@ -13,6 +13,11 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
     @Published var miniPlayerRequest = 0
+    private let displayMetadataCache = DisplayMetadataCache()
+    var correctedDisplayMetadata: DisplayMetadata {
+        guard let state = snapshot else { return DisplayMetadata(title: "", artist: "", album: "") }
+        return displayMetadataCache.resolve(title: state.title, artist: state.artist, album: state.album, lyricsText: state.lyricsText)
+    }
     @Published var snapshot: Snapshot?
     @Published private(set) var playbackTimeline = PlaybackTimeline()
     @Published private(set) var scrubbing = false
@@ -231,6 +236,12 @@ final class ReceiverModel: ObservableObject {
             }
         }
     }
+    func refreshDisplayPresentation() {
+        // Preview models have no receiver and must never register a real media
+        // session. A live paused session still needs immediate preference edits.
+        guard receiver != nil, let state = snapshot, !busy, !sleeping else { return }
+        systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, force: true)
+    }
     private func updateLyricsAvailability() {
         let available = LyricsAutoVisibility.resolve(hasLyrics: !lyrics.lines.isEmpty, loading: lyricsLoading,
                                                      previouslyVisible: lyricsAvailable)
@@ -243,13 +254,33 @@ final class ReceiverModel: ObservableObject {
         // Lyrics are transient media state. Parse only changed text, away from
         // the main/audio threads, and discard work belonging to an old track.
         let key = state.controlsAvailable ? (state.trackId.isEmpty ? state.title : state.trackId) : ""
-        if key != lyricsKey || !state.controlsAvailable {
-            lyricsTask?.cancel(); lyricsKey = key; lyricsSource = ""
+        let source = state.controlsAvailable ? state.lyricsText : ""
+        let changedTrack = key != lyricsKey
+        let waitingForMetadata = changedTrack && state.controlsAvailable && source.isEmpty && lyricsAvailable
+        if changedTrack || !state.controlsAvailable {
+            displayMetadataCache.reset()
+            lyricsTask?.cancel(); lyricsTask = nil; lyricsKey = key; lyricsSource = ""
             lyrics = LyricsDocument(""); lyricsLoading = false
         }
-        let source = state.controlsAvailable ? state.lyricsText : ""
+        if waitingForMetadata {
+            // A track's identity can arrive before its lyric metadata. Clear the
+            // old words immediately, but retain the visible pane for at most two
+            // seconds. Repeated empty updates must not restart that deadline.
+            lyricsLoading = true
+            lyricsTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                catch { return }
+                guard !Task.isCancelled, let self, !self.terminating,
+                      self.lyricsKey == key, self.lyricsSource.isEmpty else { return }
+                self.lyricsTask = nil; self.lyricsLoading = false
+                self.updateLyricsAvailability()
+            }
+            return
+        }
+        // This guard follows the new-track waiting branch: both empty strings
+        // compare equal even when a fresh metadata grace period is needed.
         guard source != lyricsSource else { return }
-        lyricsSource = source; lyricsTask?.cancel()
+        lyricsSource = source; lyricsTask?.cancel(); lyricsTask = nil
         guard !source.isEmpty else { lyrics = LyricsDocument(""); lyricsLoading = false; return }
         lyricsLoading = true
         lyricsTask = Task { [weak self] in

@@ -19,7 +19,7 @@ import SwiftUI
         defaults.removeObject(forKey: "appLanguage")
         defaults.setVolatileDomain(["settingsSidebarVisible": true, "appLanguage": "zh-Hans"],
                                   forName: UserDefaults.registrationDomain)
-        defaults.setVolatileDomain(["ApplePersistenceIgnoreState": true, "NSQuitAlwaysKeepsWindows": false],
+        defaults.setVolatileDomain(["ApplePersistenceIgnoreState": true, "NSQuitAlwaysKeepsWindows": false, "uiFontFamily": "", "uiFontWeight": 400],
                                   forName: UserDefaults.argumentDomain)
         let state = Snapshot(phase: .ready, title: "", artist: "", album: "", trackId: "", artworkUrl: "",
             lyricsText: "", durationMs: nil, positionMs: nil, controlsAvailable: false, volume: 50,
@@ -31,10 +31,12 @@ import SwiftUI
     var body: some Scene {
         Window("FusionPlay Toolbar Check", id: "toolbar-check") {
             SettingsPanel(model: model)
+                .appTypography()
                 .environment(\.locale, Locale(identifier: language))
                 .background(ToolbarWindowProbe().frame(width: 0, height: 0))
         }.defaultSize(width: 820, height: 620)
             .windowResizability(.contentMinSize)
+            .windowToolbarStyle(.unified(showsTitle: false))
             .commands { PlayerFullScreenCommands() }
     }
 }
@@ -42,7 +44,7 @@ import SwiftUI
 final class ToolbarSmokeDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 45) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 55) {
             FileHandle.standardError.write(Data("FAIL: native toolbar check timed out\n".utf8))
             exit(1)
         }
@@ -79,8 +81,28 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
             }
             precondition(fullScreenShortcuts(in: NSApp.mainMenu).count == 1,
                          "Fullscreen shortcut missing or duplicated in the actual SwiftUI menu")
+            // Cancel before the newly created task gets its first actor turn.
+            // An obsolete request must not make an already settled header clear.
+            let cancelledMotion = SettingsNavigationMotion(expanded: true)
+            cancelledMotion.move(to: false, reduceMotion: false)
+            cancelledMotion.settle(expanded: true)
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            precondition(cancelledMotion.layoutExpanded && cancelledMotion.headerExpanded
+                         && cancelledMotion.headerOpacity == 1 && cancelledMotion.sidebarOpacity == 1
+                         && !cancelledMotion.isTransitioning, "Cancelled motion changed a settled header")
+            cancelledMotion.move(to: false, reduceMotion: true)
+            precondition(!cancelledMotion.layoutExpanded && !cancelledMotion.headerExpanded
+                         && cancelledMotion.headerOpacity == 1 && cancelledMotion.sidebarOpacity == 0
+                         && !cancelledMotion.isTransitioning, "Reduce Motion must settle synchronously")
+            cancelledMotion.move(to: true, reduceMotion: false)
+            cancelledMotion.move(to: false, reduceMotion: true)
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            precondition(!cancelledMotion.layoutExpanded && !cancelledMotion.headerExpanded
+                         && cancelledMotion.headerOpacity == 1 && !cancelledMotion.isTransitioning,
+                         "A cancelled task overrode the latest Reduce Motion target")
             var observations: [[String: Any]] = []
             var screenshots: [[String: Any]] = []
+            var waits: [[String: Any]] = []
             var expectedPage = 0
             var expectedLanguage = "zh-Hans"
             func expectedNames() -> [String] {
@@ -103,8 +125,13 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
             func sidebarTable() -> NSTableView? {
                 find(NSTableView.self, in: window.contentView) { $0.numberOfRows == ReceiverSettingsPage.allCases.count }
             }
-            func viewportWidth() -> CGFloat {
-                find(NSView.self, in: window.contentView) { $0.identifier?.rawValue == "fusionplay.settings.sidebar.viewport" }?.bounds.width ?? -1
+            func sidebarMarker() -> NSView? {
+                find(NSView.self, in: window.contentView) { $0.identifier?.rawValue == "fusionplay.settings.sidebar.viewport" }
+            }
+            func viewportWidth() -> CGFloat { sidebarMarker()?.bounds.width ?? -1 }
+            func motionState() -> String? {
+                guard let marker = sidebarMarker(), marker.responds(to: NSSelectorFromString("accessibilityValue")) else { return nil }
+                return marker.value(forKey: "accessibilityValue") as? String
             }
             func titleLabel() -> NSTextField? {
                 find(NSTextField.self, in: items("fusionplay.settings.title").first?.view) {
@@ -122,10 +149,27 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
             func ancestorRecords(_ view: NSView?) -> [[String: Any]] {
                 var result: [[String: Any]] = []; var current = view
                 while let view = current, result.count < 12 {
-                    result.append(["class": String(describing: type(of: view)), "frame": NSStringFromRect(view.frame)])
+                    var info: [String: Any] = ["class": String(describing: type(of: view)),
+                        "frame": NSStringFromRect(view.frame), "bounds": NSStringFromRect(view.bounds),
+                        "alpha": view.alphaValue, "hidden": view.isHidden]
+                    if let material = view as? NSVisualEffectView {
+                        info["material"] = material.material.rawValue
+                        info["blendingMode"] = material.blendingMode.rawValue
+                        info["materialState"] = material.state.rawValue
+                    }
+                    result.append(info)
                     current = view.superview
                 }
                 return result
+            }
+            func windowGeometry() -> [String: Any] {
+                ["windowFrame": NSStringFromRect(window.frame),
+                 "contentViewFrame": window.contentView.map { NSStringFromRect($0.frame) } as Any? ?? NSNull(),
+                 "contentViewBounds": window.contentView.map { NSStringFromRect($0.bounds) } as Any? ?? NSNull(),
+                 "contentLayoutRect": NSStringFromRect(window.contentLayoutRect),
+                 "styleMask": window.styleMask.rawValue, "titleVisibility": window.titleVisibility.rawValue,
+                 "titlebarAppearsTransparent": window.titlebarAppearsTransparent,
+                 "sidebarMarkerAncestors": ancestorRecords(sidebarMarker())]
             }
             func capture(_ state: String) async {
                 // This public API restricts enumeration to content available to
@@ -135,6 +179,9 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                     screenshots.append(["state": state, "captured": false, "reason": "requires-macos-14.4"])
                     return
                 }
+                let requestedAt = ProcessInfo.processInfo.systemUptime
+                let motionBefore = motionState()
+                let geometryBefore = windowGeometry()
                 do {
                     let content = try await SCShareableContent.currentProcess
                     guard let ownWindow = content.windows.first(where: {
@@ -158,7 +205,10 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                     let destination = root.appendingPathComponent("settings-toolbar-window-" + state + ".png")
                     try png.write(to: destination, options: .atomic)
                     screenshots.append(["state": state, "captured": true, "path": destination.path,
-                        "width": image.width, "height": image.height])
+                        "width": image.width, "height": image.height,
+                        "elapsedMs": (ProcessInfo.processInfo.systemUptime - requestedAt) * 1000,
+                        "motionBefore": motionBefore as Any? ?? NSNull(), "motionAfter": motionState() as Any? ?? NSNull(),
+                        "geometryBefore": geometryBefore, "geometryAfter": windowGeometry()])
                     print("Captured own native window: \(destination.lastPathComponent) \(image.width)x\(image.height)")
                 } catch {
                     let error = error as NSError
@@ -174,12 +224,15 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                 var record: [String: Any] = ["stage": stage, "language": expectedLanguage, "expectedPage": expectedPage,
                     "expanded": expanded as Any? ?? NSNull(), "items": window.toolbar?.items.map(\.itemIdentifier.rawValue) ?? [],
                     "sidebarItems": sideCount, "sidebarWidth": width, "titleItems": titles.count, "pageItems": pageItems.count,
-                    "sidebarSelectedRow": sidebarTable()?.selectedRow as Any? ?? NSNull(), "windowWidth": window.frame.width]
+                    "sidebarSelectedRow": sidebarTable()?.selectedRow as Any? ?? NSNull(),
+                    "sidebarRows": sidebarTable()?.numberOfRows as Any? ?? NSNull(), "windowWidth": window.frame.width,
+                    "motionState": motionState() as Any? ?? NSNull(), "windowGeometry": windowGeometry()]
                 // SwiftUI can retain an outgoing toolbar item during transition;
                 // stable states below must have exactly one navigation form.
                 var valid = window.toolbar != nil && sideCount == 1 && titles.count <= 1 && pageItems.count <= 1
                     && window.titleVisibility == .hidden
                 if let expanded {
+                    valid = valid && motionState() == "settled"
                     if expanded {
                         var plainAndAligned = false
                         if let label, let parent = label.superview, let buttonEnd = sidebarControlMaxX() {
@@ -232,7 +285,7 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
             }
             func finish(_ success: Bool, _ message: String) -> Never {
                 let output = ProcessInfo.processInfo.environment["FUSIONPLAY_TOOLBAR_CHECK_OUTPUT"]!
-                let result: [String: Any] = ["passed": success, "message": message, "observations": observations, "screenshots": screenshots]
+                let result: [String: Any] = ["passed": success, "message": message, "observations": observations, "screenshots": screenshots, "waits": waits, "modelCancellationAndReduceMotion": "passed"]
                 if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
                     try? data.write(to: URL(fileURLWithPath: output), options: .atomic)
                 }
@@ -251,16 +304,51 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                     isARepeat: false, keyCode: 1) else { return false }
                 return window.performKeyEquivalent(with: event)
             }
-            func settle() async { try? await Task.sleep(nanoseconds: 300_000_000) }
-            func setExpanded(_ expanded: Bool) async {
-                let current = UserDefaults.standard.bool(forKey: "settingsSidebarVisible")
-                if current != expanded {
-                    guard toggle() else { finish(false, "Cannot activate the actual sidebar control") }
-                    await settle()
+            func headerReady(_ expanded: Bool) -> Bool {
+                guard motionState() == "settled", sidebarItems().count == 1 else { return false }
+                if expanded {
+                    guard viewportWidth() >= 170, items("fusionplay.settings.title").count == 1,
+                          items("fusionplay.settings.pages").isEmpty, let label = titleLabel(),
+                          label.stringValue == expectedNames()[expectedPage] else { return false }
+                    return label.window === window && label.bounds.width >= 4 + ceil((label.stringValue as NSString).size(
+                        withAttributes: [.font: label.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)]).width)
                 }
+                guard viewportWidth() <= 0.5, items("fusionplay.settings.title").isEmpty,
+                      items("fusionplay.settings.pages").count == 1, let control = tabs(), control.segmentCount == 4 else { return false }
+                return control.selectedSegment == expectedPage
+                    && (0..<4).map { control.label(forSegment: $0) ?? "" } == expectedNames()
             }
-            guard sample("initial", expanded: true) else { finish(false, "Initial sidebar/title state incorrect") }
+            func settle(expanded: Bool? = nil, timeout: TimeInterval = 2.5) async {
+                let target = expanded ?? UserDefaults.standard.bool(forKey: "settingsSidebarVisible")
+                let start = ProcessInfo.processInfo.systemUptime
+                var readySamples = 0
+                while ProcessInfo.processInfo.systemUptime - start < timeout {
+                    guard sidebarItems().count == 1, items("fusionplay.settings.title").count <= 1,
+                          items("fusionplay.settings.pages").count <= 1 else {
+                        _ = sample("wait-duplicate-toolbar")
+                        finish(false, "Duplicate toolbar navigation while waiting for motion")
+                    }
+                    readySamples = headerReady(target) ? readySamples + 1 : 0
+                    if readySamples >= 2 {
+                        waits.append(["expanded": target, "elapsedMs": (ProcessInfo.processInfo.systemUptime - start) * 1000,
+                            "motionState": motionState() as Any? ?? NSNull(), "sidebarWidth": viewportWidth()])
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 30_000_000)
+                }
+                _ = sample("motion-timeout")
+                finish(false, "Sidebar motion did not settle with the requested width/header in \(timeout) seconds")
+            }
+            func setExpanded(_ expanded: Bool) async {
+                if UserDefaults.standard.bool(forKey: "settingsSidebarVisible") != expanded {
+                    guard toggle() else { finish(false, "Cannot activate the actual sidebar control") }
+                }
+                await settle(expanded: expanded)
+            }
+            await settle(expanded: true)
+            let initialValid = sample("initial", expanded: true)
             await capture("expanded")
+            guard initialValid else { finish(false, "Initial sidebar/title state incorrect") }
             for cycle in 1...3 {
                 guard toggle() else { finish(false, "Cannot collapse sidebar") }
                 var previousWidth: CGFloat = 173
@@ -269,9 +357,16 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                     let current = viewportWidth()
                     guard current >= 0 && current <= previousWidth + 1.5 else { finish(false, "Sidebar reversed while collapsing") }
                     previousWidth = current
-                    guard sample("collapsing-\(cycle)-\(frame)") else { finish(false, "Duplicate navigation item during collapse") }
+                    guard sample("collapsing-\(cycle)-\(frame)") else { finish(false, "Native toolbar invariant failed during collapse") }
                 }
-                await settle()
+                if cycle == 1 {
+                    // Request a compositor image near the header handoff. Record
+                    // before/after marker state so a late image cannot be called
+                    // an intermediate frame accidentally.
+                    try? await Task.sleep(nanoseconds: 170_000_000)
+                    await capture("transition")
+                }
+                await settle(expanded: false)
                 guard sample("collapsed-\(cycle)", expanded: false) else { finish(false, "Collapsed tabs state incorrect") }
                 if cycle == 1 { await capture("collapsed") }
                 guard toggle() else { finish(false, "Cannot expand sidebar") }
@@ -281,9 +376,9 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                     let current = viewportWidth()
                     guard current >= previousWidth - 1.5 && current <= 174 else { finish(false, "Sidebar reversed while expanding") }
                     previousWidth = current
-                    guard sample("expanding-\(cycle)-\(frame)") else { finish(false, "Duplicate navigation item during expansion") }
+                    guard sample("expanding-\(cycle)-\(frame)") else { finish(false, "Native toolbar invariant failed during expansion") }
                 }
-                await settle()
+                await settle(expanded: true)
                 guard sample("expanded-\(cycle)", expanded: true) else { finish(false, "Expanded title state incorrect") }
             }
             // Exercise actual NSSegmentedControl actions and then reopen the
@@ -318,7 +413,36 @@ private struct ToolbarWindowProbe: NSViewRepresentable {
                 await setExpanded(true)
                 if language == "en" { await capture("en-expanded") }
             }
-            finish(true, "One sidebar control; mutually exclusive title/tabs; native four-page selection preserved in both languages and window widths")
+            // Keep the selected page across reversals in each motion phase.
+            // These are real repeated actions; obsolete phase completions must
+            // never replace the latest target/header or duplicate toolbar items.
+            for startExpanded in [true, false] {
+                for delayMs in [40, 180, 400] {
+                    await setExpanded(startExpanded)
+                    guard toggle() else { finish(false, "Cannot begin rapid reversal") }
+                    try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+                    guard sample("rapid-\(startExpanded)-\(delayMs)-outgoing") else { finish(false, "Native toolbar invariant failed during rapid motion") }
+                    guard toggle() else { finish(false, "Cannot reverse an in-flight sidebar motion") }
+                    await settle(expanded: startExpanded)
+                    guard sample("rapid-\(startExpanded)-\(delayMs)-settled", expanded: startExpanded) else {
+                        finish(false, "A superseded motion changed the final header/page")
+                    }
+                    if startExpanded && sidebarTable()?.selectedRow != expectedPage { finish(false, "Selection lost after rapid reversal") }
+                }
+            }
+            await setExpanded(true)
+            for press in 0..<5 {
+                guard toggle() else { finish(false, "Sidebar control stopped accepting rapid actions") }
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                guard sample("rapid-burst-\(press)") else { finish(false, "Native toolbar invariant failed during rapid burst") }
+            }
+            await settle(expanded: false)
+            guard sample("rapid-burst-final", expanded: false) else { finish(false, "Rapid burst did not preserve latest target/page") }
+            await setExpanded(true)
+            guard sample("rapid-restored", expanded: true), sidebarTable()?.selectedRow == expectedPage else {
+                finish(false, "Selected page was lost after rapid burst")
+            }
+            finish(true, "One sidebar control; staged motion settles at the latest target; four-page selection survives reversals, both languages and window widths")
         }
     }
 }

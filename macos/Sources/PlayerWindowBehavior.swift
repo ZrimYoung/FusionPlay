@@ -33,6 +33,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
         private var lastLyricsPreference: Bool?
         private var expandLyricsAfterResize = false
         private var lastMiniRequest = 0
+        private var preferredLyricsPaneHeight: CGFloat?
 
         func update(_ view: WindowAttachmentView, policy: PlayerWindowBehavior) {
             self.view = view
@@ -51,6 +52,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             fullScreenTransition = false; fullScreenTransitionGeneration &+= 1
             appliedSquare = nil; appliedDimButtons = nil; normalizeSquareAfterResize = false
             lastLyricsPreference = nil; expandLyricsAfterResize = false
+            preferredLyricsPaneHeight = nil
             if let window {
                 windowObservers.append(NotificationCenter.default.addObserver(
                     forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main
@@ -109,6 +111,12 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 self.apply(policy, to: window)
             }
         }
+        private func rememberLyricsPane(in window: NSWindow) {
+            guard !window.inLiveResize else { return }
+            let content = window.contentRect(forFrameRect: window.frame).size
+            guard content.width < 600, content.height >= content.width + 136 else { return }
+            preferredLyricsPaneHeight = content.height - content.width
+        }
         private func apply(_ policy: PlayerWindowBehavior, to window: NSWindow) {
             let fullScreen = fullScreenTransition || window.styleMask.contains(.fullScreen)
             window.level = !fullScreen && policy.pinned ? .floating : .normal
@@ -140,6 +148,10 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 releaseFullScreenSizing(window)
                 return
             }
+            // Capture the user's lyric area before a no-lyrics transition can
+            // normalize the cover to a square. Keep its height independent of
+            // whether the next track sends its metadata immediately.
+            if lastLyricsPreference == true { rememberLyricsPane(in: window) }
             let enabledLyrics = lastLyricsPreference == false && policy.miniLyrics
             lastLyricsPreference = policy.miniLyrics
             if policy.miniRequest > 0 && lastMiniRequest != policy.miniRequest {
@@ -151,6 +163,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 let desiredHeight = policy.miniLyrics ? lyricHeight(width: side, window: window) : side
                 window.setContentSize(NSSize(width: side, height: desiredHeight))
                 normalizeSquareAfterResize = false
+                if policy.miniLyrics { rememberLyricsPane(in: window) }
                 window.makeKeyAndOrderFront(nil)
                 return
             }
@@ -191,22 +204,26 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 let width = max(260, content.width)
                 window.setContentSize(NSSize(width: width, height: width))
             }
+            if miniLyrics { rememberLyricsPane(in: window) }
         }
         @discardableResult private func applyMinimumSize(lyrics: Bool, width: CGFloat, window: NSWindow) -> CGFloat {
             let height = lyrics ? width + 136 : 260
-            let minimum = NSSize(width: 260, height: height)
+            // The Window scene owns the fixed 260-point native minimum.
+            // Do not publish a second width-dependent contentMinSize here:
+            // SwiftUI restores its own minimum on subsequent media updates.
+            // Enforce the square-cover lyric area by clamping actual geometry
+            // after a resize instead, outside AppKit's measurement pass.
+            let minimum = NSSize(width: 260, height: 260)
             let chrome = max(0, window.frame.height - window.contentLayoutRect.height)
-            // SwiftUI may include the embedded titlebar in its measured lower
-            // bound. Accept that small inset instead of repeatedly fighting it.
-            if window.contentMinSize.width != minimum.width || window.contentMinSize.height < height
-                || window.contentMinSize.height > height + chrome {
+            if window.contentMinSize.width != minimum.width || window.contentMinSize.height < minimum.height
+                || window.contentMinSize.height > minimum.height + chrome {
                 window.contentMinSize = minimum
             }
             return height
         }
         private func lyricHeight(width: CGFloat, window: NSWindow) -> CGFloat {
             let minimum = width + 136
-            let preferred = max(minimum, width * 1.65)
+            let preferred = max(minimum, preferredLyricsPaneHeight.map { width + $0 } ?? width * 1.65)
             let available = window.screen.map { max(minimum, $0.visibleFrame.height - 48) } ?? preferred
             return min(preferred, available)
         }

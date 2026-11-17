@@ -137,3 +137,17 @@
 "切换全屏" = "Toggle Full Screen";
 
 "设置导航" = "Settings navigation";
+
+"播放控制" = "Playback Controls";
+
+"进度与时间" = "Progress and Time";
+
+"置顶按钮" = "Pin Button";
+
+"Dock 图标" = "Dock Icon";
+
+"菜单栏图标" = "Menu Bar Icon";
+
+"修正歌词标题" = "Correct Lyric Titles";
+
+"手机用歌词更新歌名时，尝试恢复真实歌名；无法确认时保留原始信息。" = "Try to restore the track title when your phone replaces it with lyrics. Keep the original information when it cannot be verified.";

@@ -2,6 +2,7 @@ import SwiftUI
 
 // Shared by the menu and both player layouts. Only drag preview/pending UI is local.
 struct PlaybackProgressView: View {
+    @Environment(\.appTypography) private var typography
     @ObservedObject var model: ReceiverModel
     var showsTime = true
     var menu = false
@@ -39,8 +40,7 @@ struct PlaybackProgressView: View {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
                     Capsule().fill(menu ? Color.primary.opacity(0.1) : Color.white.opacity(0.18))
-                    Capsule().fill(fill).frame(width: max(0, geometry.size.width * fraction))
-                        .transaction { $0.animation = nil } // Keep the fill's left edge fixed on backward seeks.
+                    PlaybackProgressFill(fraction: fraction).fill(fill)
                 }.frame(height: 3).frame(maxHeight: .infinity)
                     .contentShape(Rectangle())
                     .gesture(DragGesture(minimumDistance: 0)
@@ -65,7 +65,7 @@ struct PlaybackProgressView: View {
                     Text(PlayerAppearance.time(displayPosition))
                     Spacer()
                     Text(PlayerAppearance.time(observation?.duration))
-                }.font(.system(size: 10).monospacedDigit()).foregroundStyle(.white.opacity(0.6))
+                }.font(typography.font(size: 10).monospacedDigit()).foregroundStyle(.white.opacity(0.6))
             }
         }.frame(height: showsTime ? 36 : 18, alignment: .top)
             .allowsHitTesting(visible).accessibilityHidden(!visible)
@@ -102,5 +102,16 @@ struct PlaybackProgressView: View {
     private func finishDrag() {
         dragFraction = nil; dragSource = nil; rejectedDrag = false
         model.setScrubbing(interactionID, false)
+    }
+}
+
+/// Both tracks share one layout rectangle. Only layout changes animate; the
+/// fraction is deliberately not animatable, so playback ticks and seeks snap.
+private struct PlaybackProgressFill: Shape {
+    let fraction: Double
+
+    func path(in rect: CGRect) -> Path {
+        let width = rect.width * min(1, max(0, fraction))
+        return Capsule().path(in: CGRect(x: rect.minX, y: rect.minY, width: width, height: rect.height))
     }
 }

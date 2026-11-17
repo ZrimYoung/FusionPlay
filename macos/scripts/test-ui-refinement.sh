@@ -13,6 +13,6 @@ xcrun swiftc -D FUSIONPLAY_UI_CHECKS -swift-version 5 -parse-as-library -target 
   -L "$PROJECT/artifacts/FusionPlay Mac.app/Contents/Frameworks" -lfusionplay_host \
   -Xlinker -rpath -Xlinker "$PROJECT/artifacts/FusionPlay Mac.app/Contents/Frameworks" \
   -framework SwiftUI -framework AppKit -framework MediaPlayer \
-  "$GENERATED/FusionPlayBridge.swift" "$REPO"/macos/Sources/*.swift "$REPO/macos/Tests/UIRefinementSmoke.swift" \
+  "$GENERATED/FusionPlayBridge.swift" "$REPO"/macos/Sources/*.swift "$REPO/macos/Tests/UIRefinementSmoke.swift" "$REPO/macos/Tests/LyricsMetadataGapChecks.swift" \
   -o "$CHECK/Contents/MacOS/UIRefinementCheck"
 "$CHECK/Contents/MacOS/UIRefinementCheck" "$PROJECT/artifacts/ui-refinement-check"

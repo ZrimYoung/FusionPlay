@@ -13,12 +13,13 @@ struct MediaPresentation: Equatable {
     let position: Double?
     let playing: Bool
 
-    init?(_ state: Snapshot, previouslyActive: Bool = false) {
+    init?(_ state: Snapshot, previouslyActive: Bool = false, metadata: DisplayMetadata? = nil) {
         guard state.controlsAvailable,
               state.phase == .playing || state.phase == .paused ||
                 (previouslyActive && state.phase == .connected) else { return nil }
-        title = state.title.isEmpty ? "手机投送" : state.title
-        artist = state.artist; album = state.album; trackID = state.trackId
+        let labels = metadata ?? DisplayMetadata(title: state.title, artist: state.artist, album: state.album)
+        title = labels.title.isEmpty ? "手机投送" : labels.title
+        artist = labels.artist; album = labels.album; trackID = state.trackId
         artworkURL = state.artworkUrl
         let durationSeconds = state.durationMs.map { Double($0) / 1000 }
         duration = durationSeconds
@@ -66,6 +67,7 @@ final class SystemMediaController {
     private let gate = MediaCommandGate()
     private var targets: [(MPRemoteCommand, Any)] = []
     private var last: MediaPresentation?
+    private let displayMetadataCache = DisplayMetadataCache()
     private var active = false
 
     init(send: @escaping @MainActor (PlaybackCommand) -> Void) {
@@ -97,7 +99,11 @@ final class SystemMediaController {
         let enabled = state.controlsAvailable && !busy
         gate.update(enabled: enabled, playing: state.phase == .playing)
         for (command, _) in targets { command.isEnabled = enabled }
-        guard let presentation = MediaPresentation(state, previouslyActive: active) else {
+        let labels: DisplayMetadata?
+        if UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles") {
+            labels = displayMetadataCache.resolve(title: state.title, artist: state.artist, album: state.album, lyricsText: state.lyricsText)
+        } else { displayMetadataCache.reset(); labels = nil }
+        guard let presentation = MediaPresentation(state, previouslyActive: active, metadata: labels) else {
             clear(); return
         }
         guard force || last != presentation else { return }
@@ -110,6 +116,7 @@ final class SystemMediaController {
         last = presentation; active = true
     }
     func clear() {
+        displayMetadataCache.reset()
         gate.update(enabled: false, playing: false)
         for (command, _) in targets { command.isEnabled = false }
         if active { center.playbackState = .stopped; center.nowPlayingInfo = nil }
