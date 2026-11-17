@@ -83,7 +83,9 @@ struct PlaybackProgressView: View {
             }
             .help(PlayerAppearance.time(displayPosition) + " / " + PlayerAppearance.time(observation?.duration) + " · " + L("点击或拖动跳转，松手后发送到手机"))
             .onChange(of: observation?.trackID) { _, _ in invalidateDrag() }
-            .onChange(of: observation?.title) { _, _ in invalidateDrag() }
+            .onChange(of: observation?.title) { _, _ in
+                if observation?.trackID.isEmpty != false { invalidateDrag() }
+            }
             .onChange(of: observation?.duration) { _, _ in invalidateDrag() }
             .onChange(of: observation?.connected) { _, _ in invalidateDrag() }
             .onChange(of: visible) { _, shown in if !shown { invalidateDrag() } }

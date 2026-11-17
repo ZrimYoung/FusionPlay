@@ -47,6 +47,24 @@ import Foundation
         _ = timeline.begin(target: 120_000, now: 30)
         source.position = 120_000; timeline.observe(source, now: 30.1)
         precondition(!timeline.isPending && !source.playing)
+        var captions = PlaybackTimeline()
+        source.trackID = "stable"; source.title = "First caption"; source.position = 10_000
+        source.playing = true
+        captions.observe(source, now: 0)
+        _ = captions.begin(target: 50_000, now: 0.1)
+        source.title = "Second caption"; source.position = 11_000
+        captions.observe(source, now: 1)
+        precondition(captions.isPending && captions.displayPosition(now: 1) == 50_000,
+                     "A caption change with a stable ID reset the pending seek")
+        source.trackID = "different"
+        captions.observe(source, now: 1.1)
+        precondition(!captions.isPending, "A real ID change retained the old seek")
+        source.trackID = ""; source.title = "Fallback A"
+        captions.observe(source, now: 2)
+        _ = captions.begin(target: 30_000, now: 2.1)
+        source.title = "Fallback B"
+        captions.observe(source, now: 2.2)
+        precondition(!captions.isPending, "Title-only track changes must still cancel the old seek")
         print("PASS: shared seek feedback, timeout, stale completion, same-track confirmation, natural ticks, backward seek, pause, disconnect and bounds")
     }
 }
