@@ -21,7 +21,7 @@ internal sealed class TrayWindow : Window
 {
     private readonly ReceiverController model;
     private const double PanelWidth = 340;
-    private const double HeaderInset = 4, HeaderGap = 12, VolumeWidth = 104;
+    private const double HeaderInset = 12, HeaderGap = 12, VolumeWidth = 104;
     private readonly StackPanel root;
     private readonly StackPanel trackColumn = new() { Name = "TrackColumn", Spacing = 6, VerticalAlignment = VerticalAlignment.Top };
     private readonly Image cover = new() { Name = "AlbumCover", Stretch = Stretch.UniformToFill, IsHitTestVisible = false };
@@ -56,7 +56,7 @@ internal sealed class TrayWindow : Window
         {
             root.Background = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
         }
-        var top = new Grid { ColumnSpacing = HeaderGap };
+        var top = new Grid { Name = "TrayHeader", ColumnSpacing = HeaderGap };
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var art = new Grid();
@@ -97,7 +97,7 @@ internal sealed class TrayWindow : Window
         volumeViewport.SizeChanged += (_, _) => volumeClip.Rect = new Rect(0, 0, volumeViewport.ActualWidth, 28);
         MainWindow.AttachVolume(volume, model);
         volume.ValueChanged += (_, args) => { if (!rendering) model.EditVolume(args.NewValue); };
-        var footer = new Grid { ColumnSpacing = 8, Margin = new Thickness(8, 0, 8, 4) };
+        var footer = new Grid { Name = "TrayFooter", ColumnSpacing = 8 };
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });

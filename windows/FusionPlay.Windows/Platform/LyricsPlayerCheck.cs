@@ -100,6 +100,8 @@ internal static class LyricsPlayerCheck
             return new(box.X, box.Y, box.Width, box.Height);
         }
         bool LyricsVisible() => Field(main!, "lyricsVisible") is true;
+        string MetadataTypography() => string.Join("|", new[] { "MiniTitle", "MiniArtist", "TitleText", "ArtistText" }
+            .Select(name => Find<PlayerText>(name)).Select(text => $"{text.FontFamily.Source}:{text.FontWeight.Weight}:{text.FontSize}"));
         async Task WaitLyrics()
         {
             for (int attempt = 0; attempt < 100; attempt++)
@@ -130,22 +132,37 @@ internal static class LyricsPlayerCheck
         }
         async Task Capture(string name)
         {
+            if (Environment.GetCommandLineArgs().Contains("--lyrics-no-capture")) return;
             string file = Path.Combine(directory, name + ".png");
+            var captureLeases = new List<IDisposable>();
             try
             {
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), name + ":begin\n");
+                var rows = Descendants(Root()).OfType<LyricsRowPresenter>().Where(row => row.UsesCompositionSurface).ToArray();
+                Require(rows.Length > 0, "lyrics_composition_surfaces_missing");
+                foreach (var row in rows) captureLeases.Add(row.BeginCaptureForCheck());
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), name + ":leases\n");
                 Background(); var bitmap = new RenderTargetBitmap(); await bitmap.RenderAsync(Root());
                 Require(bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0, "lyrics_capture_empty");
+                int pixelWidth = bitmap.PixelWidth, pixelHeight = bitmap.PixelHeight;
                 var buffer = await bitmap.GetPixelsAsync(); byte[] pixels = new byte[checked((int)buffer.Length)];
+                Require(buffer.Length == checked((uint)pixelWidth * (uint)pixelHeight * 4), "lyrics_capture_pixel_buffer_mismatch");
                 using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(pixels);
                 int visible = 0; for (int index = 3; index < pixels.Length; index += 4) if (pixels[index] > 0) visible++;
                 Require(visible > 0, "lyrics_capture_transparent");
                 var folder = await StorageFolder.GetFolderFromPathAsync(directory); var target = await folder.CreateFileAsync(Path.GetFileName(file), CreationCollisionOption.ReplaceExisting);
                 using var stream = await target.OpenAsync(FileAccessMode.ReadWrite); var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
-                encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)bitmap.PixelWidth, (uint)bitmap.PixelHeight, 96, 96, pixels); await encoder.FlushAsync();
-                captures.Add(new { name, path = file, status = "captured", width = bitmap.PixelWidth, height = bitmap.PixelHeight, visible_pixels = visible, composition_materials_verified = false });
+                encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, (uint)pixelWidth, (uint)pixelHeight, 96, 96, pixels); await encoder.FlushAsync();
+                captures.Add(new { name, path = file, status = "captured", width = bitmap.PixelWidth, height = bitmap.PixelHeight, visible_pixels = visible, composition_rows = rows.Length, glyph_snapshot_for_capture = true, composition_materials_verified = false });
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), name + ":encoded\n");
                 Background();
             }
             catch (Exception error) { captures.Add(new { name, path = file, status = "unavailable", exception_type = error.GetType().Name, hresult = error.HResult.ToString("X8") }); }
+            finally
+            {
+                foreach (var lease in captureLeases) lease.Dispose();
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), name + ":released\n");
+            }
         }
         void Frame(string name, int frame, int width, int height, bool lyrics, bool compact)
         {
@@ -156,14 +173,23 @@ internal static class LyricsPlayerCheck
             Arrange(Root(), size.Width, size.Height); main!.RefreshAppearance(); Root().UpdateLayout();
             Require(LyricsVisible() == lyrics, "lyrics_visibility_policy_mismatch");
             Require((Find<Grid>("MiniRoot").Visibility == Visibility.Visible) == compact, "lyrics_responsive_mode_mismatch");
-            var coverBox = Bounds(Find<Grid>("MiniCoverPanel"));
+            var coverBox = compact ? Bounds(Find<Grid>("MiniCoverPanel")) : Bounds(Find<Border>("CoverFrame"));
             var host = Find<Grid>(compact ? "MiniLyricsHost" : "ExpandedLyricsHost"); var hostBox = Bounds(host);
             RectInt32 viewportRect = default; int passthroughCount = 0;
             if (lyrics)
             {
                 Require(host.Visibility == Visibility.Visible && hostBox.Height >= 128 - 2, "lyrics_host_too_short");
                 if (compact) Require(Math.Abs(coverBox.Width - width) <= 2 && Math.Abs(coverBox.Height - width) <= 2 && hostBox.Y >= coverBox.Y + coverBox.Height, "mini_lyric_cover_not_square_or_overlaps");
-                else Require(hostBox.X >= Bounds(Find<Border>("CoverFrame")).X + Bounds(Find<Border>("CoverFrame")).Width, "expanded_lyrics_not_on_right");
+                else
+                {
+                    Require(hostBox.X >= coverBox.X + coverBox.Width, "expanded_lyrics_not_on_right");
+                    var details = Bounds(Find<Grid>("ExpandedDetails"));
+                    var layout = Bounds(Find<Grid>("PlayerLayout"));
+                    double topSpace = coverBox.Y - layout.Y, bottomSpace = layout.Y + layout.Height - details.Y - details.Height;
+                    Require(details.Y >= coverBox.Y + coverBox.Height + 13, "expanded_metadata_has_no_cover_gap");
+                    Require(Math.Abs(topSpace - bottomSpace) < 2, "expanded_cover_and_controls_not_centered_as_group");
+                    Require(Math.Abs(details.X - (layout.X + (Math.Min(330, width * .38) - details.Width) / 2)) < 2, "expanded_metadata_not_aligned_to_column");
+                }
                 var viewport = Descendants(host).OfType<ScrollViewer>().FirstOrDefault() ?? throw new CheckFailure("lyrics_native_scroll_viewport_missing");
                 var box = Bounds(viewport); double scale = Root().XamlRoot!.RasterizationScale;
                 int left = (int)Math.Floor(Math.Max(box.X, hostBox.X) * scale), top = (int)Math.Floor(Math.Max(box.Y, hostBox.Y) * scale);
@@ -230,8 +256,18 @@ internal static class LyricsPlayerCheck
             }));
             await WaitLyrics(); await OnUi(queue!, () => Require(!LyricsVisible() && !model!.Lyrics.HasLyrics, "metadata_only_lyrics_expanded"));
             step = "settings_display_modes";
-            await Mode("always"); await OnUi(queue!, () => Pass("always_shows_empty_state", () => Require(LyricsVisible() && !model!.Lyrics.HasLyrics, "always_mode_did_not_show_empty_state")));
-            await Mode("never"); await OnUi(queue!, () => Pass("never_hides_lyric_panel", () => Require(!LyricsVisible(), "never_mode_kept_lyrics_panel")));
+            string metadataTypography = "";
+            await OnUi(queue!, () => metadataTypography = MetadataTypography());
+            await Mode("always"); await OnUi(queue!, () => Pass("always_shows_empty_state_without_changing_metadata_typography", () =>
+            {
+                Require(LyricsVisible() && !model!.Lyrics.HasLyrics, "always_mode_did_not_show_empty_state");
+                Require(MetadataTypography() == metadataTypography, "enabling_lyrics_changed_metadata_typography");
+            }));
+            await Mode("never"); await OnUi(queue!, () => Pass("never_hides_lyric_panel_without_changing_metadata_typography", () =>
+            {
+                Require(!LyricsVisible(), "never_mode_kept_lyrics_panel");
+                Require(MetadataTypography() == metadataTypography, "disabling_lyrics_changed_metadata_typography");
+            }));
             await OnUi(queue!, () => { settings!.Close(); SetProperty(model!, nameof(ReceiverController.Initialized), false); settings = new SettingsWindow(model!); Track(settings); SetProperty(model!, nameof(ReceiverController.Initialized), true); });
             await Mode("never"); cases.Add("display_mode_reopens_from_persisted_value"); await Mode("automatic");
             await OnUi(queue!, () => { settings!.Close(); settings = null; });
@@ -257,8 +293,9 @@ internal static class LyricsPlayerCheck
             }));
             await Task.Delay(400);
             step = "real_player_layouts";
-            foreach (var size in new[] { (320, 456), (420, 640), (840, 600), (840, 340) })
+            foreach (var size in new[] { (320, 456), (420, 640), (840, 600), (840, 340), (840, 760) })
             {
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), $"resize:{size.Item1}x{size.Item2}\n");
                 await OnUi(queue!, () => WindowSizing.ResizeContent(main!, size.Item1, size.Item2)); await Task.Delay(500);
                 for (int frame = 0; frame < 4; frame++) { int sample = frame; await OnUi(queue!, () => Frame("timed", sample, size.Item1, size.Item2, true, size.Item1 < 600)); await Task.Delay(25); }
                 await Capture($"lyrics-{size.Item1}x{size.Item2}");
@@ -336,7 +373,11 @@ internal static class LyricsPlayerCheck
             }));
             Background(); Require(UnhandledErrors.Count == 0, "lyrics_check_unhandled_errors"); status = "passed"; step = "complete";
         }
-        catch (Exception error) { failure = error is CheckFailure ? error.Message : "lyrics_check_exception"; exception = error.GetType().Name; hresult = error.HResult.ToString("X8"); exceptionDetail = error.ToString(); }
+        catch (Exception error)
+        {
+            failure = error is CheckFailure ? error.Message : "lyrics_check_exception"; exception = error.GetType().Name; hresult = error.HResult.ToString("X8"); exceptionDetail = error.ToString();
+            File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), "failure:" + step + ":" + failure + "\n");
+        }
         finally
         {
             try { if (queue != null) await OnUi(queue, () => { settings?.Close(); settings = null; if (main != null) { main.AllowClose = true; main.Close(); main = null; } component?.Dispose(); componentWindow?.Close(); componentWindow = null; policy?.Dispose(); policyWindow?.Close(); policyWindow = null; Background(); }); }

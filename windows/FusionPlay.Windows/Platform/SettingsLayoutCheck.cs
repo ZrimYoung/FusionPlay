@@ -37,6 +37,8 @@ internal static class SettingsLayoutCheck
         var handles = new List<nint>();
         var cases = new List<string>();
         var layouts = new List<object>();
+        var typography = new List<object>();
+        var symbolFonts = new List<object>();
         var captures = new List<object>();
         var cleanupErrors = new List<string>();
         nint foreground = GetForegroundWindow();
@@ -218,6 +220,16 @@ internal static class SettingsLayoutCheck
             double scale = Root().XamlRoot?.RasterizationScale ?? Math.Max(96, GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(settings!))) / 96.0;
             double clientWidth = (client.Right - client.Left) / scale, clientHeight = (client.Bottom - client.Top) / scale;
             Require(Math.Abs(clientWidth - width) <= 2 && Math.Abs(clientHeight - height) <= 2, "settings_client_size_changed");
+            var titleBar = Find<Grid>("SettingsTitleBar"); var caption = Find<TextBlock>("SettingsWindowTitle");
+            var titleBounds = Bounds(titleBar); var captionBounds = Bounds(caption); var navigationBounds = Bounds(navigation);
+            Require(settings!.ExtendsContentIntoTitleBar && titleBounds.Height >= 32 && Math.Abs(titleBounds.Y) <= 1,
+                "settings_titlebar_not_in_client");
+            Require(Math.Abs(titleBounds.Width - width) <= 1 && navigationBounds.Y >= titleBounds.Y + titleBounds.Height - 1,
+                "settings_titlebar_overlaps_navigation");
+            Require(captionBounds.Width > 0 && captionBounds.X >= 15 && captionBounds.X + captionBounds.Width <= width - titleBar.Padding.Right + 1,
+                "settings_titlebar_caption_clipped");
+            Require(titleBar.Padding.Right >= settings.AppWindow.TitleBar.RightInset / scale && titleBar.Padding.Left >= settings.AppWindow.TitleBar.LeftInset / scale,
+                "settings_titlebar_native_buttons_not_reserved");
             string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
             var controls = Descendants(Root()).OfType<FrameworkElement>().Where(element => controlNames.Contains(element.Name) && Visible(element)
                 && (element is ButtonBase or ComboBox or SelectorBar or TextBox or Slider or Expander)).ToArray();
@@ -234,7 +246,9 @@ internal static class SettingsLayoutCheck
                 boxes.Add(new { name = element.Name, bounds = box });
             }
             layouts.Add(new { page, language, width, height, client_width = clientWidth, client_height = clientHeight,
-                navigation_mode = navigation.PaneDisplayMode.ToString(), navigation_display_mode = navigation.DisplayMode.ToString(), controls = boxes });
+                titlebar = titleBounds, caption = captionBounds, navigation = navigationBounds,
+                titlebar_padding = new[] { titleBar.Padding.Left, titleBar.Padding.Top, titleBar.Padding.Right, titleBar.Padding.Bottom },
+                titlebar_native_buttons = true, navigation_mode = navigation.PaneDisplayMode.ToString(), navigation_display_mode = navigation.DisplayMode.ToString(), controls = boxes });
             Background();
         }
         async Task Capture(string page, int width, int height)
@@ -394,6 +408,55 @@ internal static class SettingsLayoutCheck
                 Require(new UiPreferencesStore(store.Data).Value == controller.Preferences.Value, "font_preferences_not_persisted");
                 Find<Expander>("FontDisclosure").IsExpanded = false;
             }));
+            step = "global_custom_font_across_all_settings_pages";
+            UiPreferences beforeFontFixture = controller!.Preferences.Value;
+            var fixtureFamily = NativeTypography.FindFamily("Arial") ?? NativeTypography.FindFamily("Tahoma") ?? NativeTypography.SystemFamily;
+            int bodyWeight = FontSelection.NearestWeight(fixtureFamily.Weights, 400);
+            int headingWeight = FontSelection.HeadingWeight(fixtureFamily.Weights, bodyWeight);
+            await OnUi(queue!, () => controller.Preferences.Update(beforeFontFixture with { UiFontFamily = fixtureFamily.Name, UiFontWeight = bodyWeight }));
+            // Both directions revisit already-cached page roots. This catches
+            // the original root-only preference-key cache without forcing a
+            // global traversal on every receiver poll.
+            foreach (var pass in new[] { (Direction: "forward", Pages: pages), (Direction: "reverse", Pages: pages.Reverse().ToArray()) })
+            foreach (string page in pass.Pages)
+            {
+                await OnUi(queue!, () => { Navigate(page); Arrange(960, 740); });
+                await Task.Delay(80);
+                await OnUi(queue!, () =>
+                {
+                    Background(); Arrange(960, 740);
+                    var title = Find<TextBlock>("SettingsPageTitle_" + page);
+                    var description = Find<TextBlock>("SettingsPageDescription_" + page);
+                    Require(title.FontFamily.Source == fixtureFamily.Name && title.FontWeight.Weight == headingWeight, "settings_cross_page_heading_font_mismatch_" + page);
+                    Require(description.FontFamily.Source == fixtureFamily.Name && description.FontWeight.Weight == bodyWeight, "settings_cross_page_body_font_mismatch_" + page);
+                    var icons = Find<NavigationView>("SettingsNavigation").MenuItems.OfType<NavigationViewItem>().Select(item => item.Icon).OfType<FontIcon>().ToArray();
+                    Require(icons.Length == pages.Length && icons.All(icon => icon.FontFamily.Source == UiTypography.SymbolFamily.Source), "settings_navigation_icon_font_replaced");
+                    typography.Add(new { page, direction = pass.Direction, family = title.FontFamily.Source, heading_weight = title.FontWeight.Weight,
+                        body_family = description.FontFamily.Source, body_weight = description.FontWeight.Weight, navigation_icon_fonts_preserved = true });
+                });
+            }
+            await OnUi(queue!, () => { Navigate("audio"); Find<Expander>("ConnectionDiagnostics").IsExpanded = true; Arrange(960, 740); });
+            await Task.Delay(80);
+            await OnUi(queue!, () => Pass(step, () =>
+            {
+                Require(Find<TextBlock>("ReceiverDiagnostics").FontFamily.Source == "Cascadia Mono", "settings_diagnostic_monospace_replaced");
+                Find<Expander>("ConnectionDiagnostics").IsExpanded = false;
+            }));
+            await OnUi(queue!, () => Pass("native_infobar_symbol_fonts_preserved", () =>
+            {
+                // Inspect the real native template, not a synthetic FontIcon:
+                // InfoBar's standard severity glyphs are ordinary TextBlocks.
+                var info = Find<InfoBar>("AudioError"); info.ApplyTemplate();
+                var glyphs = Descendants(info).OfType<TextBlock>().Where(text => text.Name is "StandardIcon" or "IconBackground").ToArray();
+                Require(glyphs.Length == 2, "settings_infobar_symbol_parts_missing");
+                foreach (var glyph in glyphs)
+                {
+                    Require(glyph.FontFamily.Source == UiTypography.SymbolFamily.Source, "settings_infobar_symbol_font_replaced_" + glyph.Name);
+                    symbolFonts.Add(new { control = info.Name, part = glyph.Name, family = glyph.FontFamily.Source });
+                }
+                controller!.Preferences.Update(beforeFontFixture);
+                Require(glyphs.All(glyph => glyph.FontFamily.Source == UiTypography.SymbolFamily.Source), "settings_infobar_symbol_font_changed_after_preference_restore");
+            }));
             step = "reopen_real_settings";
             var expectedPreferences = controller!.Preferences.Value;
             await OnUi(queue!, () => { settings!.Close(); settings = null; });
@@ -485,7 +548,7 @@ internal static class SettingsLayoutCheck
                 {
                     File.WriteAllText(Path.Combine(directory, "settings-layout-check.json"), JsonSerializer.Serialize(new
                     {
-                        status, step, failure_code = failure, exception_type = exception, hresult, cases, layout_samples = layouts, captures,
+                        status, step, failure_code = failure, exception_type = exception, hresult, cases, layout_samples = layouts, typography_samples = typography, symbol_font_samples = symbolFonts, captures,
                         window_remained_hidden = hidden, foreground_unchanged = focus, foreground_not_taken = foregroundNotTaken, preferences_restored = preferencesRestored,
                         controller_created = controllerCreated, initialized_flag_is_fixture = initializedFixture,
                         receiver_initialize_method_called = false, native_receiver_created = false, receiver_polling_started = false,

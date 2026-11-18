@@ -27,6 +27,8 @@ public sealed partial class MainWindow : Window
     private readonly Brush lyricArtShade = Gradient(global::Windows.UI.Color.FromArgb(122, 0, 0, 0), global::Windows.UI.Color.FromArgb(152, 0, 0, 0));
     private readonly Brush lyricEmptyShade = Gradient(global::Windows.UI.Color.FromArgb(0, 0, 0, 0), global::Windows.UI.Color.FromArgb(56, 0, 0, 0));
     private readonly Brush legacyShade = new SolidColorBrush(global::Windows.UI.Color.FromArgb(153, 0, 0, 0));
+    private readonly Brush charcoal = new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
+    private readonly Brush captionBackdrop = new SolidColorBrush(global::Windows.UI.Color.FromArgb(100, 20, 20, 20));
     private readonly ISquareWindow squareSizing;
     private readonly PlayerFullScreen fullScreen;
     private readonly LyricsView miniLyrics, expandedLyrics;
@@ -35,6 +37,9 @@ public sealed partial class MainWindow : Window
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
     private string? progressColorKey;
+    private (double Width, double Height, bool Lyrics, bool Progress, bool Transport)? appliedLayout;
+    private bool? configuredLyricsLayout;
+    private bool inputRegionsQueued;
     private bool pointerInside, focusInside, controlsShown = true, captionShown = true, fullscreenCaptionShown = true, progressShown, lyricsVisible, closed, compact = true, rendering = true, revealMiniRequested;
     private string lyricsTrackId = "", lyricsTitle = "";
     private string preferenceError = "";
@@ -184,17 +189,17 @@ public sealed partial class MainWindow : Window
         bool miniLyricEffects = lyricsBackdrop.SetArtwork(compact && lyricsVisible ? model.ArtworkBytes : null);
         bool highContrast = accessibility.HighContrast;
         Brush solid = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
-        ExpandedRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : expandedEffects ? new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12)) : solid;
+        ExpandedRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : expandedEffects ? charcoal : solid;
         ExpandedRoot.RequestedTheme = !highContrast && (lyricsVisible || expandedEffects) ? ElementTheme.Dark : ElementTheme.Default;
         BackdropShade.Background = lyricsVisible ? expandedLyricEffects ? lyricArtShade : lyricEmptyShade : legacyShade;
         BackdropShade.Visibility = !highContrast && (lyricsVisible || expandedEffects) ? Visibility.Visible : Visibility.Collapsed;
-        MiniControls.Background = highContrast ? solid : effects ? null : new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
-        MiniRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
+        MiniControls.Background = highContrast ? solid : effects ? null : charcoal;
+        MiniRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : charcoal;
         MiniRoot.RequestedTheme = highContrast ? ElementTheme.Default : ElementTheme.Dark;
         MiniLyricsGlobalShade.Background = miniLyricEffects ? lyricArtShade : lyricEmptyShade;
         MiniLyricsGlobalShade.Visibility = lyricsVisible && !highContrast ? Visibility.Visible : Visibility.Collapsed;
         foreach (var button in new[] { CloseButton, PinButton, MiniFullScreenButton })
-            button.Background = effects ? new SolidColorBrush(global::Windows.UI.Color.FromArgb(100, 20, 20, 20)) : solid;
+            button.Background = effects ? captionBackdrop : solid;
         MiniShade.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
         MiniPreviousButton.IsEnabled = MiniPlayButton.IsEnabled = MiniNextButton.IsEnabled = PreviousButton.IsEnabled = PlayButton.IsEnabled = NextButton.IsEnabled = model.CanControl;
         PlaybackIcons.Update(MiniPreviousIcon, PlaybackCommand.Previous);
@@ -259,6 +264,8 @@ public sealed partial class MainWindow : Window
             ElementCompositionPreview.GetElementVisual(ExpandedHeader).StopAnimation("Opacity");
             ElementCompositionPreview.GetElementVisual(ExpandedHeader).Opacity = 1; ExpandedHeader.IsHitTestVisible = true; fullscreenCaptionShown = true;
         }
+        // Requested visibility disables native input holes synchronously; layout
+        // callbacks still coalesce the later geometry updates during animations.
         UpdateBlurCoverage(); UpdateInputRegions(); rendering = false;
     }
     private void ApplyProgressColor(UiPreferences preferences)
@@ -307,11 +314,17 @@ public sealed partial class MainWindow : Window
                 revealMiniRequested = false; ScheduleHide();
             }
         }
-        UpdateBlurCoverage(); UpdateInputRegions();
+        UpdateBlurCoverage(); QueueInputRegions();
     }
     private void ApplyPlayerLayout(double width, double height)
     {
         if (width <= 0 || height <= 0) return;
+        var preferences = model.Preferences.Value;
+        var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport);
+        if (appliedLayout is { } previousLayout && previousLayout == layout) return;
+        appliedLayout = layout;
+        bool configure = configuredLyricsLayout != lyricsVisible;
+        configuredLyricsLayout = lyricsVisible;
         bool nextCompact = WindowSizing.IsCompactContent(width, height, lyricsVisible);
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
         compact = nextCompact;
@@ -325,7 +338,7 @@ public sealed partial class MainWindow : Window
         MiniLyricsHost.Visibility = MiniLyricsDivider.Visibility = lyricsVisible ? Visibility.Visible : Visibility.Collapsed;
         MiniLyricsHost.Padding = new Thickness(width < 320 ? 16 : 22, 0, width < 320 ? 16 : 22, 12);
         ExpandedLyricsHost.Visibility = lyricsVisible ? Visibility.Visible : Visibility.Collapsed;
-        MiniTitle.FontSize = lyricsVisible && width < 320 ? 17 : 20; MiniArtist.FontSize = lyricsVisible ? 12 : 14;
+        MiniTitle.FontSize = width < 320 ? 17 : 20; MiniArtist.FontSize = 14;
         MiniTitle.MaxLines = lyricsVisible ? 1 : 2;
 
         double side;
@@ -333,48 +346,68 @@ public sealed partial class MainWindow : Window
         {
             double inset = Math.Clamp(width * .04, 36, 48), vertical = height < 360 ? 20 : 32;
             double column = Math.Min(330, width * .38);
-            double reserved = 72 + (model.Preferences.Value.ShowProgress ? 45 : 0) + (model.Preferences.Value.ShowTransport ? 44 : 0);
+            double reserved = 76 + (preferences.ShowProgress ? 45 : 0) + (preferences.ShowTransport ? 44 : 0);
             side = Math.Max(60, Math.Min(column, height - vertical * 2 - reserved));
-            ExpandedContent.Padding = new Thickness(inset, vertical, inset, vertical); ExpandedContent.RowSpacing = 0;
-            ExpandedContent.RowDefinitions[0].Height = new GridLength(0);
-            Grid.SetRowSpan(ExpandedHeader, 2); Canvas.SetZIndex(ExpandedHeader, 1); ExpandedHeader.VerticalAlignment = VerticalAlignment.Top;
-            ExpandedBrand.Visibility = Visibility.Collapsed;
-            PlayerLayout.ColumnSpacing = 32; PlayerLayout.RowSpacing = 8; PlayerLayout.VerticalAlignment = VerticalAlignment.Stretch;
+            ExpandedContent.Padding = new Thickness(inset, vertical, inset, vertical);
             PlayerLayout.ColumnDefinitions[0].Width = new GridLength(column);
-            if (PlayerLayout.RowDefinitions.Count != 2)
+            if (configure)
             {
-                PlayerLayout.RowDefinitions.Clear(); PlayerLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                ExpandedContent.RowSpacing = 0; ExpandedContent.RowDefinitions[0].Height = new GridLength(0);
+                Grid.SetRowSpan(ExpandedHeader, 2); Canvas.SetZIndex(ExpandedHeader, 1); ExpandedHeader.VerticalAlignment = VerticalAlignment.Top;
+                ExpandedBrand.Visibility = Visibility.Collapsed;
+                PlayerLayout.ColumnSpacing = 32; PlayerLayout.RowSpacing = 0; PlayerLayout.VerticalAlignment = VerticalAlignment.Stretch;
+                // Mac's expanded HStack centers the complete cover/metadata/control
+                // column, independently of the full-height lyric viewport.
+                PlayerLayout.RowDefinitions.Clear();
                 PlayerLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                PlayerLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                PlayerLayout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                PlayerLayout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                Grid.SetRow(CoverFrame, 1); Grid.SetColumn(ExpandedDetails, 0); Grid.SetRow(ExpandedDetails, 2);
+                Grid.SetRow(ExpandedLyricsHost, 0); Grid.SetRowSpan(ExpandedLyricsHost, 4);
+                ExpandedDetails.RowSpacing = 0; ExpandedDetails.VerticalAlignment = VerticalAlignment.Top;
+                ExpandedDetails.Margin = new Thickness(0, 14, 0, 0); ExpandedMetadata.Margin = new Thickness(0, 0, 0, 10);
+                ExpandedDetails.RowDefinitions[0].Height = GridLength.Auto;
+                ExpandedMetadata.Spacing = 5; TitleText.FontSize = 20; TitleText.MaxLines = 1; ArtistText.FontSize = 14; ArtistText.MaxLines = 1;
+                VolumeRow.Visibility = Visibility.Collapsed;
+                PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 36;
+                PlayButton.Width = PlayButton.Height = 44;
             }
-            Grid.SetColumn(ExpandedDetails, 0); Grid.SetRow(ExpandedDetails, 1);
-            ExpandedDetails.RowSpacing = 4; ExpandedDetails.VerticalAlignment = VerticalAlignment.Top;
-            ExpandedDetails.RowDefinitions[0].Height = GridLength.Auto;
-            ExpandedMetadata.Spacing = 5; TitleText.FontSize = 20; TitleText.MaxLines = 1; ArtistText.FontSize = 12; ArtistText.MaxLines = 1;
-            VolumeRow.Visibility = Visibility.Collapsed;
-            PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 36;
-            PlayButton.Width = PlayButton.Height = 44;
         }
         else
         {
             side = Math.Clamp(Math.Min(height - 126, width * .36), 130, 360);
-            ExpandedContent.Padding = new Thickness(28, 14, 28, 22); ExpandedContent.RowSpacing = 12;
-            ExpandedContent.RowDefinitions[0].Height = GridLength.Auto;
-            Grid.SetRowSpan(ExpandedHeader, 1); ExpandedBrand.Visibility = Visibility.Visible;
-            PlayerLayout.ColumnSpacing = 28; PlayerLayout.RowSpacing = 0; PlayerLayout.VerticalAlignment = VerticalAlignment.Center;
-            PlayerLayout.ColumnDefinitions[0].Width = GridLength.Auto;
-            if (PlayerLayout.RowDefinitions.Count > 0) PlayerLayout.RowDefinitions.Clear();
-            Grid.SetColumn(ExpandedDetails, 1); Grid.SetRow(ExpandedDetails, 0);
-            ExpandedDetails.RowSpacing = 12; ExpandedDetails.VerticalAlignment = VerticalAlignment.Stretch;
-            ExpandedDetails.RowDefinitions[0].Height = new GridLength(1, GridUnitType.Star);
-            ExpandedMetadata.Spacing = 7; TitleText.FontSize = 25; TitleText.MaxLines = 2; ArtistText.FontSize = 14; ArtistText.MaxLines = 2;
-            VolumeRow.Visibility = Visibility.Visible;
-            PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 40;
-            PlayButton.Width = PlayButton.Height = 52;
+            if (configure)
+            {
+                ExpandedContent.Padding = new Thickness(28, 14, 28, 22); ExpandedContent.RowSpacing = 12;
+                ExpandedContent.RowDefinitions[0].Height = GridLength.Auto;
+                Grid.SetRowSpan(ExpandedHeader, 1); ExpandedBrand.Visibility = Visibility.Visible;
+                PlayerLayout.ColumnSpacing = 28; PlayerLayout.RowSpacing = 0; PlayerLayout.VerticalAlignment = VerticalAlignment.Center;
+                PlayerLayout.ColumnDefinitions[0].Width = GridLength.Auto; PlayerLayout.RowDefinitions.Clear();
+                Grid.SetRow(CoverFrame, 0); Grid.SetColumn(ExpandedDetails, 1); Grid.SetRow(ExpandedDetails, 0);
+                Grid.SetRow(ExpandedLyricsHost, 0); Grid.SetRowSpan(ExpandedLyricsHost, 1);
+                ExpandedDetails.RowSpacing = 12; ExpandedDetails.VerticalAlignment = VerticalAlignment.Stretch;
+                ExpandedDetails.Margin = ExpandedMetadata.Margin = new Thickness(0);
+                ExpandedDetails.RowDefinitions[0].Height = new GridLength(1, GridUnitType.Star);
+                ExpandedMetadata.Spacing = 7; TitleText.FontSize = 20; TitleText.MaxLines = 2; ArtistText.FontSize = 14; ArtistText.MaxLines = 2;
+                VolumeRow.Visibility = Visibility.Visible;
+                PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 40;
+                PlayButton.Width = PlayButton.Height = 52;
+            }
         }
         CoverFrame.Width = CoverFrame.Height = side; CoverFrame.HorizontalAlignment = HorizontalAlignment.Center; CoverFrame.VerticalAlignment = VerticalAlignment.Top;
     }
-    private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); UpdateInputRegions(); }
-    private void Root_LayoutUpdated(object? sender, object e) => UpdateInputRegions();
+    private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); QueueInputRegions(); }
+    private void Root_LayoutUpdated(object? sender, object e) => QueueInputRegions();
+    private void QueueInputRegions()
+    {
+        if (closed || inputRegionsQueued) return;
+        inputRegionsQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            inputRegionsQueued = false;
+            if (!closed) UpdateInputRegions();
+        });
+    }
     private void UpdateBlurCoverage() => miniBackdrop?.SetCoverage(MiniCoverPanel.ActualHeight > 0 ? Math.Clamp(MiniControls.ActualHeight * 1.35 / MiniCoverPanel.ActualHeight, .1, 1) : .65);
     private void Root_PointerEntered(object sender, PointerRoutedEventArgs e) { pointerInside = true; hideTimer?.Stop(); ShowControls(true); ShowCaption(true); }
     private void Root_PointerExited(object sender, PointerRoutedEventArgs e)

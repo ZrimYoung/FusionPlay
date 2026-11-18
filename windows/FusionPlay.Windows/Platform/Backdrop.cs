@@ -203,6 +203,7 @@ internal sealed class Backdrop : IDisposable
     private void Refresh() => target.DispatcherQueue.TryEnqueue(() => { if (!disposed) { failedArtwork = null; Changed?.Invoke(); } });
     private void Clear()
     {
+        if (layer == null && previous == null && root == null) return;
         retirement.Stop();
         var outgoing = layer; var retired = previous; var oldRoot = root;
         // Publish the empty state before releasing any WinRT resource. Native

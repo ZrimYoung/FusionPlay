@@ -36,6 +36,8 @@ public partial class App : Application
         UnhandledException += (_, args) =>
         {
             StartupRecord("unhandled_exception", args.Exception);
+            if (Environment.GetCommandLineArgs().Contains("--lyrics-performance-check"))
+            { LyricsPerformanceCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
             { LyricsPlayerCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))
@@ -48,6 +50,15 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--lyrics-performance-check"))
+        {
+            // Performance fixtures return before instance notification, identity,
+            // receiver initialization, audio, media controls or visible startup.
+            try { await LyricsPerformanceCheck.Run(Path.Combine(AppContext.BaseDirectory, "lyrics-performance-check")); }
+            catch (Exception error) { StartupRecord("lyrics_performance_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
         {
             try { await LyricsPlayerCheck.Run(Path.Combine(AppContext.BaseDirectory, "lyrics-player-check")); }

@@ -3,6 +3,9 @@ namespace FusionPlay.Windows.Platform;
 /// <summary>Geometry only. No source text, device state, timers, or persistence.</summary>
 internal static class LyricsViewport
 {
+    internal static bool IntersectsViewport(double y, double height, double viewportHeight, double bleed)
+        => double.IsFinite(y) && double.IsFinite(height) && double.IsFinite(viewportHeight) && height > 0 && viewportHeight > 0
+            && y < viewportHeight + bleed && y + height > -bleed;
     internal static double EdgeBlur(double middleY, double height, bool compact, bool enabled)
     {
         if (!enabled || !double.IsFinite(middleY) || !double.IsFinite(height) || height <= 0) return 0;
