@@ -23,6 +23,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import com.airplayreceiver.desktop.backend.AppSettings
@@ -139,8 +140,45 @@ class NativeSettingsView(
     private val lyrics = toggle(R.string.native_settings_lyrics) { enabled ->
         changePlayerPreferences { copy(showLyrics = enabled) }
     }
+    private val staggerLyrics = toggle(R.string.native_settings_lyric_stagger) { enabled ->
+        changePlayerPreferences { copy(staggerLyricMotion = enabled) }
+    }
+    private val staggerValue = label(size = 15, color = colors.secondary).apply {
+        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+    private val staggerSlider = SeekBar(context).apply {
+        max = NativeLyricStagger.MAX_SPAN_MS / NativeLyricStagger.STEP_MS
+        keyProgressIncrement = 1
+        minimumHeight = dp(48)
+        isFocusable = true
+        contentDescription = context.getString(R.string.native_settings_lyric_stagger_span)
+        progressTintList = ColorStateList.valueOf(colors.action)
+        thumbTintList = ColorStateList.valueOf(colors.action)
+        setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
+
+            override fun onProgressChanged(seekBar: SeekBar, progress: Int, fromUser: Boolean) {
+                if (fromUser && !binding) {
+                    changePlayerPreferences { copy(lyricStaggerMilliseconds = progress * NativeLyricStagger.STEP_MS) }
+                }
+            }
+        })
+    }
+    private val staggerControl = LinearLayout(context).apply {
+        orientation = VERTICAL
+        addView(LinearLayout(context).apply {
+            gravity = Gravity.CENTER_VERTICAL
+            addView(label(R.string.native_settings_lyric_stagger_span, size = 15), LayoutParams(0, WRAP, 1f))
+            addView(staggerValue, LayoutParams(WRAP, WRAP))
+        }, LayoutParams(MATCH, WRAP))
+        addView(staggerSlider, LayoutParams(MATCH, WRAP))
+    }
     private val toolbar = toggle(R.string.native_settings_toolbar) { enabled ->
         changePlayerPreferences { copy(toolbarAlwaysVisible = enabled) }
+    }
+    private val correctTitles = toggle(R.string.native_settings_correct_lyric_titles) { enabled ->
+        changePlayerPreferences { copy(correctLyricTitles = enabled) }
     }
     private val exportLogs = button(R.string.native_settings_export) {
         onAction(NativeSettingsAction.ExportLogs)
@@ -177,7 +215,10 @@ class NativeSettingsView(
         ))
         body.addView(castGroup)
         body.addView(section(R.string.native_settings_device_behavior, startup, autoWake, keepScreenOn, advanced))
-        body.addView(section(R.string.native_settings_player, progress, transport, wrapMetadata, lyrics, toolbar))
+        body.addView(section(
+            R.string.native_settings_player,
+            progress, transport, wrapMetadata, lyrics, staggerLyrics, staggerControl, toolbar, correctTitles,
+        ))
         body.addView(section(R.string.native_settings_about, version, exportLogs))
 
         addView(ScrollView(context).apply {
@@ -247,7 +288,10 @@ class NativeSettingsView(
             transport.bind(preferences.showTransport)
             wrapMetadata.bind(preferences.wrapMetadata)
             lyrics.bind(preferences.showLyrics)
+            staggerLyrics.bind(preferences.staggerLyricMotion)
+            bindStagger(preferences)
             toolbar.bind(preferences.toolbarAlwaysVisible)
+            correctTitles.bind(preferences.correctLyricTitles)
         } finally {
             binding = false
         }
@@ -346,6 +390,17 @@ class NativeSettingsView(
     private fun changePlayerPreferences(change: NativePlayerPreferences.() -> NativePlayerPreferences) {
         playerPreferences = playerPreferences.change()
         onAction(NativeSettingsAction.PlayerPreferences(playerPreferences))
+    }
+
+    private fun bindStagger(preferences: NativePlayerPreferences) {
+        val enabled = preferences.staggerLyricMotion
+        if (!enabled && staggerControl.hasFocus()) staggerLyrics.requestFocus()
+        staggerControl.visibility = if (enabled) VISIBLE else GONE
+        val span = NativeLyricStagger.clampSpan(preferences.lyricStaggerMilliseconds)
+        staggerSlider.progress = span / NativeLyricStagger.STEP_MS
+        val value = context.getString(R.string.native_settings_lyric_stagger_value, span)
+        staggerValue.text = value
+        if (Build.VERSION.SDK_INT >= 30) staggerSlider.stateDescription = value
     }
 
     private fun TextView.bindNote(note: String) {

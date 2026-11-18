@@ -1,17 +1,21 @@
 package com.fusionplay.android
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.SystemClock
+import android.provider.Settings
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.accessibility.AccessibilityManager
+import android.view.animation.LinearInterpolator
 import android.widget.AbsListView
 import android.widget.BaseAdapter
 import android.widget.FrameLayout
@@ -44,6 +48,8 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
     private var userScrolling = false
     private var touchBrowsing = false
     private var touchSession: Pair<Track?, LyricsDocument?>? = null
+    private var staggerSpan = 0
+    private var staggerAnimator: ValueAnimator? = null
     private val resumeFollow = Runnable { followCurrent(animate = true) }
 
     init {
@@ -57,6 +63,7 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
             addHeaderView(topSpace, null, false)
             addFooterView(bottomSpace, null, false)
             adapter = rows
+            setRecyclerListener { it.translationY = 0f }
             setOnScrollListener(object : AbsListView.OnScrollListener {
                 override fun onScroll(view: AbsListView, first: Int, count: Int, total: Int) = Unit
                 override fun onScrollStateChanged(view: AbsListView, scrollState: Int) {
@@ -81,7 +88,13 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         addView(empty, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
 
-    fun render(playback: PlaybackSnapshot, canSeek: Boolean, advancedEffects: Boolean) {
+    fun render(
+        playback: PlaybackSnapshot,
+        canSeek: Boolean,
+        advancedEffects: Boolean,
+        staggerEnabled: Boolean,
+        staggerMilliseconds: Int,
+    ) {
         val nextTrack = Track(
             playback.protocol,
             playback.sourceEpoch,
@@ -92,6 +105,9 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         val rowsChanged = trackChanged || document !== nextDocument
         val seekChanged = seeking != canSeek
         val previousIndex = playingIndex
+        val nextSpan = if (staggerEnabled) NativeLyricStagger.clampSpan(staggerMilliseconds) else 0
+        if (rowsChanged || seekChanged || nextSpan != staggerSpan) cancelStagger()
+        staggerSpan = nextSpan
         track = nextTrack
         document = nextDocument
         seeking = canSeek
@@ -125,12 +141,13 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
             if (trackChanged && playingIndex == null) list.setSelection(0)
             post { followCurrent(animate = false) }
         } else if (playingIndex != previousIndex) {
-            followCurrent(animate = true)
+            followCurrent(animate = true, previousIndex = previousIndex)
         }
     }
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
+        cancelStagger()
         updateScrollInsets()
         if (width != oldWidth) rows.notifyDataSetChanged()
         post { followCurrent(animate = false) }
@@ -138,7 +155,13 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
 
     override fun onDetachedFromWindow() {
         removeCallbacks(resumeFollow)
+        cancelStagger()
         super.onDetachedFromWindow()
+    }
+
+    override fun onVisibilityAggregated(isVisible: Boolean) {
+        super.onVisibilityAggregated(isVisible)
+        if (!isVisible) cancelStagger()
     }
 
     private fun updateScrollInsets() {
@@ -148,21 +171,78 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
     }
 
     private fun pauseFollow() {
+        cancelStagger()
         browsingUntil = SystemClock.uptimeMillis() + FOLLOW_PAUSE_MS
         removeCallbacks(resumeFollow)
         postDelayed(resumeFollow, FOLLOW_PAUSE_MS)
     }
 
-    private fun followCurrent(animate: Boolean) {
+    private fun followCurrent(animate: Boolean, previousIndex: Int? = null) {
+        cancelStagger()
         val index = playingIndex ?: return
         if (!isShown || height == 0 || userScrolling || touchBrowsing || SystemClock.uptimeMillis() < browsingUntil ||
             accessibility?.isTouchExplorationEnabled == true || list.hasFocus()
         ) return
         val target = index + 1 // The timed list has a blank header above its first row.
         val offset = (height * ANCHOR).roundToInt()
-        val motionEnabled = Build.VERSION.SDK_INT < 26 || ValueAnimator.areAnimatorsEnabled()
-        if (animate && motionEnabled) list.smoothScrollToPositionFromTop(target, offset, 330)
-        else list.setSelectionFromTop(target, offset)
+        if (animate && motionEnabled()) {
+            list.smoothScrollToPositionFromTop(target, offset, NativeLyricStagger.FOLLOW_DURATION_MS)
+            val direction = NativeLyricStagger.direction(previousIndex, index)
+            if (staggerSpan > 0 && direction != null) startStagger(direction)
+        } else {
+            list.setSelectionFromTop(target, offset)
+        }
+    }
+
+    private fun startStagger(direction: Int) {
+        val span = staggerSpan
+        val density = resources.displayMetrics.density
+        val animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = (NativeLyricStagger.FOLLOW_DURATION_MS + span).toLong()
+            interpolator = LinearInterpolator()
+            addUpdateListener { motion ->
+                if (!isShown || list.height == 0 || accessibility?.isTouchExplorationEnabled == true) {
+                    cancelStagger()
+                    return@addUpdateListener
+                }
+                val elapsed = motion.currentPlayTime
+                // ListView already lays out and recycles the rows. Only adjust
+                // the presentation of the attached rows during this short wave.
+                for (index in 0 until list.childCount) {
+                    val row = list.getChildAt(index) as? TextView ?: continue
+                    val center = (row.top + row.bottom) * .5f / list.height
+                    row.translationY = density * NativeLyricStagger.offsetDp(elapsed, center, span, direction)
+                }
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (staggerAnimator !== animation) return
+                    staggerAnimator = null
+                    resetRowOffsets()
+                }
+            })
+        }
+        staggerAnimator = animator
+        animator.start()
+    }
+
+    private fun cancelStagger() {
+        val animator = staggerAnimator ?: return
+        staggerAnimator = null
+        animator.removeAllUpdateListeners()
+        animator.removeAllListeners()
+        animator.cancel()
+        resetRowOffsets()
+    }
+
+    private fun resetRowOffsets() {
+        for (index in 0 until list.childCount) list.getChildAt(index).translationY = 0f
+    }
+
+    private fun motionEnabled(): Boolean = if (Build.VERSION.SDK_INT >= 26) {
+        ValueAnimator.areAnimatorsEnabled()
+    } else {
+        Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
     }
 
     private inner class LyricList : ListView(context) {
@@ -195,7 +275,7 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
 
         override fun onFocusChanged(gainFocus: Boolean, direction: Int, oldRect: android.graphics.Rect?) {
             super.onFocusChanged(gainFocus, direction, oldRect)
-            if (!gainFocus) pauseFollow()
+            if (gainFocus) cancelStagger() else pauseFollow()
         }
     }
 
@@ -213,6 +293,7 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
                 setLineSpacing(dp(3).toFloat(), 1f)
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
             }
+            row.translationY = 0f
             row.textSize = (width / resources.displayMetrics.density * .076f).coerceIn(24f, 36f)
             row.text = getItem(position)?.text.orEmpty()
             updateHighlight(row, position)

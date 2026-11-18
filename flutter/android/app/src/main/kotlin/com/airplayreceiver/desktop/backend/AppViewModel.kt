@@ -636,8 +636,11 @@ class AppViewModel(
         bitsPerSample: Int? = null,
         channels: Int? = null,
         lyricsText: String? = null,
+        titleIsLyric: Boolean? = null,
+        trackIdSource: String? = null,
     ) {
         val lyrics = lyricsText?.let { LrcParser.parse(it) }
+        val lyricHeaders = lyricsText?.let(::parseLrcDisplayHeaders)
         _state.update { current ->
             SourcePlaybackProjection.updatePlayback(
                 current = current,
@@ -658,6 +661,9 @@ class AppViewModel(
                     bitsPerSample = bitsPerSample,
                     channels = channels,
                     lyrics = lyrics,
+                    lyricHeaders = lyricHeaders,
+                    titleIsLyric = titleIsLyric,
+                    trackIdSource = trackIdSource,
                 )
             }
         }

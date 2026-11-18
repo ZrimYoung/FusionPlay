@@ -37,6 +37,7 @@ import com.airplayreceiver.desktop.backend.AppState
 import com.airplayreceiver.desktop.backend.MediaControlAvailability
 import com.airplayreceiver.desktop.backend.PlaybackCommand
 import com.airplayreceiver.desktop.backend.PlaybackSnapshot
+import com.airplayreceiver.desktop.backend.displayMetadata
 import com.airplayreceiver.desktop.backend.mediaControlAvailability
 import java.util.Locale
 import kotlin.math.abs
@@ -271,13 +272,20 @@ internal class NativePlayerView(
                 title.maxLines = if (preferences.wrapMetadata) 3 else 1
                 subtitle.maxLines = if (preferences.wrapMetadata) 2 else 1
             }
-            updateText(title, current.title?.trim().takeIf { it.present() } ?: "等待曲目信息")
-            val credit = listOfNotNull(current.artist?.trim().takeIf { it.present() }, current.album?.trim().takeIf { it.present() })
+            val metadata = current.displayMetadata(preferences.correctLyricTitles)
+            updateText(title, metadata.title?.trim().takeIf { it.present() } ?: "等待曲目信息")
+            val credit = listOfNotNull(metadata.artist?.trim().takeIf { it.present() }, metadata.album?.trim().takeIf { it.present() })
                 .joinToString(" · ").ifEmpty { current.protocol.orEmpty() }
             updateText(subtitle, credit)
             setVisible(subtitle, credit.isNotEmpty())
             status(detailsError, state.lastError)
-            if (preferences.showLyrics) lyrics.render(current, playbackAvailability.canSeek, state.settings.advancedEffectsEnabled)
+            if (preferences.showLyrics) lyrics.render(
+                playback = current,
+                canSeek = playbackAvailability.canSeek,
+                advancedEffects = state.settings.advancedEffectsEnabled,
+                staggerEnabled = preferences.staggerLyricMotion,
+                staggerMilliseconds = preferences.lyricStaggerMilliseconds,
+            )
         } else {
             renderIdle()
         }

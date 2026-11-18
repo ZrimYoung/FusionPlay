@@ -150,6 +150,7 @@ class MainActivity : Activity() {
         if (value == preferences) return
         preferences = value
         preferenceStore.save(value)
+        runtime.setCorrectLyricTitles(value.correctLyricTitles)
         render(runtime.uiState.value)
     }
 

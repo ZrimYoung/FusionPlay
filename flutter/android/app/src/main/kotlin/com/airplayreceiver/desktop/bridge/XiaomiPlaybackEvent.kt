@@ -34,6 +34,8 @@ data class XiaomiMediaInfo(
     val channels: Int? = null,
     val metadataChangeType: Int? = null,
     val lyricsText: String? = null,
+    val titleIsLyric: Boolean? = null,
+    val trackIdSource: String? = null,
 )
 
 fun WindowsBridgeXiaomiEvent.toVolumePercentOrNull(): Int? {
@@ -138,6 +140,16 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
                 it.length <= MAX_MIPLAY_LYRICS_BYTES && it.isNotBlank() &&
                     it.encodeToByteArray().size <= MAX_MIPLAY_LYRICS_BYTES
             },
+        titleIsLyric = if (normalizedEvent == "media_info") {
+            (objectPayload["title_is_lyric"] as? JsonPrimitive)
+                ?.takeUnless(JsonPrimitive::isString)
+                ?.booleanOrNull
+        } else null,
+        trackIdSource = (objectPayload["track_id_source"] as? JsonPrimitive)
+            ?.takeIf { normalizedEvent == "media_info" && it.isString }
+            ?.content
+            ?.trim()
+            ?.takeIf(String::isNotEmpty),
     )
 }
 

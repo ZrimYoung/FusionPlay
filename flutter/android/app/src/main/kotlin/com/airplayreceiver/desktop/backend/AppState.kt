@@ -75,6 +75,9 @@ data class PlaybackSnapshot(
     val trackIdentity: String? = null,
     val lyrics: LyricsDocument? = null,
     val lyricsLoading: Boolean = false,
+    val lyricHeaders: PlaybackDisplayMetadata? = null,
+    val lyricTitleCorrection: PlaybackDisplayMetadata? = null,
+    val lyricCaptionHint: Boolean? = null,
 )
 
 data class RemoteControlState(

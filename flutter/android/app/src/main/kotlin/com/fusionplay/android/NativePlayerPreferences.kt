@@ -9,6 +9,9 @@ data class NativePlayerPreferences(
     val showTransport: Boolean = true,
     val toolbarAlwaysVisible: Boolean = false,
     val wrapMetadata: Boolean = false,
+    val staggerLyricMotion: Boolean = true,
+    val lyricStaggerMilliseconds: Int = NativeLyricStagger.DEFAULT_SPAN_MS,
+    val correctLyricTitles: Boolean = false,
 )
 
 internal class NativePlayerPreferenceStore(context: Context) {
@@ -20,6 +23,11 @@ internal class NativePlayerPreferenceStore(context: Context) {
         showTransport = store.getBoolean("transport", true),
         toolbarAlwaysVisible = store.getBoolean("keep_toolbar_visible", false),
         wrapMetadata = store.getBoolean("wrap_metadata", false),
+        staggerLyricMotion = store.getBoolean("lyric_stagger_enabled", true),
+        lyricStaggerMilliseconds = NativeLyricStagger.clampSpan(
+            store.getInt("lyric_stagger_ms", NativeLyricStagger.DEFAULT_SPAN_MS),
+        ),
+        correctLyricTitles = store.getBoolean("correct_lyric_titles", false),
     )
 
     fun save(value: NativePlayerPreferences) {
@@ -29,6 +37,9 @@ internal class NativePlayerPreferenceStore(context: Context) {
             .putBoolean("transport", value.showTransport)
             .putBoolean("keep_toolbar_visible", value.toolbarAlwaysVisible)
             .putBoolean("wrap_metadata", value.wrapMetadata)
+            .putBoolean("lyric_stagger_enabled", value.staggerLyricMotion)
+            .putInt("lyric_stagger_ms", NativeLyricStagger.clampSpan(value.lyricStaggerMilliseconds))
+            .putBoolean("correct_lyric_titles", value.correctLyricTitles)
             .apply()
     }
 }

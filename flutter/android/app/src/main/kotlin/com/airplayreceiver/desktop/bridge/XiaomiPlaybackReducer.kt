@@ -193,7 +193,7 @@ class XiaomiPlaybackReducer(
             }
             sessionActive = false
             pendingSeek = null
-            currentMediaInfo = currentMediaInfo?.copy(lyricsText = null)
+            currentMediaInfo = currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
             pendingMediaInfo = pendingMediaInfo
                 ?.takeIf { it.sessionSequence > resolvedSession }
             return XiaomiReduction(
@@ -290,7 +290,7 @@ class XiaomiPlaybackReducer(
             val previous = pendingMediaInfo
                 ?.takeIf { it.sessionSequence == resolvedSession }
                 ?.mediaInfo
-                ?: currentMediaInfo?.copy(lyricsText = null)
+                ?: currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
             val replaceTrack = isNewTrack(previous, mediaInfo)
             val merged = mergeMediaInfo(previous, mediaInfo, replaceTrack)
             pendingMediaInfo = PendingMediaInfo(
@@ -339,8 +339,12 @@ class XiaomiPlaybackReducer(
             mutations = listOf(
                 XiaomiPlaybackMutation.ApplyMediaInfo(
                     sessionSequence = resolvedSession,
-                    mediaInfo = if (mergedMediaInfo.lyricsText == updatedLyrics) mergedMediaInfo else
-                        mergedMediaInfo.copy(lyricsText = updatedLyrics),
+                    mediaInfo = mergedMediaInfo.copy(
+                        lyricsText = updatedLyrics,
+                        // Missing on progress ticks. Forward only evidence from this packet.
+                        titleIsLyric = reconciledMediaInfo.titleIsLyric,
+                        trackIdSource = reconciledMediaInfo.trackIdSource,
+                    ),
                     replaceTrack = replaceTrack,
                 ),
             ),
@@ -441,6 +445,10 @@ class XiaomiPlaybackReducer(
             metadataChangeType =
                 incoming.metadataChangeType ?: previous.metadataChangeType,
             lyricsText = incoming.lyricsText ?: previous.lyricsText,
+            titleIsLyric = incoming.titleIsLyric ?: previous.titleIsLyric.takeIf { incoming.title == null },
+            trackIdSource = incoming.trackIdSource ?: previous.trackIdSource.takeIf {
+                incoming.trackId == null && incoming.title == null
+            },
         )
     }
 

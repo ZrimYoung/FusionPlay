@@ -13,6 +13,7 @@ import com.airplayreceiver.desktop.backend.MiPlayDeviceIdentity
 import com.airplayreceiver.desktop.backend.NetworkMediaEventGate
 import com.airplayreceiver.desktop.backend.PlaybackCommand
 import com.airplayreceiver.desktop.backend.ReceiverProtocol
+import com.airplayreceiver.desktop.backend.displayMetadata
 import com.airplayreceiver.desktop.backend.SourceTakeoverPolicy
 import com.airplayreceiver.desktop.backend.XiaomiTakeoverGate
 import com.airplayreceiver.desktop.bridge.WindowsBridgeDiagnostic
@@ -100,6 +101,7 @@ class FusionPlayRuntime(
     private val nativeCast = com.fusionplay.android.cast.NativeCastManager(context, scope)
     private val audioCalibration = context.getSharedPreferences("audio_sync", Context.MODE_PRIVATE)
     private var miPlayOutputAdvanceMs = audioCalibration.getInt("advance_ms", 0).coerceIn(0, 500)
+    private var correctLyricTitles = NativePlayerPreferenceStore(context).load().correctLyricTitles
     private val mutableUiState = MutableStateFlow(projectUiState(viewModel.state.value))
     val uiState = mutableUiState.asStateFlow()
 
@@ -847,6 +849,8 @@ class FusionPlayRuntime(
                         bitsPerSample = media.bitsPerSample,
                         channels = media.channels,
                         lyricsText = media.lyricsText,
+                        titleIsLyric = media.titleIsLyric,
+                        trackIdSource = media.trackIdSource,
                     )
                 }
             }
@@ -1031,6 +1035,12 @@ class FusionPlayRuntime(
 
     fun refreshUiState() = publishState(viewModel.state.value)
 
+    fun setCorrectLyricTitles(enabled: Boolean) {
+        if (correctLyricTitles == enabled) return
+        correctLyricTitles = enabled
+        publishMediaSession(viewModel.state.value)
+    }
+
     private fun publishMediaSession(state: AppState) {
         val playback = state.playback
         val hasMedia = playback.title != null || playback.streamActive || playback.mediaUrl != null
@@ -1048,10 +1058,11 @@ class FusionPlayRuntime(
             return
         }
         mediaSessionHasMedia = true
+        val labels = playback.displayMetadata(correctLyricTitles)
         val metadata = MediaMetadataProjection(
-            title = playback.title ?: playback.protocol ?: "FusionPlay",
-            artist = playback.artist,
-            album = playback.album,
+            title = labels.title?.takeIf { it.isNotBlank() } ?: playback.protocol ?: "FusionPlay",
+            artist = labels.artist,
+            album = labels.album,
             mediaIdentity = playback.trackIdentity ?: playback.mediaUrl ?: playback.title,
         )
         if (metadata != lastPublishedMetadata) {

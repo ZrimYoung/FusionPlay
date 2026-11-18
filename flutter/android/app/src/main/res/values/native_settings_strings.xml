@@ -40,7 +40,11 @@
     <string name="native_settings_transport">显示播放控制</string>
     <string name="native_settings_wrap_metadata">允许歌名和艺人信息换行</string>
     <string name="native_settings_lyrics">显示歌词</string>
+    <string name="native_settings_lyric_stagger">歌词交错动效</string>
+    <string name="native_settings_lyric_stagger_span">交错时间跨度</string>
+    <string name="native_settings_lyric_stagger_value">%1$d ms</string>
     <string name="native_settings_toolbar">始终显示顶部按钮</string>
+    <string name="native_settings_correct_lyric_titles">修正歌词标题</string>
     <string name="native_settings_about">关于应用</string>
     <string name="native_settings_version">FusionPlay %1$s</string>
     <string name="native_settings_export">导出日志</string>

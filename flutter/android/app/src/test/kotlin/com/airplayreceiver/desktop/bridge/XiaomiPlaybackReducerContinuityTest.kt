@@ -95,6 +95,24 @@ class XiaomiPlaybackReducerContinuityTest {
         assertNull(small.copy(eventName = "progress").toMediaInfoOrNull()?.lyricsText)
     }
 
+    @Test
+    fun trackIdSourceIsForwardedOnlyAsMetadataEvidence() {
+        val reducer = XiaomiPlaybackReducer()
+        reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+        val mapping = mediaEvent(1, 2, "Caption", "metadata:caption", null, trackIdSource = "metadata")
+        val caption = reducer.reduce(mapping).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals("metadata", caption.mediaInfo.trackIdSource)
+
+        val progress = mapping.copy(
+            eventName = "progress",
+            payload = buildJsonObject { put("position_ms", JsonPrimitive(75_000)) },
+            bridgeSequence = 3,
+        )
+        val tick = reducer.reduce(progress).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals("metadata:caption", tick.mediaInfo.trackId)
+        assertNull(tick.mediaInfo.trackIdSource)
+    }
+
     private fun playbackEvent(
         session: Long,
         sequence: Long,
@@ -119,6 +137,7 @@ class XiaomiPlaybackReducerContinuityTest {
         artwork: String?,
         metadataChangeType: Int? = null,
         lyricsText: String? = null,
+        trackIdSource: String? = null,
     ): WindowsBridgeXiaomiEvent = WindowsBridgeXiaomiEvent(
         eventName = "media_info",
         payload = buildJsonObject {
@@ -129,6 +148,7 @@ class XiaomiPlaybackReducerContinuityTest {
                 put("metadata_change_type", JsonPrimitive(it))
             }
             lyricsText?.let { put("lyrics_text", JsonPrimitive(it)) }
+            trackIdSource?.let { put("track_id_source", JsonPrimitive(it)) }
         },
         bridgeSequence = sequence,
         sessionSequence = session,

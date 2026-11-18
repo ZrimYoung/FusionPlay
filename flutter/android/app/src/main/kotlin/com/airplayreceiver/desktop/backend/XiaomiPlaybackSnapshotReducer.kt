@@ -155,6 +155,9 @@ internal fun PlaybackSnapshot.applyXiaomiMediaInfo(
     bitsPerSample: Int? = null,
     channels: Int? = null,
     lyrics: LyricsDocument? = null,
+    lyricHeaders: PlaybackDisplayMetadata? = null,
+    titleIsLyric: Boolean? = null,
+    trackIdSource: String? = null,
 ): PlaybackSnapshot {
     if (!protocol.equals(XIAOMI_PROTOCOL, ignoreCase = true)) {
         return this
@@ -185,23 +188,61 @@ internal fun PlaybackSnapshot.applyXiaomiMediaInfo(
         ?: this.positionMs.takeUnless { replaceTrack }
         ?: 0L
 
+    val effectiveTitle = normalizedTitle ?: this.title.takeUnless { replaceTrack } ?: XIAOMI_PLACEHOLDER_TITLE
+    val effectiveArtist = normalizedArtist ?: this.artist.takeUnless { replaceTrack }
+    val effectiveAlbum = normalizedAlbum ?: this.album.takeUnless { replaceTrack }
+    // The transport still uses its existing track boundary and raw labels.
+    // The SDK hashes metadata when the sender omits its audio ID. A caption
+    // then gets a fresh synthetic ID. Require an exact match in the cached
+    // timed lyrics before keeping presentation evidence across that boundary.
+    val positionForCorrection = positionMs?.takeIf { it >= 0L }
+        ?: this.positionMs.takeUnless { replaceTrack }
+    val newHeaderTitle = lyricHeaders?.title
+    val previousHeaderTitle = this.lyricHeaders?.title
+    val conflictingHeaders = newHeaderTitle != null && previousHeaderTitle != null && !sameLabel(newHeaderTitle, previousHeaderTitle)
+    val sameTrackCaption = replaceTrack && normalizedTrackId != null && normalizedTrackId == trackIdentity && !conflictingHeaders &&
+        (titleIsLyric == true || (lyrics ?: this.lyrics).matchesTitleCaption(normalizedTitle, positionMs))
+    val fallbackIdentity = trackIdSource != "explicit" && (normalizedTrackId == null ||
+        (trackIdSource == "metadata" && normalizedTrackId.startsWith("metadata:")))
+    val compatibleLyrics = (lyrics == null && lyricHeaders == null) ||
+        (lyrics == this.lyrics && lyricHeaders == this.lyricHeaders)
+    val fallbackCaption = replaceTrack && fallbackIdentity && compatibleLyrics &&
+        this.lyrics.containsExactTimedCaption(normalizedTitle)
+    val previousPresentation = takeIf { !replaceTrack || sameTrackCaption || fallbackCaption }
+    val nextLyrics = lyrics ?: previousPresentation?.lyrics
+    val nextHeaders = lyricHeaders ?: previousPresentation?.lyricHeaders
+    val nextHint = titleIsLyric ?: previousPresentation?.lyricCaptionHint.takeIf { effectiveTitle == this.title }
+    val labelsChanged = replaceTrack || lyrics != null || lyricHeaders != null ||
+        nextHint != lyricCaptionHint || effectiveTitle != this.title || effectiveArtist != this.artist || effectiveAlbum != this.album
+    val correction = if (labelsChanged) {
+        resolveLyricTitleCorrection(
+            title = effectiveTitle.takeUnless { it == XIAOMI_PLACEHOLDER_TITLE },
+            artist = effectiveArtist,
+            album = effectiveAlbum,
+            explicitCaption = nextHint == true,
+            positionMs = positionForCorrection,
+            lyrics = nextLyrics,
+            headers = nextHeaders,
+            previous = previousPresentation,
+        )
+    } else lyricTitleCorrection
+
     return copy(
         trackIdentity = normalizedTrackId
             ?: this.trackIdentity.takeUnless { replaceTrack },
-        title = normalizedTitle
-            ?: this.title.takeUnless { replaceTrack }
-            ?: XIAOMI_PLACEHOLDER_TITLE,
-        artist = normalizedArtist
-            ?: this.artist.takeUnless { replaceTrack },
-        album = normalizedAlbum
-            ?: this.album.takeUnless { replaceTrack },
+        title = effectiveTitle,
+        artist = effectiveArtist,
+        album = effectiveAlbum,
         coverArt = normalizedArtwork
             ?: this.coverArt.takeUnless { replaceTrack },
         durationMs = effectiveDuration,
         positionMs = effectivePosition,
         qualityText = incomingQuality
             ?: this.qualityText.takeUnless { replaceTrack },
-        lyrics = lyrics ?: this.lyrics.takeUnless { replaceTrack },
+        lyrics = nextLyrics,
+        lyricHeaders = nextHeaders,
+        lyricTitleCorrection = correction,
+        lyricCaptionHint = nextHint,
     )
 }
 
