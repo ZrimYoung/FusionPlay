@@ -1,3 +1,4 @@
+using System.Text.Json;
 using FusionPlay.Core;
 
 internal static class DisplayMetadataTests
@@ -106,6 +107,23 @@ internal static class DisplayMetadataTests
             Require(replacement == new DisplayMetadata("Fresh Song", "Other", ""), "one-entry cache retained the previous song");
             cache.Reset();
             Require(!ReferenceEquals(replacement, cache.Resolve("Fresh Song", "Other", "", "")), "session reset retained cached metadata");
+        });
+        check("display metadata: shared projection repairs short captions without replacing seek identity", () =>
+        {
+            const string payload = """{"phase":"Paused","track_id":"fixture-track","title":"home","artist":"Raw Artist","album":"Album","display_title":"Night Walk","display_artist":"Band","display_album":null,"controls_available":true,"position_ms":1000,"duration_ms":10000}""";
+            var state = JsonSerializer.Deserialize<ReceiverSnapshot>(payload, WireJson.Options)
+                ?? throw new InvalidOperationException("snapshot did not deserialize");
+            var cache = new DisplayMetadataCache();
+            Require(cache.Resolve(state) == new DisplayMetadata("Night Walk", "Band", "Album", true),
+                "projection or raw fallback was ignored");
+            var request = Seeking.AtFraction(state, .5);
+            Require(request is { ExpectedTrackId: "fixture-track", ExpectedTitle: "home" },
+                "display correction changed seek identity");
+            Require(cache.Resolve(state with { DisplayTitle = "" }).Title.Length == 0,
+                "active caption was displayed as an unknown song title");
+            var legacy = state with { Title = "two words", DisplayTitle = null, DisplayArtist = null,
+                LyricsText = "[ti:Legacy Song]\n[00:01]Listen to these two words" };
+            Require(cache.Resolve(legacy).Title == "Legacy Song", "older snapshots lost title correction");
         });
         check("display metadata: correction preference defaults off and survives portable reopen", () =>
         {

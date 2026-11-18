@@ -2,7 +2,7 @@ name: Mac receiver and shared SDK compatibility
 on:
   workflow_dispatch:
   push:
-    branches: [main, feat/macos-receiver, integrate/macos-main]
+    branches: [main, feat/macos-receiver, feat/macos-lyrics, integrate/macos-main]
   pull_request:
     paths: ['macos/**', 'src/FusionPlay.Host/**', 'src/FusionPlay.MiPlaySdk/**', 'src/FusionPlay.AndroidIfAddrs/**', '.github/workflows/macos-receiver.yml']
 permissions:
@@ -35,8 +35,23 @@ jobs:
         run: bash macos/scripts/test-brand.sh
       - name: Test volume interaction and feedback ordering
         run: bash macos/scripts/test-volume.sh
+      - name: Test installed font resolution and fallback
+        run: bash macos/scripts/test-typography.sh
       - name: Test seek preview and confirmation lifecycle
         run: bash macos/scripts/test-timeline.sh
+      - name: Test lyrics parsing and display modes
+        run: |
+          bash macos/scripts/test-lyrics.sh
+          bash macos/scripts/test-lyrics-display-mode.sh
+          bash macos/scripts/test-display-metadata.sh
+      - name: Test lyrics follow and native resize policies
+        run: |
+          bash macos/scripts/test-lyrics-follow.sh
+          bash macos/scripts/test-window-behavior.sh
+      - name: Test player window across track metadata gaps
+        run: bash macos/scripts/test-player-lifecycle.sh all
+      - name: Test actual settings toolbar transitions
+        run: bash macos/scripts/test-settings-toolbar.sh
       - name: Archive app
         id: package
         shell: bash

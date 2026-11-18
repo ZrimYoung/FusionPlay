@@ -36,6 +36,7 @@ data class XiaomiMediaInfo(
     val lyricsText: String? = null,
     val titleIsLyric: Boolean? = null,
     val trackIdSource: String? = null,
+    val trackTransition: String? = null,
 )
 
 fun WindowsBridgeXiaomiEvent.toVolumePercentOrNull(): Int? {
@@ -150,6 +151,10 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
             ?.content
             ?.trim()
             ?.takeIf(String::isNotEmpty),
+        trackTransition = (objectPayload["track_transition"] as? JsonPrimitive)
+            ?.takeIf { normalizedEvent == "media_info" && it.isString }
+            ?.contentOrNull
+            ?.takeIf { it == "same" || it == "new" },
     )
 }
 

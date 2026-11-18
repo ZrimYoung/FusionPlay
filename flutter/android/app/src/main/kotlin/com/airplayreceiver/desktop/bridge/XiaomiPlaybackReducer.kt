@@ -402,7 +402,7 @@ class XiaomiPlaybackReducer(
         if (!hasIncomingIdentity) {
             return false
         }
-        if (previous == null) {
+        if (previous == null || incoming.trackTransition == "new") {
             return true
         }
         val previousExplicitId = previous.explicitTrackId()
@@ -410,6 +410,10 @@ class XiaomiPlaybackReducer(
         if (previousExplicitId != null && incomingExplicitId != null) {
             return previousExplicitId != incomingExplicitId
         }
+        // Only accept the SDK's continuity hint for the same cached wire ID.
+        if (incoming.trackTransition == "same" &&
+            !incoming.trackId.isNullOrBlank() && incoming.trackId == previous.trackId
+        ) return false
 
         val previousLyrics = previous.lyricsText
         val incomingLyrics = incoming.lyricsText
@@ -428,10 +432,7 @@ class XiaomiPlaybackReducer(
                 !evidence.metadata.conflictsWith(PlaybackDisplayMetadata(incoming.title, incoming.artist, incoming.album))
             ) return false
         }
-        if (
-            incoming.title != null &&
-            !incoming.title.equals(previous.title)
-        ) {
+        if (incoming.title != null && incoming.title != previous.title) {
             return true
         }
         if (

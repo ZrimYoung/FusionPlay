@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SyncAdjustmentControl: View {
     @ObservedObject var model: ReceiverModel
+    @Environment(\.appTypography) private var typography
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @State private var input = "0"
     @State private var invalidInput = false
@@ -24,7 +25,7 @@ struct SyncAdjustmentControl: View {
             }
             HStack(spacing: 12) {
                 Button { adjust(by: -10) } label: {
-                    Image(systemName: "minus").frame(width: 24, height: 24)
+                    Image(systemName: "minus").font(.system(size: 13)).frame(width: 24, height: 24)
                 }.disabled(unavailable || model.syncAdjustment <= -200)
                     .help(L("提前 10 ms")).accessibilityLabel(L("提前 10 ms"))
                 Slider(value: $model.syncAdjustment, in: -200...200) { editing in
@@ -36,23 +37,23 @@ struct SyncAdjustmentControl: View {
                 }.labelsHidden().frame(maxWidth: .infinity)
                     .accessibilityLabel(L("播放时间偏移")).disabled(unavailable)
                 Button { adjust(by: 10) } label: {
-                    Image(systemName: "plus").frame(width: 24, height: 24)
+                    Image(systemName: "plus").font(.system(size: 13)).frame(width: 24, height: 24)
                 }.disabled(unavailable || model.syncAdjustment >= 200)
                     .help(L("延后 10 ms")).accessibilityLabel(L("延后 10 ms"))
             }.buttonStyle(.borderless)
             HStack {
-                Text(L("提前")).font(.caption)
+                Text(L("提前")).font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize))
                 Spacer()
                 Button(L("恢复默认")) { apply(0) }
                     .disabled(unavailable || model.syncAdjustment == 0)
                 Spacer()
-                Text(L("延后")).font(.caption)
+                Text(L("延后")).font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize))
             }
             Text(L("负值提前，正值延后。输入后回车确认；加减按钮每次调整 10 ms。"))
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                .font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             if invalidInput {
                 Text(L("请输入 −200 到 200 之间的整数。"))
-                    .font(.caption).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
+                    .font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize)).foregroundStyle(.red).frame(maxWidth: .infinity, alignment: .leading)
             }
         }.frame(maxWidth: .infinity)
             .onAppear { refreshInput() }

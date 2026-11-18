@@ -14,6 +14,10 @@ use std::sync::{Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "ios")]
+#[path = "ios_discovery.rs"]
+mod ios_discovery;
+
 const MDNS_PORT: u16 = 5353;
 const LYRA_CONTROL_PORT: u16 = 5353;
 const MI_CONNECT_DISCOVERY_PORT: u16 = 56_666;
@@ -162,7 +166,10 @@ impl MiPlayAdvertisement {
         let protocol_name = sanitize_protocol_name(receiver_name);
         let instance = lyra_instance(lyra_instance_id, local_ip);
         let link_local_v6 = find_link_local_ipv6(interface_name, local_ip);
+        #[cfg(not(target_os = "ios"))]
         let mi_connect_ipv6 = find_mi_connect_ipv6(interface_name, local_ip, link_local_v6);
+        #[cfg(target_os = "ios")]
+        let mi_connect_ipv6 = link_local_v6;
         let interface_inventory = if_addrs::get_if_addrs()
             .unwrap_or_default()
             .into_iter()
@@ -228,7 +235,42 @@ impl MiPlayAdvertisement {
             control_port,
         )?;
 
-        #[cfg(not(windows))]
+        #[cfg(target_os = "ios")]
+        let worker = ios_discovery::spawn(
+            [
+                ios_discovery::Service {
+                    name: instance.clone(),
+                    kind: "_lyra-mdns._udp",
+                    port: LYRA_CONTROL_PORT,
+                    txt: build_txt_data(
+                        receiver_name,
+                        &instance,
+                        media_device_id,
+                        device_type,
+                        local_ip,
+                        link_local_v6,
+                        interface_name,
+                    ),
+                },
+                ios_discovery::Service {
+                    name: mi_connect_instance,
+                    kind: "_mi-connect._udp",
+                    port: MI_CONNECT_DISCOVERY_PORT,
+                    txt: build_mi_connect_txt(
+                        receiver_name,
+                        idm_instance_id,
+                        media_device_id,
+                        device_type,
+                        control_port,
+                    ),
+                },
+            ],
+            interface_name,
+            Arc::clone(&shutdown),
+            events,
+        )?;
+
+        #[cfg(not(any(windows, target_os = "ios")))]
         let worker = {
             let mut retired_mi_connect_instances = RETIRED_MI_CONNECT_INSTANCE_NAMES
                 .iter()

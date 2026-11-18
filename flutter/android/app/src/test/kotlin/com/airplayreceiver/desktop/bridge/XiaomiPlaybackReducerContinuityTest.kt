@@ -275,6 +275,139 @@ class XiaomiPlaybackReducerContinuityTest {
         }
     }
 
+    @Test
+    fun confirmedCaptionKeepsArtworkDurationAndPendingSeek() {
+        val reducer = XiaomiPlaybackReducer(nowMillis = { 0L })
+        reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+        reducer.reduce(
+            mediaEvent(
+                session = 1,
+                sequence = 2,
+                title = "Song",
+                trackId = "metadata:track-1",
+                artwork = "https://example.test/cover.webp",
+                durationMs = 180_000,
+                positionMs = 10_000,
+            ),
+        )
+        reducer.beginSeek(positionMs = 70_000)
+
+        val update = reducer.reduce(
+            mediaEvent(
+                session = 1,
+                sequence = 3,
+                title = "word",
+                trackId = "metadata:track-1",
+                artwork = null,
+                trackTransition = "same",
+                titleIsLyric = true,
+                positionMs = 11_000,
+            ),
+        )
+        val applied = update.mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+
+        assertFalse(applied.replaceTrack)
+        assertEquals("word", applied.mediaInfo.title)
+        assertEquals("metadata:track-1", applied.mediaInfo.trackId)
+        assertEquals("https://example.test/cover.webp", applied.mediaInfo.artworkUrl)
+        assertEquals(180_000L, applied.mediaInfo.durationMs)
+        assertNull(applied.mediaInfo.positionMs)
+
+        val acknowledgement = reducer.reduce(progressEvent(1, 4, 70_200))
+            .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(70_200L, acknowledgement.mediaInfo.positionMs)
+
+        val replacement = reducer.reduce(
+            mediaEvent(
+                session = 1,
+                sequence = 5,
+                title = "Next song",
+                trackId = "metadata:track-1",
+                artwork = null,
+                trackTransition = "new",
+            ),
+        )
+        val newTrack = replacement.mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertTrue(newTrack.replaceTrack)
+    }
+
+    @Test
+    fun onlyConfirmedMatchingIdentitySuppressesTitleBasedReplacement() {
+        val fallbackCases = listOf(
+            null to "metadata:track-1",
+            "new" to "metadata:track-1",
+            "unrecognized" to "metadata:track-1",
+            "same" to "metadata:track-2",
+            "same" to null,
+            "same" to " ",
+        )
+        for ((transition, trackId) in fallbackCases) {
+            val reducer = XiaomiPlaybackReducer()
+            reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+            reducer.reduce(
+                mediaEvent(
+                    session = 1,
+                    sequence = 2,
+                    title = "Song",
+                    trackId = "metadata:track-1",
+                    artwork = "https://example.test/cover.webp",
+                ),
+            )
+            val update = reducer.reduce(
+                mediaEvent(
+                    session = 1,
+                    sequence = 3,
+                    title = "word",
+                    trackId = trackId,
+                    artwork = null,
+                    trackTransition = transition,
+                ),
+            )
+            val applied = update.mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+
+            assertTrue("transition=$transition, trackId=$trackId", applied.replaceTrack)
+            assertEquals(null, applied.mediaInfo.artworkUrl)
+        }
+    }
+
+    @Test
+    fun confirmedMatchingTrackMayUpdateArtistAndAlbumWithoutReplacement() {
+        for (titleIsLyric in listOf(true, false)) {
+            val reducer = XiaomiPlaybackReducer()
+            reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+            reducer.reduce(
+                mediaEvent(
+                    session = 1,
+                    sequence = 2,
+                    title = "Song",
+                    trackId = "metadata:track-1",
+                    artwork = "https://example.test/cover.webp",
+                    artist = "Artist",
+                    album = "Album",
+                ),
+            )
+            val update = reducer.reduce(
+                mediaEvent(
+                    session = 1,
+                    sequence = 3,
+                    title = "word",
+                    trackId = "metadata:track-1",
+                    artwork = null,
+                    artist = "Song - Artist",
+                    album = "Song - Album",
+                    trackTransition = "same",
+                    titleIsLyric = titleIsLyric,
+                ),
+            )
+            val applied = update.mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+
+            assertFalse(applied.replaceTrack)
+            assertEquals("Song - Artist", applied.mediaInfo.artist)
+            assertEquals("Song - Album", applied.mediaInfo.album)
+            assertEquals("https://example.test/cover.webp", applied.mediaInfo.artworkUrl)
+        }
+    }
+
     private fun playbackEvent(
         session: Long,
         sequence: Long,
@@ -311,6 +444,10 @@ class XiaomiPlaybackReducerContinuityTest {
         trackIdSource: String? = null,
         positionMs: Long? = null,
         durationMs: Long? = null,
+        trackTransition: String? = null,
+        artist: String? = null,
+        album: String? = null,
+        titleIsLyric: Boolean? = null,
     ): WindowsBridgeXiaomiEvent = WindowsBridgeXiaomiEvent(
         eventName = "media_info",
         payload = buildJsonObject {
@@ -324,6 +461,10 @@ class XiaomiPlaybackReducerContinuityTest {
             trackIdSource?.let { put("track_id_source", JsonPrimitive(it)) }
             positionMs?.let { put("position_ms", JsonPrimitive(it)) }
             durationMs?.let { put("duration_ms", JsonPrimitive(it)) }
+            trackTransition?.let { put("track_transition", JsonPrimitive(it)) }
+            artist?.let { put("artist", JsonPrimitive(it)) }
+            album?.let { put("album", JsonPrimitive(it)) }
+            titleIsLyric?.let { put("title_is_lyric", JsonPrimitive(it)) }
         },
         bridgeSequence = sequence,
         sessionSequence = session,

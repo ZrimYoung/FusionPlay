@@ -1,0 +1,21 @@
+SDKROOT = iphoneos
+SUPPORTED_PLATFORMS = iphoneos iphonesimulator
+ARCHS = arm64
+IPHONEOS_DEPLOYMENT_TARGET = 17.0
+TARGETED_DEVICE_FAMILY = 1,2
+SUPPORTS_MACCATALYST = NO
+SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO
+
+PRODUCT_NAME = FusionPlay
+PRODUCT_BUNDLE_IDENTIFIER = tech.zrim.fusionplay.ios
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 23
+CODE_SIGN_STYLE = Automatic
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_FILE = Info.plist
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+
+SWIFT_VERSION = 5.0
+SWIFT_INCLUDE_PATHS = $(inherited) "$(PROJECT_DIR)/.generated"
+LIBRARY_SEARCH_PATHS = $(inherited) "$(PROJECT_DIR)/.generated/$(PLATFORM_NAME)"
+OTHER_LDFLAGS = $(inherited) -lfusionplay_host -framework AVFAudio -framework AudioToolbox -framework CoreAudio -framework CoreFoundation
