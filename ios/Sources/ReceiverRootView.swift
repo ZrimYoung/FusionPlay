@@ -106,6 +106,7 @@ struct ReceiverRootView: View {
         }
         .preferredColorScheme(.dark)
         .tint(PlayerPalette.accent)
+        .receiverTypography()
         .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
         .onChange(of: lyricsAvailable, initial: true) { _, available in
@@ -416,7 +417,6 @@ struct ReceiverRootView: View {
             PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
             if showProgress {
                 ReceiverProgressView(model: model, prioritizesScrubbing: paged)
-                    .tint(.white)
                     .transition(.opacity)
             }
             if showPlaybackControls {
@@ -564,6 +564,8 @@ private struct ReceiverLyricsView: View {
     @AppStorage(LyricsTypography.storageKey) private var lyricScalePercent = LyricsTypography.defaultScalePercent
     @AppStorage("staggerLyricMotion") private var staggerLyricMotion = true
     @AppStorage("lyricStaggerMilliseconds") private var lyricStaggerMilliseconds = LyricReflowTiming.defaultStaggerMilliseconds
+    @AppStorage(LyricReflowTiming.moveStorageKey) private var lyricLineMoveMilliseconds = LyricReflowTiming.defaultMoveMilliseconds
+    @Environment(\.receiverTypography) private var typography
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -582,6 +584,11 @@ private struct ReceiverLyricsView: View {
     private struct LayoutMetrics: Equatable {
         let viewport: CGSize
         let fontSize: CGFloat
+        let typography: ReceiverTypography
+    }
+
+    private var lineMoveDuration: TimeInterval {
+        LyricReflowTiming.moveDuration(milliseconds: lyricLineMoveMilliseconds)
     }
 
     private var staggerSpan: TimeInterval {
@@ -632,9 +639,8 @@ private struct ReceiverLyricsView: View {
             catch { return }
             if followWave?.start == wave.start { followWave = nil }
         }
-        .onChange(of: staggerSpan) { _, span in
-            if span == 0 { followWave = nil }
-        }
+        .onChange(of: staggerSpan) { _, _ in followWave = nil }
+        .onChange(of: lineMoveDuration) { _, _ in followWave = nil }
         .task(id: followRevision) {
             guard !following, !dragging, !scrollInMotion, !voiceOver else { return }
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
@@ -673,7 +679,7 @@ private struct ReceiverLyricsView: View {
         let bleed: CGFloat = allowsEffects ? 14 : 0
         let fontSize = min(36, max(26, size.width * 0.076)) * typeScale
             * LyricsTypography.scale(percent: lyricScalePercent)
-        let layout = LayoutMetrics(viewport: size, fontSize: fontSize)
+        let layout = LayoutMetrics(viewport: size, fontSize: fontSize, typography: typography)
         let topBlur: CGFloat = allowsEffects ? 3.5 : 0
         let bottomBlur: CGFloat = allowsEffects ? 10 : 0
         let timed = document.isTimed
@@ -699,6 +705,7 @@ private struct ReceiverLyricsView: View {
                     .padding(.bottom, timed && !voiceOver ? max(16, size.height * 0.68) : 16)
                 }
             }
+            .environment(\.lyricLineMoveDuration, lineMoveDuration)
             .coordinateSpace(name: Self.viewport)
             .scrollClipDisabled()
             .scrollIndicators(.hidden)
@@ -721,10 +728,11 @@ private struct ReceiverLyricsView: View {
             .task(id: layout) {
                 let prior = previousLayout
                 previousLayout = layout
-                guard let prior, prior != layout else { return }
+                guard let prior, prior != layout || isSettlingLayout else { return }
                 if !reduceMotion && !voiceOver {
                     isSettlingLayout = true
-                    do { try await Task.sleep(for: .seconds(LyricReflowTiming.duration + staggerSpan + 0.05)) }
+                    let reflowDuration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
+                    do { try await Task.sleep(for: .seconds(reflowDuration + staggerSpan + 0.05)) }
                     catch { return }
                 }
                 isSettlingLayout = false
@@ -822,37 +830,20 @@ private struct ReceiverLyricsView: View {
     private func scroll(_ proxy: ScrollViewProxy, to id: Int?, animated: Bool, from previous: Int? = nil) {
         guard isCurrentTrack, following, !isSettlingLayout, !dragging, !scrollInMotion, !voiceOver, let id else { return }
         let span = staggerSpan
+        let moveDuration = lineMoveDuration
         if animated, span > 0, let previous, (1...2).contains(abs(id - previous)) {
-            followWave = LyricFollowWave(start: Date(), direction: id > previous ? 1 : -1, span: span)
+            followWave = LyricFollowWave(start: Date(), direction: id > previous ? 1 : -1, span: span,
+                                         duration: moveDuration, previous: followWave)
+        } else {
+            followWave = nil
         }
-        withAnimation(animated && !reduceMotion ? .easeInOut(duration: LyricFollowWave.duration) : nil) {
+        withAnimation(animated && !reduceMotion ? .easeInOut(duration: moveDuration) : nil) {
             proxy.scrollTo(id, anchor: Self.followAnchor)
         }
     }
 }
 
-private struct LyricFollowWave {
-    static let duration = 0.42
-    let start: Date
-    let direction: CGFloat
-    let span: TimeInterval
-
-    var end: Date { start.addingTimeInterval(Self.duration + span) }
-
-    func offset(at time: Date, position: Double) -> CGFloat {
-        let delay = LyricReflowTiming.staggerDelay(span: span, position: position)
-        let elapsed = time.timeIntervalSince(start)
-        func eased(_ time: TimeInterval) -> Double {
-            let phase = min(1, max(0, time / Self.duration))
-            return phase * phase * (3 - 2 * phase)
-        }
-        return direction * 36 * CGFloat(eased(elapsed) - eased(elapsed - delay))
-    }
-}
-
 private struct LyricRowStagger: ViewModifier {
-    private static let steps = 32
-
     let span: TimeInterval
     let viewport: String
     let viewportHeight: CGFloat
@@ -861,10 +852,10 @@ private struct LyricRowStagger: ViewModifier {
     @State private var rank = 0
 
     func body(content: Content) -> some View {
-        let position = Double(rank) / Double(Self.steps)
+        let position = Double(rank) / Double(LyricReflowTiming.viewportSteps)
         let delay = LyricReflowTiming.staggerDelay(span: span, position: position)
         let activeWave = span > 0 ? wave : nil
-        TimelineView(.animation(paused: activeWave == nil)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: activeWave == nil)) { context in
             content
                 .environment(\.lyricMotionDelay, delay)
                 .offset(y: activeWave?.offset(at: context.date, position: position) ?? 0)
@@ -874,7 +865,7 @@ private struct LyricRowStagger: ViewModifier {
             let center = geometry.frame(in: .named(viewport)).midY
             guard center.isFinite else { return 0 }
             let position = min(1, max(0, center / viewportHeight))
-            return Int((position * CGFloat(Self.steps)).rounded())
+            return Int((position * CGFloat(LyricReflowTiming.viewportSteps)).rounded())
         } action: { rank = $0 }
     }
 }
@@ -884,6 +875,7 @@ struct PlayerTextHeightMotion: ViewModifier {
     let stagesEnabled: Bool
     let animateContentChanges: Bool
     @Environment(\.lyricMotionDelay) private var delay
+    @Environment(\.lyricLineMoveDuration) private var lineMoveDuration
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @State private var staticHeight: CGFloat?
@@ -929,13 +921,16 @@ struct PlayerTextHeightMotion: ViewModifier {
 
         if isWrap {
             if #available(iOS 18.0, *), stagesEnabled {
+                let duration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
                 motion = RowHeightMotion(
                     from: visible, target: size.height,
-                    start: now.addingTimeInterval(delay + LyricReflowTiming.duration * LyricReflowTiming.rowStart),
-                    end: now.addingTimeInterval(delay + LyricReflowTiming.duration * LyricReflowTiming.rowEnd)
+                    start: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowStart),
+                    end: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowEnd)
                 )
             } else {
-                motion = RowHeightMotion(from: visible, target: size.height, start: now, end: now.addingTimeInterval(0.22))
+                let duration = 0.22 * lineMoveDuration / LyricReflowTiming.defaultMoveDuration
+                motion = RowHeightMotion(from: visible, target: size.height,
+                                         start: now, end: now.addingTimeInterval(duration))
             }
         } else if let current = motion, now < current.end {
             motion = RowHeightMotion(from: visible, target: size.height, start: max(now, current.start), end: current.end)

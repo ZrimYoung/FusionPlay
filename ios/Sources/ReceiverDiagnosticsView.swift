@@ -21,6 +21,10 @@ struct ReceiverDiagnosticsView: View {
         Section {
             DisclosureGroup("同步诊断", isExpanded: $expanded) {
                 LabeledContent("接收状态", value: model.statusText)
+                LabeledContent("专辑封面") { Text(model.artworkStatus.title) }
+                if model.canReloadArtwork {
+                    Button("重新加载封面", action: model.reloadArtwork)
+                }
                 if let state = activeOutput {
                     LabeledContent("输出设备", value: state.output)
                     metric("音频缓冲", milliseconds: state.queueMs)

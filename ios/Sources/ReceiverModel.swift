@@ -1,4 +1,5 @@
 import AVFAudio
+import Network
 import SwiftUI
 import UIKit
 
@@ -22,8 +23,36 @@ private final class ReceiverEvents: StateListener, @unchecked Sendable {
 final class ReceiverModel: ObservableObject {
     static let syncAdjustmentRange = -200...200
 
+    enum ArtworkStatus: Equatable {
+        case disconnected, missing, loading, retrying, loaded, failed
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .disconnected: "尚未连接"
+            case .missing: "手机未提供封面"
+            case .loading: "正在加载封面"
+            case .retrying: "封面加载失败，正在重试"
+            case .loaded: "封面已加载"
+            case .failed: "封面加载失败"
+            }
+        }
+    }
+
+    struct LAN: Equatable {
+        let name: String
+        let address: String
+    }
+
+    private struct Listener: Equatable {
+        let name: String
+        let lan: LAN
+    }
+
+    @Published private(set) var lan: LAN?
+    @Published private(set) var audioRouteName = ""
     @Published private(set) var snapshot: Snapshot?
     @Published private(set) var artwork: UIImage?
+    @Published private(set) var artworkStatus: ArtworkStatus = .disconnected
     @Published private(set) var lyrics = LyricsDocument("")
     @Published private(set) var lyricsLoading = false
     @Published private(set) var initialized = false
@@ -51,7 +80,15 @@ final class ReceiverModel: ObservableObject {
     private var playedInCurrentSession = false
     private var backgroundGrace: (length: Duration, task: Task<Void, Never>)?
     @Published private var interrupted = false
-    private var runningName: String?
+    private var runningListener: Listener?
+    private let networkMonitor = NWPathMonitor()
+    private var networkRefresh: Task<Void, Never>?
+    private var foregroundNetworkRefresh: Task<Void, Never>?
+    private var routeObserver: NSObjectProtocol?
+    private var routeIDs: [String] = []
+    private var routeCheck: Task<Void, Never>?
+    private var outputRecoveryUntil: ContinuousClock.Instant?
+    private var needsOutputRestart = false
     private var generation: UInt64 = 0
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
     private var audioSessionActive = false
@@ -92,6 +129,16 @@ final class ReceiverModel: ObservableObject {
 
     init() {
         prepare()
+        updateOutputRoute(checkPlayback: false)
+        networkMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor [weak self] in self?.scheduleNetworkRefresh() }
+        }
+        networkMonitor.start(queue: backend)
+        routeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification, object: AVAudioSession.sharedInstance(), queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.updateOutputRoute() }
+        }
         interruptionObserver = NotificationCenter.default.addObserver(
             forName: AVAudioSession.interruptionNotification, object: AVAudioSession.sharedInstance(), queue: .main
         ) { [weak self] notification in
@@ -106,8 +153,15 @@ final class ReceiverModel: ObservableObject {
     }
 
     deinit {
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
+        networkMonitor.cancel()
+        networkRefresh?.cancel()
+        foregroundNetworkRefresh?.cancel()
+        routeCheck?.cancel()
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
         audioSessionRelease?.cancel()
+        artworkTask?.cancel()
+        artworkGraceTask?.cancel()
         let token = subscription
         let releaseAudioSession = audioSessionActive
         if let receiver {
@@ -138,17 +192,18 @@ final class ReceiverModel: ObservableObject {
     }
 
     var statusText: String {
-        if !error.isEmpty { return String(localized: "需要处理") }
-        if busy { return String(localized: "正在更新接收器…") }
-        if interrupted { return String(localized: "系统音频已中断") }
+        if !error.isEmpty { return ReceiverAppLanguage.text("需要处理") }
+        if busy { return ReceiverAppLanguage.text("正在更新接收器…") }
+        if interrupted { return ReceiverAppLanguage.text("系统音频已中断") }
+        if wantsReceiving && lan == nil { return ReceiverAppLanguage.text("等待局域网") }
         switch snapshot?.phase {
-        case .starting: return String(localized: "正在启动接收…")
-        case .ready: return String(localized: "等待投送")
-        case .connected: return String(localized: "已连接")
-        case .playing: return String(localized: "正在播放")
-        case .paused: return String(localized: "已暂停")
-        case .failed: return String(localized: "接收失败")
-        default: return String(localized: "接收已停止")
+        case .starting: return ReceiverAppLanguage.text("正在启动接收…")
+        case .ready: return ReceiverAppLanguage.text("等待投送")
+        case .connected: return ReceiverAppLanguage.text("已连接")
+        case .playing: return ReceiverAppLanguage.text("正在播放")
+        case .paused: return ReceiverAppLanguage.text("已暂停")
+        case .failed: return ReceiverAppLanguage.text("接收失败")
+        default: return ReceiverAppLanguage.text("接收已停止")
         }
     }
 
@@ -159,7 +214,7 @@ final class ReceiverModel: ObservableObject {
 
     var displayTitle: String {
         if let title = displayMetadata?.title, !title.isEmpty { return title }
-        return snapshot?.controlsAvailable == true ? String(localized: "手机正在投送") : String(localized: "等待你的音乐")
+        return snapshot?.controlsAvailable == true ? ReceiverAppLanguage.text("手机正在投送") : ReceiverAppLanguage.text("等待你的音乐")
     }
 
     var displaySubtitle: String {
@@ -171,6 +226,7 @@ final class ReceiverModel: ObservableObject {
         interrupted = false
         wantsReceiving = true
         error = ""
+        refreshLAN()
         if receiver == nil { prepare() }
         else { reconcile() }
     }
@@ -185,7 +241,7 @@ final class ReceiverModel: ObservableObject {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...63).contains(trimmed.utf8.count),
               !trimmed.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
-            error = String(localized: "设备名称为空、过长或包含控制字符。")
+            error = ReceiverAppLanguage.text("设备名称为空、过长或包含控制字符。")
             return
         }
         guard trimmed != name else { return }
@@ -198,8 +254,74 @@ final class ReceiverModel: ObservableObject {
     func setForeground(_ active: Bool) {
         foreground = active
         if active, snapshot?.controlsAvailable != true { playedInCurrentSession = false }
+        foregroundNetworkRefresh?.cancel()
+        foregroundNetworkRefresh = nil
+        if active {
+            refreshLAN()
+            updateOutputRoute()
+            // DHCP can change the bound address without a different interface.
+            foregroundNetworkRefresh = Task { [weak self] in
+                while !Task.isCancelled {
+                    do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                    guard let self else { return }
+                    self.refreshLAN()
+                }
+            }
+        }
         reconcile()
         if snapshot != nil { publishSystemMedia() }
+    }
+
+    private func scheduleNetworkRefresh() {
+        networkRefresh?.cancel()
+        networkRefresh = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
+            self?.refreshLAN()
+        }
+    }
+
+    private func refreshLAN(reconcileChanges: Bool = true) {
+        // Match the Rust listener selection, including a local network
+        // without internet access.
+        guard let interfaces = try? networkInterfaces() else { return }
+        let available = interfaces.map { LAN(name: $0.name, address: $0.address) }
+        // An added interface must not replace a still-working cast.
+        let current = available.first { $0 == runningListener?.lan } ?? available.first
+        guard current != lan else { return }
+        lan = current
+        if reconcileChanges { reconcile() }
+    }
+
+    private func updateOutputRoute(checkPlayback: Bool = true) {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        let names = outputs.map(\.portName).joined(separator: " · ")
+        if audioRouteName != names { audioRouteName = names }
+        let identifiers = outputs.map(\.uid)
+        let hadRoute = !routeIDs.isEmpty
+        guard routeIDs != identifiers else { return }
+        routeIDs = identifiers
+        routeCheck?.cancel()
+        guard checkPlayback, hadRoute, audioSessionActive, !busy,
+              let state = snapshot, state.controlsAvailable else { return }
+
+        // Let RemoteIO follow the route as long as playback recovers normally.
+        outputRecoveryUntil = ContinuousClock().now + .seconds(7)
+        guard state.phase == .playing else { return }
+        routeCheck = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(4)) } catch { return }
+            guard let self, let current = self.snapshot, current.controlsAvailable,
+                  current.phase == .connected, TrackKey(current) == TrackKey(state),
+                  current.queueMs >= 100 else { return }
+            self.retryChangedOutput()
+        }
+    }
+
+    private func retryChangedOutput() {
+        guard wantsReceiving, !interrupted, let deadline = outputRecoveryUntil,
+              ContinuousClock().now < deadline else { return }
+        outputRecoveryUntil = nil
+        needsOutputRestart = true
+        reconcile()
     }
 
     private func handleInterruption(_ type: AVAudioSession.InterruptionType, mayResume: Bool) {
@@ -243,7 +365,7 @@ final class ReceiverModel: ObservableObject {
                     case .success(let millis):
                         self.syncAdjustment = Int(millis)
                     case .failure:
-                        self.syncAdjustmentError = String(localized: "无法读取同步微调。")
+                        self.syncAdjustmentError = ReceiverAppLanguage.text("无法读取同步微调。")
                     }
                     self.initialized = true
                     self.volumeState.observe(Double(receiver.settings().volume))
@@ -257,21 +379,32 @@ final class ReceiverModel: ObservableObject {
     }
 
     private func reconcile() {
-        let target: String?
-        if wantsReceiving && !interrupted {
-            // Only the foreground starts discovery. A background transition
-            // may keep the same receiver if its media session has played audio.
-            target = foreground ? name : (canContinueBackgroundPlayback ? runningName : nil)
+        let target: Listener?
+        if wantsReceiving, !interrupted, let lan {
+            if foreground {
+                target = Listener(name: name, lan: lan)
+            } else if canContinueBackgroundPlayback, runningListener?.lan == lan, !needsOutputRestart {
+                target = runningListener
+            } else {
+                target = nil
+            }
         } else {
             target = nil
         }
         updateBackgroundGrace(keepingReceiver: !foreground && target != nil)
-        if !foreground, target == nil, runningName != nil || busy {
+        if !foreground, target == nil, runningListener != nil || busy {
             beginBackgroundCleanup()
         }
         guard !busy else { return }
         guard let receiver else { endBackgroundCleanup(); return }
-        guard target != runningName else { endBackgroundCleanup(); return }
+        guard target != runningListener || (target != nil && needsOutputRestart) else {
+            endBackgroundCleanup()
+            return
+        }
+        needsOutputRestart = false
+        outputRecoveryUntil = nil
+        routeCheck?.cancel()
+        routeCheck = nil
         busy = true
         generation &+= 1
         let nextGeneration = generation
@@ -285,7 +418,7 @@ final class ReceiverModel: ObservableObject {
         audioSessionActive = false
         clearMedia()
         let startSettings = target.map {
-            Settings(name: $0, interfaceName: "", outputDevice: "", volume: UInt32(volume.rounded()))
+            Settings(name: $0.name, interfaceName: $0.lan.name, outputDevice: "", volume: UInt32(volume.rounded()))
         }
         let listener = ReceiverEvents(model: self, generation: nextGeneration)
         backend.async { [weak self] in
@@ -315,12 +448,15 @@ final class ReceiverModel: ObservableObject {
                 switch result {
                 case .success(let token):
                     self.subscription = token
-                    self.runningName = target
+                    self.runningListener = target
                     if token != nil { self.receive(receiver.snapshot(), generation: nextGeneration) }
                 case .failure(let error):
-                    self.runningName = nil
-                    self.wantsReceiving = false
-                    self.error = String(describing: error)
+                    self.runningListener = nil
+                    self.refreshLAN(reconcileChanges: false)
+                    if self.lan == target?.lan {
+                        self.wantsReceiving = false
+                        self.error = String(describing: error)
+                    }
                 }
                 self.reconcile()
             }
@@ -373,6 +509,7 @@ final class ReceiverModel: ObservableObject {
                 do {
                     try AVAudioSession.sharedInstance().setActive(true)
                     audioSessionActive = true
+                    updateOutputRoute(checkPlayback: false)
                 } catch {
                     self.error = error.localizedDescription
                     wantsReceiving = false
@@ -395,7 +532,7 @@ final class ReceiverModel: ObservableObject {
     }
 
     fileprivate func receive(_ state: Snapshot, generation: UInt64) {
-        guard generation == self.generation, runningName != nil, !interrupted else { return }
+        guard generation == self.generation, runningListener != nil, !interrupted else { return }
         if snapshot != state { snapshot = state }
         guard prepareAudioSession(for: state) else { return }
         if state.controlsAvailable, state.phase == .playing {
@@ -410,7 +547,17 @@ final class ReceiverModel: ObservableObject {
         let artworkChanged = updateMetadata(state)
         publishSystemMedia(force: artworkChanged)
         if state.phase == .failed {
-            error = state.message.isEmpty ? String(localized: "接收失败") : state.message
+            let previousLAN = lan
+            refreshLAN(reconcileChanges: false)
+            if previousLAN != lan {
+                reconcile()
+                return
+            }
+            if wantsReceiving, let deadline = outputRecoveryUntil, ContinuousClock().now < deadline {
+                retryChangedOutput()
+                return
+            }
+            error = state.message.isEmpty ? ReceiverAppLanguage.text("接收失败") : state.message
             wantsReceiving = false
         }
         if !foreground || state.phase == .failed { reconcile() }
@@ -423,6 +570,7 @@ final class ReceiverModel: ObservableObject {
         artworkGraceTask = nil
         requestedArtwork = nil
         loadedArtwork = nil
+        artworkStatus = .disconnected
         lyricsTask?.cancel()
         seekTimeout?.cancel()
         volumeTimeout?.cancel()
@@ -479,6 +627,7 @@ final class ReceiverModel: ObservableObject {
         if loadedArtwork == request {
             artworkGraceTask?.cancel()
             artworkGraceTask = nil
+            artworkStatus = .loaded
             return true
         }
 
@@ -494,21 +643,68 @@ final class ReceiverModel: ObservableObject {
                 self.artwork = nil
             }
         }
-        guard !request.source.isEmpty else { return true }
-        artworkTask = Task { [weak self] in
-            let image = try? await ArtworkLoader.load(request.source)
-            guard !Task.isCancelled, let self, self.requestedArtwork == request else { return }
-            self.artworkTask = nil
-            guard let image, let state = self.snapshot, state.controlsAvailable,
-                  ArtworkRequest(state) == request else { return }
-            self.artworkGraceTask?.cancel()
-            self.artworkGraceTask = nil
-            self.loadedArtwork = request
-            let decoded = UIImage(cgImage: image)
-            self.artwork = decoded
-            self.publishSystemMedia(force: true)
+        if request.source.allSatisfy(\.isWhitespace) {
+            artworkStatus = .missing
+        } else {
+            loadArtwork(request)
         }
         return true
+    }
+
+    var canReloadArtwork: Bool {
+        guard artworkStatus == .loaded || artworkStatus == .failed,
+              let state = snapshot, state.controlsAvailable,
+              let requestedArtwork else { return false }
+        return requestedArtwork == ArtworkRequest(state)
+    }
+
+    func reloadArtwork() {
+        guard canReloadArtwork, let requestedArtwork else { return }
+        loadArtwork(requestedArtwork)
+    }
+
+    private func loadArtwork(_ request: ArtworkRequest) {
+        artworkStatus = .loading
+        artworkTask = Task { [weak self] in
+            for attempt in 1...3 {
+                do {
+                    let image = try await ArtworkLoader.load(request.source)
+                    guard !Task.isCancelled, let self, self.requestedArtwork == request,
+                          let state = self.snapshot, state.controlsAvailable,
+                          ArtworkRequest(state) == request else { return }
+                    self.artworkTask = nil
+                    self.artworkGraceTask?.cancel()
+                    self.artworkGraceTask = nil
+                    self.loadedArtwork = request
+                    self.artwork = UIImage(cgImage: image)
+                    self.artworkStatus = .loaded
+                    self.publishSystemMedia(force: true)
+                    return
+                } catch {
+                    guard !Task.isCancelled, self?.requestedArtwork == request else { return }
+                    guard attempt < 3, Self.shouldRetryArtwork(error) else {
+                        self?.artworkTask = nil
+                        self?.artworkStatus = .failed
+                        return
+                    }
+                    self?.artworkStatus = .retrying
+                    do { try await Task.sleep(for: .seconds(2 * attempt)) }
+                    catch { return }
+                }
+            }
+        }
+    }
+
+    private static func shouldRetryArtwork(_ error: Error) -> Bool {
+        if let artworkError = error as? ArtworkError { return artworkError.retryable }
+        guard let error = error as? URLError else { return false }
+        switch error.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+             .dnsLookupFailed, .notConnectedToInternet, .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
     }
 
     private func systemArtwork(for state: Snapshot) -> UIImage? {
@@ -552,7 +748,7 @@ final class ReceiverModel: ObservableObject {
         seekTimeout = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(PlaybackTimeline.timeout)) } catch { return }
             guard let self, self.timeline.expire(token, now: ProcessInfo.processInfo.systemUptime) else { return }
-            self.controlMessage = String(localized: "手机尚未确认跳转")
+            self.controlMessage = ReceiverAppLanguage.text("手机尚未确认跳转")
         }
         submitControl(seekToken: token, fromSystem: fromSystem) {
             try $0.seek(positionMs: position, expectedTrackId: state.trackId, expectedTitle: state.title)
@@ -579,7 +775,7 @@ final class ReceiverModel: ObservableObject {
                 self.controlBusy = false
                 let dispatched = (try? result.get()).map { $0.dispatched || $0.confirmed } ?? false
                 if let seekToken { self.timeline.complete(seekToken, dispatched: dispatched) }
-                if !dispatched { self.controlMessage = String(localized: "发送控制指令失败") }
+                if !dispatched { self.controlMessage = ReceiverAppLanguage.text("发送控制指令失败") }
                 self.receive(receiver.snapshot(), generation: self.generation)
                 self.endSystemCommandTask()
             }
@@ -613,7 +809,7 @@ final class ReceiverModel: ObservableObject {
                     self.syncAdjustment = millis
                 case .failure:
                     if let stored { self.syncAdjustment = stored }
-                    self.syncAdjustmentError = String(localized: "无法保存同步微调。")
+                    self.syncAdjustmentError = ReceiverAppLanguage.text("无法保存同步微调。")
                 }
                 self.syncAdjustmentBusy = false
             }
@@ -629,13 +825,13 @@ final class ReceiverModel: ObservableObject {
             let result = Result { try receiver.setVolume(volume: change.value) }
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.volumeState.complete(change.token, succeeded: (try? result.get()) != nil) else { return }
-                if self.runningName != nil {
+                if self.runningListener != nil {
                     self.receive(receiver.snapshot(), generation: self.generation)
                 } else {
                     self.volumeState.observe(Double(receiver.settings().volume))
                 }
                 if case .failure = result {
-                    self.controlMessage = String(localized: "设置音量失败")
+                    self.controlMessage = ReceiverAppLanguage.text("设置音量失败")
                 }
                 self.volumeTimeout = Task { [weak self] in
                     do { try await Task.sleep(for: .seconds(2)) } catch { return }

@@ -44,7 +44,7 @@ struct PlayerPresentationLayout {
 
         gutter = Self.horizontalInset(for: width)
         let availableWidth = max(0, width - gutter * 2)
-        gap = min(64, max(28, availableWidth * 0.058))
+        let compactGap = min(64, max(28, availableWidth * 0.058))
         verticalInset = min(24, max(12, 12 + (height - 360) * 0.1))
         let availableHeight = max(0, height - verticalInset * 2)
         lyricsHeight = min(520, max(280, height * 0.64))
@@ -52,16 +52,24 @@ struct PlayerPresentationLayout {
 
         switch mode {
         case .stacked, .paged:
+            gap = compactGap
             contentWidth = min(availableWidth, 470)
             leadingWidth = contentWidth
             coverSide = min(contentWidth, 420, max(148, availableHeight - playbackHeight))
         case .artworkAndControls:
+            gap = compactGap
             contentWidth = min(availableWidth, 920)
             leadingWidth = min(440, (contentWidth - gap) / 2)
             coverSide = min(leadingWidth, availableHeight)
         case .artworkAndLyrics:
-            contentWidth = min(availableWidth, 1_180)
-            leadingWidth = min(400, (contentWidth - gap) * 0.43)
+            // Keep the original layout through normal iPad window widths.
+            // On wider displays the centered reading area stops at 1,440pt.
+            let t = min(1, max(0, (availableWidth - 1_180) / 420))
+            let expansion = t * t * (3 - 2 * t)
+            contentWidth = min(availableWidth, 1_180 + 260 * expansion)
+            gap = min(64 + 32 * expansion, max(28, contentWidth * 0.058))
+            let albumFraction = 0.43 - 0.05 * expansion
+            leadingWidth = min(400 + 160 * expansion, (contentWidth - gap) * albumFraction)
             coverSide = min(leadingWidth, max(144, availableHeight - playbackHeight + 25))
         }
     }

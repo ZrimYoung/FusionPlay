@@ -8,6 +8,7 @@ struct CompactLyricsTrackHeader: View {
     let showsArtwork: Bool
     let showsTrackInfo: Bool
 
+    @Environment(\.receiverTypography) private var typography
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var hasTrackInfo: Bool { showsTrackInfo && (!title.isEmpty || !subtitle.isEmpty) }
@@ -26,13 +27,13 @@ struct CompactLyricsTrackHeader: View {
         VStack(alignment: .leading, spacing: 3) {
             if !title.isEmpty {
                 Text(verbatim: title)
-                    .font(.headline)
+                    .font(typography.font(.headline, size: 17, weight: .semibold))
                     .accessibilityLabel(Text(verbatim: title))
                     .accessibilityAddTraits(.isHeader)
             }
             if !subtitle.isEmpty {
                 Text(verbatim: subtitle)
-                    .font(.subheadline.weight(.medium))
+                    .font(typography.font(.subheadline, size: 15, weight: .medium))
                     .foregroundStyle(.white.opacity(0.68))
                     .accessibilityLabel(Text(verbatim: subtitle))
             }

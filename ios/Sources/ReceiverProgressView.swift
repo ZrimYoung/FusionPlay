@@ -4,6 +4,8 @@ import SwiftUI
 struct ReceiverProgressView: View {
     @ObservedObject var model: ReceiverModel
     private let prioritizesScrubbing: Bool
+    @AppStorage(ReceiverProgressAppearance.modeKey) private var progressColorMode: ReceiverProgressColorMode = .white
+    @AppStorage(ReceiverProgressAppearance.customColorKey) private var progressColorHex = ReceiverProgressAppearance.defaultCustomHex
     @Environment(\.layoutDirection) private var layoutDirection
     @GestureState private var trackingDrag = false
     @State private var drag: Drag?
@@ -92,7 +94,7 @@ struct ReceiverProgressView: View {
             .fill(.white.opacity(0.19))
             .overlay(alignment: .leading) {
                 Rectangle()
-                    .fill(.tint)
+                    .fill(ReceiverProgressAppearance.fill(mode: progressColorMode, customHex: progressColorHex))
                     .frame(width: width * fraction)
             }
             .frame(width: width, height: 4)

@@ -1,36 +1,19 @@
 import SwiftUI
 
-enum LyricReflowTiming {
-    static let duration = 0.48
-    static let hideEnd = 0.31
-    static let rowStart = 0.34
-    static let rowEnd = 0.64
-    static let showStart = 0.68
-    static let slideDuration = 0.19
-
-    static let staggerRange = 0...240
-    static let defaultStaggerMilliseconds = 140
-    static let staggerStep = 10
-    static let maximumStaggerSpan = TimeInterval(staggerRange.upperBound) / 1_000
-
-    static func clampedStaggerMilliseconds(_ value: Int) -> Int {
-        min(staggerRange.upperBound, max(staggerRange.lowerBound, value))
-    }
-
-    static func staggerSpan(milliseconds: Int) -> TimeInterval {
-        TimeInterval(clampedStaggerMilliseconds(milliseconds)) / 1_000
-    }
-
-    static func staggerDelay(span: TimeInterval, position: Double) -> TimeInterval {
-        min(1, max(0, position)) * min(maximumStaggerSpan, max(0, span))
-    }
-}
-
 private struct LyricMotionDelayKey: EnvironmentKey {
     static let defaultValue: TimeInterval = 0
 }
 
+private struct LyricLineMoveDurationKey: EnvironmentKey {
+    static let defaultValue = LyricReflowTiming.defaultMoveDuration
+}
+
 extension EnvironmentValues {
+    var lyricLineMoveDuration: TimeInterval {
+        get { self[LyricLineMoveDurationKey.self] }
+        set { self[LyricLineMoveDurationKey.self] = newValue }
+    }
+
     var lyricMotionDelay: TimeInterval {
         get { self[LyricMotionDelayKey.self] }
         set { self[LyricMotionDelayKey.self] = newValue }
@@ -38,6 +21,7 @@ extension EnvironmentValues {
 }
 
 struct LyricReflowText: View {
+    @Environment(\.receiverTypography) private var typography
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
 
@@ -54,7 +38,7 @@ struct LyricReflowText: View {
     }
 
     var body: some View {
-        let text = Text(verbatim: value).font(.system(size: size, weight: weight))
+        let text = Text(verbatim: value).font(typography.font(size: size, weight: weight))
         Group {
             if #available(iOS 18.0, *), !reduceMotion, !voiceOver, value.utf8.count <= 1_024 {
                 AnimatedLyricText(text: text, overflow: min(120, max(8, size * 2)))
@@ -70,13 +54,14 @@ struct LyricReflowText: View {
 @available(iOS 18.0, *)
 private struct AnimatedLyricText: View {
     @Environment(\.lyricMotionDelay) private var motionDelay
+    @Environment(\.lyricLineMoveDuration) private var moveDuration
     let text: Text
     let overflow: CGFloat
     @State private var target: GlyphLayout?
     @State private var motion = GlyphMotion()
 
     var body: some View {
-        TimelineView(.animation(paused: motion.endsAt == nil)) { context in
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: motion.endsAt == nil)) { context in
             text.textRenderer(ReflowRenderer(target: target, motion: motion, now: context.date, overflow: overflow))
         }
         .onPreferenceChange(Text.LayoutKey.self) { layouts in
@@ -93,7 +78,8 @@ private struct AnimatedLyricText: View {
     private func accept(_ measured: GlyphLayout) {
         guard target != measured else { return }
         if let previous = target {
-            motion = motion.retarget(from: previous, to: measured, now: Date(), delay: motionDelay)
+            motion = motion.retarget(from: previous, to: measured, now: Date(), delay: motionDelay,
+                                     moveDuration: moveDuration)
         }
         target = measured
     }
@@ -161,11 +147,12 @@ private struct GlyphDissolve {
     private static let blurLead = 0.24
     let from: GlyphAppearance
     let startedAt: Date
-    var endsAt: Date { startedAt.addingTimeInterval(LyricReflowTiming.duration) }
+    let duration: TimeInterval
+    var endsAt: Date { startedAt.addingTimeInterval(duration) }
 
     func appearance(at destination: CGPoint, now: Date) -> GlyphAppearance? {
         let elapsed = max(0, now.timeIntervalSince(startedAt))
-        let progress = elapsed / LyricReflowTiming.duration
+        let progress = elapsed / duration
         if progress < LyricReflowTiming.hideEnd {
             let phase = progress / LyricReflowTiming.hideEnd
             let fade = Self.ease((phase - Self.blurLead) / (1 - Self.blurLead))
@@ -189,10 +176,11 @@ private struct GlyphDissolve {
 private struct GlyphSlide {
     let origin: CGPoint
     let startedAt: Date
-    var endsAt: Date { startedAt.addingTimeInterval(LyricReflowTiming.slideDuration) }
+    let duration: TimeInterval
+    var endsAt: Date { startedAt.addingTimeInterval(duration) }
 
     func position(at destination: CGPoint, now: Date) -> CGPoint {
-        let remaining = 1 - min(1, max(0, now.timeIntervalSince(startedAt) / LyricReflowTiming.slideDuration))
+        let remaining = 1 - min(1, max(0, now.timeIntervalSince(startedAt) / duration))
         let ease = CGFloat(remaining * remaining * remaining)
         return CGPoint(x: destination.x + (origin.x - destination.x) * ease,
                        y: destination.y + (origin.y - destination.y) * ease)
@@ -217,8 +205,11 @@ private struct GlyphMotion {
         return GlyphAppearance(origin: slide.position(at: destination, now: now))
     }
 
-    func retarget(from previous: GlyphLayout, to target: GlyphLayout, now: Date, delay: TimeInterval) -> Self {
+    func retarget(from previous: GlyphLayout, to target: GlyphLayout, now: Date,
+                  delay: TimeInterval, moveDuration: TimeInterval) -> Self {
         let start = now.addingTimeInterval(LyricReflowTiming.staggerDelay(span: delay, position: 1))
+        let dissolveDuration = LyricReflowTiming.reflowDuration(moveDuration: moveDuration)
+        let slideDuration = LyricReflowTiming.slideDuration(moveDuration: moveDuration)
         var nextDissolves: [GlyphLayout.Key: GlyphDissolve] = [:]
         var nextSlides: [GlyphLayout.Key: GlyphSlide] = [:]
 
@@ -229,13 +220,13 @@ private struct GlyphMotion {
             let visible = sliding?.position(at: prior.origin, now: now) ?? prior.origin
             if prior.line != destination.line {
                 let from = dissolving?.appearance(at: prior.origin, now: now) ?? GlyphAppearance(origin: visible)
-                nextDissolves[key] = GlyphDissolve(from: from, startedAt: start)
+                nextDissolves[key] = GlyphDissolve(from: from, startedAt: start, duration: dissolveDuration)
             } else if let dissolving {
                 // Another glyph can wrap without restarting this glyph's fade.
                 nextDissolves[key] = dissolving
             } else if Self.hasDisplacement(from: prior.origin, to: destination.origin) {
                 if Self.hasDisplacement(from: visible, to: destination.origin) {
-                    nextSlides[key] = GlyphSlide(origin: visible, startedAt: start)
+                    nextSlides[key] = GlyphSlide(origin: visible, startedAt: start, duration: slideDuration)
                 }
             } else if let sliding {
                 nextSlides[key] = sliding

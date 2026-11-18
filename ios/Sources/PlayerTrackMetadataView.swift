@@ -6,6 +6,7 @@ struct PlayerTrackMetadataView: View {
     let trackKey: String
 
     @AppStorage("wrapPlayerMetadata") private var wrapMetadata = false
+    @Environment(\.receiverTypography) private var typography
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var wrapThreshold = 8.0
@@ -22,13 +23,13 @@ struct PlayerTrackMetadataView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(verbatim: title)
-                .font(.system(.largeTitle, weight: .bold))
+                .font(typography.font(.largeTitle, size: 34, weight: .bold))
                 .accessibilityLabel(Text(verbatim: title))
                 .accessibilityAddTraits(.isHeader)
                 .contentTransition(.opacity)
             if !subtitle.isEmpty {
                 Text(verbatim: subtitle)
-                    .font(.body.weight(.medium))
+                    .font(typography.font(.body, size: 17, weight: .medium))
                     .foregroundStyle(.white.opacity(0.68))
                     .accessibilityLabel(Text(verbatim: subtitle))
                     .contentTransition(.opacity)

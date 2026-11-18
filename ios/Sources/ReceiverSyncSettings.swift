@@ -9,7 +9,7 @@ struct ReceiverSyncSettings: View {
     @State private var invalidInput = false
 
     private let range = ReceiverModel.syncAdjustmentRange
-    private let invalidOffsetMessage = String(localized: "请输入 −200 到 200 之间的整数。")
+    private var invalidOffsetMessage: String { ReceiverAppLanguage.text("请输入 −200 到 200 之间的整数。") }
     private var unavailable: Bool { !model.initialized || model.busy || model.syncAdjustmentBusy }
 
     var body: some View {

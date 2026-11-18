@@ -17,13 +17,15 @@ struct ReceiverSettingsView: View {
     @AppStorage("staggerLyricMotion") private var staggerLyricMotion = true
     @AppStorage("lyricStaggerMilliseconds") private var lyricStaggerMilliseconds = LyricReflowTiming.defaultStaggerMilliseconds
     @AppStorage("wrapPlayerMetadata") private var wrapPlayerMetadata = false
+    @AppStorage(LyricReflowTiming.moveStorageKey) private var lyricMoveMilliseconds = LyricReflowTiming.defaultMoveMilliseconds
+    @AppStorage(ReceiverAppLanguage.storageKey) private var appLanguage: ReceiverAppLanguage = .system
 
     @Environment(\.dismiss) private var dismiss
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @FocusState private var editingName: Bool
     @State private var draftName = ""
     @State private var page: Page? = .receiver
-    @State private var compactColumn: NavigationSplitViewColumn = .sidebar
+    @State private var compactPath: [Page] = []
 
     private enum Page: String, CaseIterable, Identifiable {
         case receiver, appearance, audio, about
@@ -41,9 +43,9 @@ struct ReceiverSettingsView: View {
 
         var symbol: String {
             switch self {
-            case .receiver: "antenna.radiowaves.left.and.right"
-            case .appearance: "paintbrush"
-            case .audio: "speaker.wave.2"
+            case .receiver: "speaker.wave.2"
+            case .appearance: "circle.lefthalf.filled"
+            case .audio: "gearshape"
             case .about: "info.circle"
             }
         }
@@ -62,42 +64,82 @@ struct ReceiverSettingsView: View {
 
     var body: some View {
         if #available(iOS 18, *), isPad {
-            navigation.presentationSizing(.page)
+            navigation.presentationSizing(.form)
         } else {
             navigation
         }
     }
 
     private var navigation: some View {
-        NavigationSplitView(preferredCompactColumn: $compactColumn) {
-            List(Page.allCases, selection: $page) { item in
-                NavigationLink(value: item) {
-                    Label(item.title, systemImage: item.symbol)
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("设置")
-            .navigationSplitViewColumnWidth(min: 170, ideal: 205, max: 245)
-            .toolbar {
-                if horizontalSizeClass != .regular {
-                    ToolbarItem(placement: .confirmationAction) { doneButton }
-                }
-            }
-        } detail: {
-            let current = page ?? .receiver
-            content(for: current)
-                .formStyle(.grouped)
-                .navigationTitle(current.title)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) { doneButton }
-                }
+        GeometryReader { geometry in
+            navigation(compact: horizontalSizeClass != .regular || geometry.size.width < 600)
         }
-        .navigationSplitViewStyle(.balanced)
+    }
+
+    private func navigation(compact: Bool) -> some View {
+        Group {
+            if compact {
+                compactNavigation
+            } else {
+                regularNavigation
+            }
+        }
         .onAppear { draftName = model.name }
         .onChange(of: model.name) { _, name in
             if !editingName { draftName = name }
         }
+        .onChange(of: compact) { _, isCompact in
+            if isCompact { compactPath.removeAll() }
+        }
+    }
+
+    private var regularNavigation: some View {
+        NavigationSplitView {
+            List(Page.allCases, selection: $page) { item in
+                NavigationLink(value: item) { pageLabel(item) }
+            }
+            .listStyle(.sidebar)
+            .navigationTitle("设置")
+            .navigationSplitViewColumnWidth(min: 140, ideal: 158, max: 180)
+        } detail: {
+            pageDetails(page ?? .receiver)
+        }
+        .navigationSplitViewStyle(.balanced)
+    }
+
+    private var compactNavigation: some View {
+        NavigationStack(path: $compactPath) {
+            List(Page.allCases) { item in
+                NavigationLink(value: item) { pageLabel(item) }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("设置")
+            .navigationDestination(for: Page.self) { item in pageDetails(item) }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { doneButton }
+            }
+        }
+    }
+
+    private func pageLabel(_ item: Page) -> some View {
+        Label {
+            Text(item.title)
+        } icon: {
+            Image(systemName: item.symbol)
+                .font(.system(size: 14, weight: .regular))
+                .imageScale(.medium)
+                .frame(width: 18, height: 18)
+        }
+    }
+
+    private func pageDetails(_ item: Page) -> some View {
+        content(for: item)
+            .formStyle(.grouped)
+            .navigationTitle(item.title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { doneButton }
+            }
     }
 
     private var doneButton: some View {
@@ -109,6 +151,12 @@ struct ReceiverSettingsView: View {
         case .receiver: receiverForm
         case .appearance: appearanceForm
         case .audio: Form {
+            Section {
+                LabeledContent("系统音频路由") {
+                    if model.audioRouteName.isEmpty { Text("尚未输出") }
+                    else { Text(verbatim: model.audioRouteName) }
+                }
+            }
             ReceiverSyncSettings(model: model)
             ReceiverDiagnosticsView(model: model)
         }
@@ -135,6 +183,14 @@ struct ReceiverSettingsView: View {
                         .textSelection(.enabled)
                 }
             }
+            Section("当前网络") {
+                if let lan = model.lan {
+                    LabeledContent("局域网地址", value: lan.address)
+                    LabeledContent("网络接口", value: lan.name)
+                } else {
+                    Text("等待局域网").foregroundStyle(.secondary)
+                }
+            }
             Section("设备名称") {
                 TextField("妙播列表显示的名称", text: $draftName)
                     .autocorrectionDisabled()
@@ -151,6 +207,7 @@ struct ReceiverSettingsView: View {
         Form {
             Section("播放显示") {
                 Toggle("显示进度与时间", isOn: $showProgress)
+                ReceiverProgressColorSettings()
                 Toggle("显示播放控制", isOn: $showPlaybackControls)
                 Toggle("允许歌名和艺人信息换行", isOn: $wrapPlayerMetadata)
                 Toggle("始终显示顶部按钮", isOn: $toolbarAlwaysVisible)
@@ -163,10 +220,19 @@ struct ReceiverSettingsView: View {
                     }
                 }
                 lyricScaleControl
+                lyricMoveControl
                 Toggle("修正歌词标题", isOn: $correctLyricTitles)
                     .onChange(of: correctLyricTitles) { _, _ in model.refreshDisplayPresentation() }
                 Toggle("歌词交错动效", isOn: $staggerLyricMotion)
                 if staggerLyricMotion { lyricStaggerControl }
+            }
+            ReceiverFontSettingsSection()
+            Section {
+                Picker("界面语言", selection: $appLanguage) {
+                    ForEach(ReceiverAppLanguage.allCases) { language in
+                        Text(language.title).tag(language)
+                    }
+                }
             }
             if isPad {
                 Section("窄窗布局") {
@@ -222,6 +288,26 @@ struct ReceiverSettingsView: View {
                 step: Double(LyricsTypography.scaleStep)
             )
             .accessibilityLabel("歌词字号")
+            .accessibilityValue(value)
+        }
+    }
+
+    private var lyricMoveControl: some View {
+        let range = LyricReflowTiming.moveMillisecondsRange
+        let millis = LyricReflowTiming.clampMoveMilliseconds(lyricMoveMilliseconds)
+        let value = Text(verbatim: "\(millis) ms").monospacedDigit()
+        return VStack(alignment: .leading, spacing: 7) {
+            LabeledContent("单行移动时长") { value }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(LyricReflowTiming.clampMoveMilliseconds(lyricMoveMilliseconds)) },
+                    set: { lyricMoveMilliseconds = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: Double(LyricReflowTiming.moveStepMilliseconds)
+            )
+            .accessibilityLabel("单行移动时长")
             .accessibilityValue(value)
         }
     }
