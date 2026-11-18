@@ -24,7 +24,8 @@ import SwiftUI
         let state = Snapshot(phase: .ready, title: "", artist: "", album: "", trackId: "", artworkUrl: "",
             lyricsText: "", durationMs: nil, positionMs: nil, controlsAvailable: false, volume: 50,
             message: "", address: "", output: "", queueMs: 0, outputLatencyMs: 0, scheduleErrorMs: 0,
-            underruns: 0, droppedFrames: 0, resyncs: 0)
+            underruns: 0, droppedFrames: 0, resyncs: 0,
+            displayTitle: nil, displayArtist: nil, displayAlbum: nil)
         let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["FUSIONPLAY_TOOLBAR_CHECK_ROOT"]!, isDirectory: true)
         _model = StateObject(wrappedValue: ReceiverModel.preview(state, artwork: nil, root: root))
     }

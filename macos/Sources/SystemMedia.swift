@@ -77,7 +77,6 @@ final class SystemMediaController {
     private let gate = MediaCommandGate()
     private var targets: [(MPRemoteCommand, Any)] = []
     private var last: MediaPresentation?
-    private let displayMetadataCache = DisplayMetadataCache()
     private var active = false
 
     init(send: @escaping @MainActor (PlaybackCommand) -> Void) {
@@ -109,10 +108,7 @@ final class SystemMediaController {
         let enabled = state.controlsAvailable && !busy
         gate.update(enabled: enabled, playing: state.phase == .playing)
         for (command, _) in targets { command.isEnabled = enabled }
-        let labels: DisplayMetadata?
-        if UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles") {
-            labels = displayMetadataCache.resolve(title: state.title, artist: state.artist, album: state.album, lyricsText: state.lyricsText)
-        } else { displayMetadataCache.reset(); labels = nil }
+        let labels = DisplayMetadata(state, correctLyricTitles: UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles"))
         guard let presentation = MediaPresentation(state, previouslyActive: active, metadata: labels) else {
             clear(); return
         }
@@ -126,7 +122,6 @@ final class SystemMediaController {
         last = presentation; active = true
     }
     func clear() {
-        displayMetadataCache.reset()
         gate.update(enabled: false, playing: false)
         for (command, _) in targets { command.isEnabled = false }
         if active { center.playbackState = .stopped; center.nowPlayingInfo = nil }

@@ -34,14 +34,17 @@ use symphonia::default::codecs::AacDecoder;
 
 pub type EventEmitter = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
-/// Signed Mac synchronization adjustment: positive delays local playback.
-#[cfg(target_os = "macos")]
-static MACOS_SYNC_ADJUSTMENT_MS: AtomicI64 = AtomicI64::new(0);
+/// Signed synchronization adjustment: positive delays local playback.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+static APPLE_SYNC_ADJUSTMENT_MS: AtomicI64 = AtomicI64::new(0);
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub fn set_apple_sync_adjustment_millis(millis: i32) {
+    APPLE_SYNC_ADJUSTMENT_MS.store(i64::from(millis.clamp(-200, 200)), Ordering::Release);
+}
 
 #[cfg(target_os = "macos")]
-pub fn set_macos_sync_adjustment_millis(millis: i32) {
-    MACOS_SYNC_ADJUSTMENT_MS.store(i64::from(millis.clamp(-200, 200)), Ordering::Release);
-}
+pub use set_apple_sync_adjustment_millis as set_macos_sync_adjustment_millis;
 
 #[cfg(windows)]
 static WINDOWS_SYNC_ADJUSTMENT_MS: AtomicI64 = AtomicI64::new(0);

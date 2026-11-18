@@ -20,15 +20,22 @@ private final class ReceiverEvents: StateListener, @unchecked Sendable {
 
 @MainActor
 final class ReceiverModel: ObservableObject {
+    static let syncAdjustmentRange = -200...200
+
     @Published private(set) var snapshot: Snapshot?
     @Published private(set) var artwork: UIImage?
     @Published private(set) var lyrics = LyricsDocument("")
     @Published private(set) var lyricsLoading = false
     @Published private(set) var initialized = false
     @Published private(set) var busy = false
-    @Published private(set) var wantsReceiving = false
+    // Read the launch preference once. Foreground transitions use the current intent.
+    @Published private(set) var wantsReceiving =
+        UserDefaults.standard.object(forKey: "autoStartReceiver") as? Bool ?? true
     @Published private(set) var error = ""
     @Published private(set) var controlMessage = ""
+    @Published private(set) var syncAdjustment = 0
+    @Published private(set) var syncAdjustmentBusy = false
+    @Published private(set) var syncAdjustmentError = ""
     @Published private(set) var name = UserDefaults.standard.string(forKey: "receiverName")
         ?? (UIDevice.current.userInterfaceIdiom == .pad ? "FusionPlay-iPad" : "FusionPlay-iPhone")
 
@@ -40,6 +47,8 @@ final class ReceiverModel: ObservableObject {
     private var subscription: UInt64?
     private let backend = DispatchQueue(label: "tech.zrim.fusionplay.ios.receiver", qos: .userInitiated)
     private var foreground = false
+    private var playedInCurrentSession = false
+    private var backgroundGrace: (length: Duration, task: Task<Void, Never>)?
     @Published private var interrupted = false
     private var runningName: String?
     private var generation: UInt64 = 0
@@ -47,12 +56,13 @@ final class ReceiverModel: ObservableObject {
     private var seekTimeout: Task<Void, Never>?
     private var volumeTimeout: Task<Void, Never>?
     private var metadataKey: TrackKey?
-    private var artworkSource = ""
-    private var lyricsSource = ""
+    private var requestedArtwork: ArtworkRequest?
+    private var loadedArtwork: ArtworkRequest?
     private var artworkTask: Task<Void, Never>?
+    private var artworkGraceTask: Task<Void, Never>?
+    private var lyricsSource = ""
     private var lyricsTask: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
-    private let metadata = DisplayMetadataCache()
     private lazy var systemMedia = SystemMediaController { [weak self] command in self?.control(command) }
 
     private struct TrackKey: Equatable {
@@ -61,6 +71,16 @@ final class ReceiverModel: ObservableObject {
         init(_ state: Snapshot) {
             id = state.trackId
             fallbackTitle = id.isEmpty ? state.title : ""
+        }
+    }
+
+    private struct ArtworkRequest: Equatable {
+        let track: TrackKey
+        let source: String
+
+        init(_ state: Snapshot) {
+            track = TrackKey(state)
+            source = state.artworkUrl
         }
     }
 
@@ -92,8 +112,18 @@ final class ReceiverModel: ObservableObject {
 
     var volume: Double { volumeState.value }
     var displayedPositionMs: UInt64? { timeline.displayPosition(now: ProcessInfo.processInfo.systemUptime) }
-    var canControl: Bool { snapshot?.controlsAvailable == true && foreground && !busy && !controlBusy }
+    var canControl: Bool {
+        wantsReceiving && !interrupted && !busy && !controlBusy && snapshot?.controlsAvailable == true
+            && (foreground || canContinueBackgroundPlayback)
+    }
     var canSeek: Bool { canControl && timeline.source?.canSeek == true }
+
+    private var canContinueBackgroundPlayback: Bool {
+        guard playedInCurrentSession, let snapshot else { return false }
+        if snapshot.phase == .ready { return true }
+        guard snapshot.controlsAvailable else { return false }
+        return snapshot.phase == .playing || snapshot.phase == .paused || snapshot.phase == .connected
+    }
 
     var statusText: String {
         if !error.isEmpty { return String(localized: "需要处理") }
@@ -112,10 +142,7 @@ final class ReceiverModel: ObservableObject {
 
     private var displayMetadata: DisplayMetadata? {
         guard let snapshot else { return nil }
-        if UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles") {
-            return metadata.resolve(title: snapshot.title, artist: snapshot.artist, album: snapshot.album, lyricsText: snapshot.lyricsText)
-        }
-        return DisplayMetadata(title: snapshot.title, artist: snapshot.artist, album: snapshot.album)
+        return DisplayMetadata(snapshot, correctLyricTitles: UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles"))
     }
 
     var displayTitle: String {
@@ -158,15 +185,22 @@ final class ReceiverModel: ObservableObject {
 
     func setForeground(_ active: Bool) {
         foreground = active
-        if !active, wantsReceiving || runningName != nil || busy {
-            beginBackgroundCleanup()
-        }
+        if active, snapshot?.controlsAvailable != true { playedInCurrentSession = false }
         reconcile()
     }
 
     private func handleInterruption(_ type: AVAudioSession.InterruptionType, mayResume: Bool) {
-        interrupted = type == .began
-        if type == .ended && !mayResume { wantsReceiving = false }
+        switch type {
+        case .began:
+            guard runningName != nil || (wantsReceiving && busy) else { return }
+            interrupted = true
+        case .ended:
+            guard interrupted else { return }
+            interrupted = false
+            if !mayResume { wantsReceiving = false }
+        @unknown default:
+            return
+        }
         reconcile()
     }
 
@@ -183,14 +217,21 @@ final class ReceiverModel: ObservableObject {
                 var values = URLResourceValues()
                 values.isExcludedFromBackup = true
                 try data.setResourceValues(values)
-                return try Receiver(dataDirectory: data.path)
+                let receiver = try Receiver(dataDirectory: data.path)
+                return (receiver, Result { try receiver.syncAdjustment() })
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.busy = false
                 switch result {
-                case .success(let receiver):
+                case .success(let (receiver, adjustment)):
                     self.receiver = receiver
+                    switch adjustment {
+                    case .success(let millis):
+                        self.syncAdjustment = Int(millis)
+                    case .failure:
+                        self.syncAdjustmentError = String(localized: "无法读取同步微调。")
+                    }
                     self.initialized = true
                     self.volumeState.observe(Double(receiver.settings().volume))
                 case .failure(let error):
@@ -203,9 +244,20 @@ final class ReceiverModel: ObservableObject {
     }
 
     private func reconcile() {
+        let target: String?
+        if wantsReceiving && !interrupted {
+            // Only the foreground starts discovery. A background transition
+            // may keep the same receiver if its media session has played audio.
+            target = foreground ? name : (canContinueBackgroundPlayback ? runningName : nil)
+        } else {
+            target = nil
+        }
+        updateBackgroundGrace(keepingReceiver: !foreground && target != nil)
+        if !foreground, target == nil, runningName != nil || busy {
+            beginBackgroundCleanup()
+        }
         guard !busy else { return }
         guard let receiver else { endBackgroundCleanup(); return }
-        let target = wantsReceiving && foreground && !interrupted ? name : nil
         guard target != runningName else { endBackgroundCleanup(); return }
         busy = true
         generation &+= 1
@@ -213,6 +265,7 @@ final class ReceiverModel: ObservableObject {
         let previous = subscription
         subscription = nil
         snapshot = nil
+        playedInCurrentSession = false
         clearMedia()
         let startSettings = target.map {
             Settings(name: $0, interfaceName: "", outputDevice: "", volume: UInt32(volume.rounded()))
@@ -262,6 +315,31 @@ final class ReceiverModel: ObservableObject {
         }
     }
 
+    private func updateBackgroundGrace(keepingReceiver: Bool) {
+        let length: Duration?
+        if keepingReceiver, let phase = snapshot?.phase, phase != .playing {
+            // RTSP may briefly close while the phone opens the next track.
+            // Only a previously playing cast gets this short route handoff.
+            length = .seconds(phase == .ready ? 2 : 30)
+        } else {
+            length = nil
+        }
+        guard backgroundGrace?.length != length else { return }
+        backgroundGrace?.task.cancel()
+        guard let length else {
+            backgroundGrace = nil
+            return
+        }
+        backgroundGrace = (length, Task { [weak self] in
+            do { try await Task.sleep(for: length) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.backgroundGrace = nil
+            guard !self.foreground, self.snapshot?.phase != .playing else { return }
+            self.playedInCurrentSession = false
+            self.reconcile()
+        })
+    }
+
     private func beginBackgroundCleanup() {
         guard backgroundTask == .invalid else { return }
         backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Stop FusionPlay receiver") { [weak self] in
@@ -276,28 +354,37 @@ final class ReceiverModel: ObservableObject {
     }
 
     fileprivate func receive(_ state: Snapshot, generation: UInt64) {
-        guard generation == self.generation, runningName != nil, foreground, !interrupted else { return }
+        guard generation == self.generation, runningName != nil, !interrupted else { return }
         if snapshot != state { snapshot = state }
+        if state.controlsAvailable, state.phase == .playing {
+            playedInCurrentSession = true
+        } else if !state.controlsAvailable, foreground || state.phase != .ready {
+            playedInCurrentSession = false
+        }
         volumeState.observe(Double(state.volume))
         timeline.observe(PlaybackObservation(trackID: state.trackId, title: state.title, duration: state.durationMs,
             position: state.positionMs, connected: state.controlsAvailable, playing: state.phase == .playing),
             now: ProcessInfo.processInfo.systemUptime)
-        updateMetadata(state)
-        systemMedia.update(state, busy: controlBusy, artwork: artworkSource == state.artworkUrl ? artwork : nil)
+        let artworkChanged = updateMetadata(state)
+        systemMedia.update(state, busy: !canControl, artwork: systemArtwork(for: state), force: artworkChanged)
         if state.phase == .failed {
             error = state.message.isEmpty ? String(localized: "接收失败") : state.message
             wantsReceiving = false
-            reconcile()
         }
+        if !foreground || state.phase == .failed { reconcile() }
     }
 
     private func clearMedia() {
         artworkTask?.cancel()
+        artworkTask = nil
+        artworkGraceTask?.cancel()
+        artworkGraceTask = nil
+        requestedArtwork = nil
+        loadedArtwork = nil
         lyricsTask?.cancel()
         seekTimeout?.cancel()
         volumeTimeout?.cancel()
         metadataKey = nil
-        artworkSource = ""
         lyricsSource = ""
         lyrics = LyricsDocument("")
         lyricsLoading = false
@@ -306,25 +393,20 @@ final class ReceiverModel: ObservableObject {
         currentControl = nil
         controlBusy = false
         controlMessage = ""
-        metadata.reset()
         systemMedia.clear()
     }
 
-    private func updateMetadata(_ state: Snapshot) {
+    private func updateMetadata(_ state: Snapshot) -> Bool {
         guard state.controlsAvailable else {
             if metadataKey != nil { clearMedia() }
-            return
+            return false
         }
         let key = TrackKey(state)
         if metadataKey != key {
             metadataKey = key
-            metadata.reset()
             controlMessage = ""
-            artworkTask?.cancel()
             lyricsTask?.cancel()
-            artworkSource = ""
             lyricsSource = ""
-            artwork = nil
             lyrics = LyricsDocument("")
             lyricsLoading = false
         }
@@ -343,27 +425,60 @@ final class ReceiverModel: ObservableObject {
                 }
             }
         }
-        if state.artworkUrl != artworkSource {
-            artworkSource = state.artworkUrl
-            artworkTask?.cancel()
-            artwork = nil
-            let source = artworkSource
-            guard !source.isEmpty else { return }
-            artworkTask = Task { [weak self] in
-                guard let image = try? await ArtworkLoader.load(source),
-                      !Task.isCancelled, let self, self.metadataKey == key, self.artworkSource == source else { return }
-                let decoded = UIImage(cgImage: image)
-                withAnimation(.easeInOut(duration: 0.25)) { self.artwork = decoded }
-                if let state = self.snapshot {
-                    self.systemMedia.update(state, busy: self.controlBusy, artwork: decoded, force: true)
-                }
+        return updateArtwork(ArtworkRequest(state))
+    }
+
+    private func updateArtwork(_ request: ArtworkRequest) -> Bool {
+        guard requestedArtwork != request else { return false }
+        requestedArtwork = request
+        artworkTask?.cancel()
+        artworkTask = nil
+        if loadedArtwork == request {
+            artworkGraceTask?.cancel()
+            artworkGraceTask = nil
+            return true
+        }
+
+        // Keep the outgoing image on the player while the next track sends
+        // its artwork. One deadline covers the entire gap, including empty
+        // updates and successive changes to the requested URL.
+        if artwork != nil, artworkGraceTask == nil {
+            artworkGraceTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                self.artworkGraceTask = nil
+                self.loadedArtwork = nil
+                self.artwork = nil
             }
         }
+        guard !request.source.isEmpty else { return true }
+        artworkTask = Task { [weak self] in
+            let image = try? await ArtworkLoader.load(request.source)
+            guard !Task.isCancelled, let self, self.requestedArtwork == request else { return }
+            self.artworkTask = nil
+            guard let image, let state = self.snapshot, state.controlsAvailable,
+                  ArtworkRequest(state) == request else { return }
+            self.artworkGraceTask?.cancel()
+            self.artworkGraceTask = nil
+            self.loadedArtwork = request
+            let decoded = UIImage(cgImage: image)
+            self.artwork = decoded
+            self.systemMedia.update(state, busy: !self.canControl, artwork: decoded, force: true)
+        }
+        return true
+    }
+
+    private func systemArtwork(for state: Snapshot) -> UIImage? {
+        // Control Center must not associate the temporarily displayed
+        // outgoing picture with the new track or a different artwork URL.
+        guard state.controlsAvailable, loadedArtwork == ArtworkRequest(state),
+              loadedArtwork == requestedArtwork else { return nil }
+        return artwork
     }
 
     func refreshDisplayPresentation() {
         guard foreground, !busy, let snapshot else { return }
-        systemMedia.update(snapshot, busy: controlBusy, artwork: artworkSource == snapshot.artworkUrl ? artwork : nil)
+        systemMedia.update(snapshot, busy: controlBusy, artwork: systemArtwork(for: snapshot))
     }
 
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
@@ -394,7 +509,7 @@ final class ReceiverModel: ObservableObject {
         let id = UUID()
         currentControl = id
         if let snapshot {
-            systemMedia.update(snapshot, busy: true, artwork: artwork)
+            systemMedia.update(snapshot, busy: true, artwork: systemArtwork(for: snapshot))
         }
         backend.async { [weak self] in
             let result = Result { try action(receiver) }
@@ -406,6 +521,34 @@ final class ReceiverModel: ObservableObject {
                 if let seekToken { self.timeline.complete(seekToken, dispatched: dispatched) }
                 if !dispatched { self.controlMessage = String(localized: "发送控制指令失败") }
                 self.receive(receiver.snapshot(), generation: self.generation)
+            }
+        }
+    }
+
+    func setSyncAdjustment(_ millis: Int) {
+        guard let receiver, !busy, !syncAdjustmentBusy,
+              Self.syncAdjustmentRange.contains(millis),
+              millis != syncAdjustment || !syncAdjustmentError.isEmpty else { return }
+        syncAdjustmentBusy = true
+        syncAdjustmentError = ""
+        backend.async { [weak self] in
+            let result = Result { try receiver.setSyncAdjustment(millis: Int32(millis)) }
+            let stored: Int?
+            if case .failure = result {
+                stored = (try? receiver.syncAdjustment()).map(Int.init)
+            } else {
+                stored = nil
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                switch result {
+                case .success:
+                    self.syncAdjustment = millis
+                case .failure:
+                    if let stored { self.syncAdjustment = stored }
+                    self.syncAdjustmentError = String(localized: "无法保存同步微调。")
+                }
+                self.syncAdjustmentBusy = false
             }
         }
     }

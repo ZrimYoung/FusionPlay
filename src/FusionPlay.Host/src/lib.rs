@@ -19,8 +19,8 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "macos")]
-mod macos_sync;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+mod apple_sync;
 mod network_identity;
 #[cfg(windows)]
 mod windows_calibration;
@@ -129,6 +129,9 @@ pub struct Snapshot {
     pub underruns: u64,
     pub dropped_frames: u64,
     pub resyncs: u64,
+    pub display_title: Option<String>,
+    pub display_artist: Option<String>,
+    pub display_album: Option<String>,
 }
 impl Default for Snapshot {
     fn default() -> Self {
@@ -153,6 +156,9 @@ impl Default for Snapshot {
             underruns: 0,
             dropped_frames: 0,
             resyncs: 0,
+            display_title: None,
+            display_artist: None,
+            display_album: None,
         }
     }
 }
@@ -560,8 +566,8 @@ impl Receiver {
                 message: "Selected audio output is unavailable".into(),
             });
         }
-        #[cfg(target_os = "macos")]
-        macos_sync::apply(&self.data)?;
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        apple_sync::apply(&self.data)?;
         let mut identity = load_identity(&self.data)?;
         #[cfg(windows)]
         windows_calibration::apply(&self.data, &settings)?;
@@ -773,12 +779,13 @@ fn reduce(state: &mut Snapshot, value: &Value) {
             let mut id = text("track_id");
             let incoming_lyrics = value["lyrics_text"].as_str().filter(|text| !text.is_empty());
             let changed_lyrics = incoming_lyrics.is_some_and(|text| !state.lyrics_text.is_empty() && text != state.lyrics_text);
-            let fallback = value["track_id_source"].as_str().is_some_and(|source| source != "explicit");
+            let projected = matches!(value["track_transition"].as_str(), Some("same" | "new"));
+            let fallback = !projected && value["track_id_source"].as_str().is_some_and(|source| source != "explicit");
             let same_metadata = !state.title.is_empty() && value["title"].as_str() == Some(state.title.as_str())
                 && [("artist", &state.artist), ("album", &state.album)].into_iter().all(|(key, existing)| {
                     value[key].as_str().is_none_or(|text| text.is_empty() || existing.is_empty() || text == existing)
                 });
-            let caption = !changed_lyrics && (fallback || id.is_empty() || id == state.track_id)
+            let caption = !projected && !changed_lyrics && (fallback || id.is_empty() || id == state.track_id)
                 && fusionplay_miplay_sdk::protocol::is_lyric_caption(value["title"].as_str().unwrap_or(""), &state.lyrics_text);
             // A phone can omit id/mLrc in its per-line caption refresh. Keep the
             // current identity rather than treating the caption hash as a song.
@@ -792,6 +799,9 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 state.album.clear();
                 state.artwork_url.clear();
                 state.lyrics_text.clear();
+                state.display_title = None;
+                state.display_artist = None;
+                state.display_album = None;
                 state.duration_ms = None;
                 state.position_ms = None;
                 state.track_id = id;
@@ -812,6 +822,13 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 } else if let Some(value) = value[key].as_str().filter(|v| !v.is_empty()) {
                     *field = value.into();
                 }
+            }
+            for (field, key) in [
+                (&mut state.display_title, "display_title"),
+                (&mut state.display_artist, "display_artist"),
+                (&mut state.display_album, "display_album"),
+            ] {
+                if let Some(display) = value[key].as_str() { *field = Some(display.to_owned()); }
             }
             if let Some(ms) = value["duration_ms"].as_u64().filter(|v| *v > 0) {
                 state.duration_ms = Some(ms);
@@ -844,6 +861,9 @@ fn clear_media(state: &mut Snapshot) {
     state.track_id.clear();
     state.artwork_url.clear();
     state.lyrics_text.clear();
+    state.display_title = None;
+    state.display_artist = None;
+    state.display_album = None;
     state.duration_ms = None;
     state.position_ms = None;
 }
@@ -934,6 +954,34 @@ fn write_diagnostic(dir: &Path, event: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projected_lyrics_title_keeps_raw_and_resets_with_the_track() {
+        let mut state = Snapshot::default();
+        reduce(&mut state, &serde_json::json!({
+            "event":"media_info", "track_id":"one", "track_transition":"new",
+            "title":"going home", "display_title":"Night Walk", "artwork":"cover",
+            "lyrics_text":"[00:01]we are going home", "duration_ms":120000,
+        }));
+        reduce(&mut state, &serde_json::json!({
+            "event":"media_info", "track_id":"one", "track_transition":"same",
+            "title":"home", "display_title":"Night Walk", "position_ms":1000,
+        }));
+        assert_eq!(state.title, "home");
+        assert_eq!(state.display_title.as_deref(), Some("Night Walk"));
+        assert_eq!(state.artwork_url, "cover");
+        assert_eq!(state.lyrics_text, "[00:01]we are going home");
+        assert_eq!(state.duration_ms, Some(120000));
+        reduce(&mut state, &serde_json::json!({
+            "event":"media_info", "track_id":"two", "track_transition":"new",
+            "title":"Home", "display_title":"",
+        }));
+        assert_eq!(state.title, "Home");
+        assert_eq!(state.display_title.as_deref(), Some(""));
+        assert!(state.artwork_url.is_empty() && state.lyrics_text.is_empty());
+        clear_media(&mut state);
+        assert_eq!(state.display_title, None);
+    }
+
     #[test]
     fn seek_rejects_disconnected_unknown_duration_stale_track_and_out_of_range() {
         let dir = std::env::temp_dir().join(format!("fusionplay-seek-{}", uuid::Uuid::new_v4()));

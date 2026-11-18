@@ -13,10 +13,9 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
     @Published var miniPlayerRequest = 0
-    private let displayMetadataCache = DisplayMetadataCache()
     var correctedDisplayMetadata: DisplayMetadata {
         guard let state = snapshot else { return DisplayMetadata(title: "", artist: "", album: "") }
-        return displayMetadataCache.resolve(title: state.title, artist: state.artist, album: state.album, lyricsText: state.lyricsText)
+        return DisplayMetadata(state, correctLyricTitles: true)
     }
     @Published var snapshot: Snapshot?
     @Published private(set) var playbackTimeline = PlaybackTimeline()
@@ -258,7 +257,6 @@ final class ReceiverModel: ObservableObject {
         let changedTrack = key != lyricsKey
         let waitingForMetadata = changedTrack && state.controlsAvailable && source.isEmpty && lyricsAvailable
         if changedTrack || !state.controlsAvailable {
-            displayMetadataCache.reset()
             lyricsTask?.cancel(); lyricsTask = nil; lyricsKey = key; lyricsSource = ""
             lyrics = LyricsDocument(""); lyricsLoading = false
         }

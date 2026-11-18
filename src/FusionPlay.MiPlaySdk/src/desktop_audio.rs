@@ -26,13 +26,9 @@ fn sync_adjustment_ms() -> i64 {
     {
         super::WINDOWS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        super::MACOS_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        0
+        super::APPLE_SYNC_ADJUSTMENT_MS.load(Ordering::Acquire)
     }
 }
 

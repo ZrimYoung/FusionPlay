@@ -289,7 +289,8 @@ import SwiftUI
         captionState.title = "touch her"
         captionState.artist = "Question...? (Explicit)-Taylor Swift"
         captionState.album = "Midnights"
-        captionState.lyricsText = "[ti:Question...? (Explicit)]\n[ar:Taylor Swift]\n[00:00.00]Do you wish you could still touch her"
+        captionState.displayTitle = "Question...? (Explicit)"
+        captionState.displayArtist = "Taylor Swift"
         let captionModel = ReceiverModel.preview(captionState, artwork: artwork, root: stateRoot)
         let correctedLabels = captionModel.correctedDisplayMetadata
         precondition(correctedLabels.title == "Question...? (Explicit)" && correctedLabels.artist == "Taylor Swift")
