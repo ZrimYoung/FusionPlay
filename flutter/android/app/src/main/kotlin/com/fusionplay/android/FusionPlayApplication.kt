@@ -7,7 +7,7 @@ import com.airplayreceiver.desktop.nativebridge.FusionPlayNative
 import com.fusionplay.android.media.FusionPlayMediaChannel
 import kotlin.system.exitProcess
 
-class FusionPlayFlutterApplication : Application() {
+class FusionPlayApplication : Application() {
     lateinit var diagnosticLogger: FusionPlayDiagnosticLogger
         private set
     lateinit var runtime: FusionPlayRuntime

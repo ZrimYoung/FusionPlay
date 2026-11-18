@@ -1,162 +1,228 @@
 package com.fusionplay.android
 
 import android.Manifest
-import android.app.AlertDialog
+import android.app.Activity
+import android.app.Dialog
+import android.app.UiModeManager
 import android.content.Context
 import android.content.Intent
+import android.content.res.Configuration
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
-import android.text.InputFilter
-import android.text.InputType
+import android.os.Handler
+import android.os.Looper
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.Window
 import android.view.WindowManager
-import android.view.inputmethod.EditorInfo
-import android.view.inputmethod.InputMethodManager
-import android.widget.EditText
+import android.widget.FrameLayout
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.fusionplay.android.media.FusionPlayMediaChannel
 import com.fusionplay.android.media.FusionPlayMediaCommand
-import io.flutter.embedding.android.FlutterActivity
-import io.flutter.embedding.engine.FlutterEngine
-import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
-class MainActivity : FlutterActivity() {
+class MainActivity : Activity() {
     private val consumedMediaKeys = mutableSetOf<Int>()
-    private var navigationKeyChannel: MethodChannel? = null
     private var pendingAccessibilityKeepAlivePrompt = false
-    private var receiverNameDialog: AlertDialog? = null
-    private var screenOnJob: Job? = null
+    private var stateJob: Job? = null
+    private var settingsDialog: Dialog? = null
+    private var settingsView: NativeSettingsView? = null
+    private var hasShownPlayback = false
+    private var restoreSettings = false
+    private var observing = false
+    private val runtime get() = (application as FusionPlayApplication).runtime
+    private val isTelevision by lazy(LazyThreadSafetyMode.NONE) {
+        getSystemService(UiModeManager::class.java)?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
+            packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
+    }
+    private lateinit var player: NativePlayerView
+    private lateinit var preferenceStore: NativePlayerPreferenceStore
+    private lateinit var preferences: NativePlayerPreferences
+    private val uiHandler = Handler(Looper.getMainLooper())
+    private val updateArtwork = Runnable {
+        if (observing) player.setArtwork(FusionPlayMediaChannel.currentArtwork())
+    }
+    private val mediaListener: () -> Unit = {
+        uiHandler.removeCallbacks(updateArtwork)
+        uiHandler.post(updateArtwork)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        configureImmersiveMode(window)
         super.onCreate(savedInstanceState)
+        configureWindow(window)
         AccessibilityKeepAliveController.markAppLaunchedThisBoot(this)
         volumeControlStream = AudioManager.STREAM_MUSIC
+        preferenceStore = NativePlayerPreferenceStore(this)
+        preferences = preferenceStore.load()
+        player = NativePlayerView(
+            context = this,
+            onPlayback = runtime::playback,
+            onSeek = runtime::seek,
+            onVolume = runtime::setVolume,
+            onOpenSettings = ::showSettings,
+            onUpdatePreferences = ::updatePreferences,
+        )
+        val root = FrameLayout(this).apply {
+            setBackgroundColor(Color.rgb(14, 17, 22))
+            addView(player, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+        setContentView(root)
+        restoreSettings = savedInstanceState?.getBoolean(STATE_SETTINGS_OPEN) == true
         pendingAccessibilityKeepAlivePrompt = shouldShowAccessibilityKeepAlivePrompt()
         requestReceiverPermissions()
     }
 
-    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-        (application as FusionPlayFlutterApplication).runtime.attach(flutterEngine.dartExecutor.binaryMessenger)
-        navigationKeyChannel = MethodChannel(
-            flutterEngine.dartExecutor.binaryMessenger,
-            NAVIGATION_KEY_CHANNEL,
-        )
-        navigationKeyChannel?.setMethodCallHandler { call, result ->
-            if (call.method == "editReceiverName") {
-                editReceiverName(call.argument<String>("value").orEmpty(),
-                    call.argument<String>("hint").orEmpty(), result)
-            } else result.notImplemented()
-        }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_SETTINGS_OPEN, settingsDialog?.isShowing == true)
+        super.onSaveInstanceState(outState)
     }
 
-    private fun editReceiverName(value: String, hint: String, result: MethodChannel.Result) {
-        if (receiverNameDialog != null) {
-            result.error("editor_busy", "名称编辑器已打开", null)
-            return
-        }
-        // Some TV firmwares only launch their IME when the focused View
-        // declares onCheckIsTextEditor(). FlutterView does not do so.
-        val editor = EditText(this).apply {
-            setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT
-            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
-            filters = arrayOf(InputFilter.LengthFilter(63))
-            setText(value)
-            setSelection(text.length)
-            this.hint = hint
-        }
-        var completed = false
-        val dialog = AlertDialog.Builder(this)
-            .setTitle("自定义名称")
-            .setView(editor)
-            .setPositiveButton("完成") { _, _ ->
-                completed = true
-                result.success(editor.text.toString())
-            }
-            .setNegativeButton("取消", null)
-            .create()
-        receiverNameDialog = dialog
+    private fun showSettings() {
+        if (settingsDialog != null || isFinishing || isDestroyed) return
+        val dialog = Dialog(this)
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        val content = NativeSettingsView(this, ::applySettingsAction, dialog::dismiss)
+        settingsView = content
+        settingsDialog = dialog
+        dialog.setContentView(content)
+        dialog.setCanceledOnTouchOutside(true)
         dialog.setOnDismissListener {
-            receiverNameDialog = null
-            if (!completed) result.success(null)
+            settingsDialog = null
+            settingsView = null
+            if (observing && isTelevision) player.focusPrimaryControl()
         }
-        dialog.setOnShowListener {
-            editor.requestFocus()
-            dialog.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
-                or WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-            editor.postDelayed({
-                if (dialog.isShowing) getSystemService(InputMethodManager::class.java)
-                    .showSoftInput(editor, InputMethodManager.SHOW_IMPLICIT)
-            }, 150)
+        dialog.setOnKeyListener { _, key, event ->
+            val menu = key == KeyEvent.KEYCODE_MENU
+            if (menu && event.action == KeyEvent.ACTION_UP) dialog.dismiss()
+            menu
         }
-        editor.setOnEditorActionListener { _, action, _ ->
-            if (action == EditorInfo.IME_ACTION_DONE) {
-                dialog.getButton(AlertDialog.BUTTON_POSITIVE).performClick()
-                true
-            } else false
-        }
+        render(runtime.uiState.value)
         dialog.show()
+        dialog.window?.let { settingsWindow ->
+            settingsWindow.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+            settingsWindow.setGravity(Gravity.CENTER)
+            val density = resources.displayMetrics.density
+            val width = (minOf(560, resources.configuration.screenWidthDp - 24) * density).toInt()
+            val height = (minOf(740, resources.configuration.screenHeightDp - 24) * density).toInt()
+            settingsWindow.setLayout(width.coerceAtLeast(1), height.coerceAtLeast(1))
+            settingsWindow.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
+        if (isTelevision) content.focusEntry()
     }
 
-    override fun onDestroy() {
-        receiverNameDialog?.dismiss()
-        navigationKeyChannel?.setMethodCallHandler(null)
-        super.onDestroy()
+    private fun applySettingsAction(action: NativeSettingsAction) {
+        when (action) {
+            is NativeSettingsAction.ReceiverName -> runtime.setReceiverName(action.value)
+            is NativeSettingsAction.Startup -> runtime.setStartupEnabled(action.value)
+            is NativeSettingsAction.AutoWake -> runtime.setAutoWakeEnabled(action.value)
+            is NativeSettingsAction.KeepScreenOn -> runtime.setKeepScreenOnWhilePlaying(action.value)
+            is NativeSettingsAction.AdvancedEffects -> runtime.setAdvancedEffectsEnabled(action.value)
+            is NativeSettingsAction.NativeCast -> runtime.setNativeCastPaused(action.value)
+            is NativeSettingsAction.AudioAdvance -> runtime.setMiPlayOutputAdvance(action.value)
+            is NativeSettingsAction.Protocol -> runtime.setProtocolEnabled(action.protocol, action.enabled)
+            is NativeSettingsAction.Identity -> runtime.setMiPlayDeviceIdentity(action.value)
+            NativeSettingsAction.ExportLogs -> runtime.exportLogs()
+            is NativeSettingsAction.PlayerPreferences -> updatePreferences(action.value)
+        }
+    }
+
+    private fun updatePreferences(value: NativePlayerPreferences) {
+        if (value == preferences) return
+        preferences = value
+        preferenceStore.save(value)
+        render(runtime.uiState.value)
+    }
+
+    private fun render(ui: ReceiverUiState) {
+        // Project the backend's effective default receiver name without writing it to disk.
+        val playerState = if (ui.state.settings.receiverName != null) ui.state else
+            ui.state.copy(settings = ui.state.settings.copy(receiverName = ui.receiverName))
+        player.render(playerState, ui.volumePercent, preferences)
+        val state = ui.state
+        settingsView?.render(state, ui.nativeCast, ui.miPlayOutputAdvanceMs, preferences)
+        setKeepScreenOn(observing && state.settings.keepScreenOnWhilePlaying && state.playback.isPlaying)
+        val playback = state.playback
+        val hasPlayback = playback.streamActive || playback.protocol != null ||
+            playback.title != null || playback.mediaUrl != null || playback.durationMs != null
+        if (!hasShownPlayback && hasPlayback && settingsDialog == null && isTelevision) {
+            player.focusPrimaryControl()
+        }
+        hasShownPlayback = hasPlayback
     }
 
     override fun onStart() {
         super.onStart()
+        observing = true
         appInForeground = true
-        val runtime = (application as FusionPlayFlutterApplication).runtime
         runtime.setAppForeground(true)
-        screenOnJob?.cancel()
-        screenOnJob = CoroutineScope(Dispatchers.Main.immediate).launch {
-            runtime.keepScreenOn.collect { keepOn ->
-                if (keepOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            }
+        FusionPlayMediaChannel.addStateListener(mediaListener)
+        updateArtwork.run()
+        runtime.refreshUiState()
+        stateJob?.cancel()
+        stateJob = CoroutineScope(Dispatchers.Main.immediate).launch {
+            runtime.uiState.collect(::render)
+        }
+        if (restoreSettings) {
+            restoreSettings = false
+            showSettings()
+        } else if (isTelevision && settingsDialog == null && currentFocus == null) {
+            player.focusPrimaryControl()
         }
     }
 
     override fun onStop() {
-        screenOnJob?.cancel()
-        screenOnJob = null
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        observing = false
+        stateJob?.cancel()
+        stateJob = null
+        FusionPlayMediaChannel.removeStateListener(mediaListener)
+        uiHandler.removeCallbacks(updateArtwork)
+        setKeepScreenOn(false)
         appInForeground = false
-        (application as FusionPlayFlutterApplication).runtime.setAppForeground(false)
+        runtime.setAppForeground(false)
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        settingsDialog?.dismiss()
+        super.onDestroy()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) configureImmersiveMode(window)
+        if (hasFocus) configureWindow(window)
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         if (isVolumeKey(event.keyCode)) {
             val handled = super.dispatchKeyEvent(event)
             if (event.action == KeyEvent.ACTION_UP) {
-                (application as FusionPlayFlutterApplication).runtime.syncVolumeFromReceiver()
+                runtime.syncVolumeFromReceiver()
             }
             return handled
         }
         if (event.keyCode == KeyEvent.KEYCODE_MENU) {
             if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
-                navigationKeyChannel?.invokeMethod("menu", null)
+                showSettings()
             }
             return true
         }
@@ -272,7 +338,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val RECEIVER_PERMISSION_REQUEST = 1201
-        private const val NAVIGATION_KEY_CHANNEL = "com.fusionplay.android/navigation_keys"
+        private const val STATE_SETTINGS_OPEN = "settings_open"
         private const val ACCESSIBILITY_PROMPT_PREFERENCES = "accessibility_keep_alive_prompt"
         private const val ACCESSIBILITY_PROMPT_SHOWN_KEY = "shown_v1"
 
@@ -295,17 +361,27 @@ class MainActivity : FlutterActivity() {
                 keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
                 keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
 
-        private fun configureImmersiveMode(window: Window) {
-            WindowCompat.setDecorFitsSystemWindows(window, false)
-            window.statusBarColor = Color.TRANSPARENT
-            window.navigationBarColor = Color.TRANSPARENT
-            if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
-            WindowCompat.getInsetsController(window, window.decorView).apply {
-                hide(WindowInsetsCompat.Type.systemBars())
-                systemBarsBehavior =
-                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        }
+    }
 
+    private fun configureWindow(window: Window) {
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = Color.TRANSPARENT
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        controller.isAppearanceLightStatusBars = false
+        controller.isAppearanceLightNavigationBars = false
+        if (isTelevision) {
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    private fun setKeepScreenOn(keepOn: Boolean) {
+        val flag = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+        if (((window.attributes.flags and flag) != 0) == keepOn) return
+        if (keepOn) window.addFlags(flag) else window.clearFlags(flag)
     }
 }

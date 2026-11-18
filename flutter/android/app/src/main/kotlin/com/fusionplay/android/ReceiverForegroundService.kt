@@ -197,7 +197,7 @@ class ReceiverForegroundService : Service() {
     }
 
     private fun diagnosticLogger() =
-        (application as FusionPlayFlutterApplication).diagnosticLogger
+        (application as FusionPlayApplication).diagnosticLogger
 
     private fun serviceAction(action: String, requestCode: Int): PendingIntent {
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or

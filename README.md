@@ -2,19 +2,17 @@
 
 FusionPlay 是一个面向全平台的局域网音乐投放接收器，支持 MiPlay AirPlay DLNA
 
-FusionPlay Android 最低支持 Android 5.0（API 21） 并对 Android TV 做了遥控器适配
+本分支的 Android 客户端使用 Kotlin 和 Android 原生控件，最低支持 Android 7.0（API 24），适配手机、平板和 Android TV。接收、协议和音频继续复用现有 Kotlin 服务及 Rust 核心。
 
-项目同时维护 Android 接收器与 SwiftUI + Rust 原生 macOS MiPlay 接收器。Mac 当前为测试版，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。Android 构建入口保持原样。
+项目同时维护 SwiftUI + Rust 原生 macOS MiPlay 接收器。Mac 当前为测试版，使用说明、构建及实播验收状态见 [macos/README.md](macos/README.md)。
 
 仓库也包含 C# / WinUI 3 与共享 Rust 核心实现的 Windows 原生 MiPlay 接收器，提供便携测试包和手动声音同步校准。构建和使用见 [windows/README.zh-CN.md](windows/README.zh-CN.md)，实际验证范围见 [windows/VALIDATION.md](windows/VALIDATION.md)。
 
 ## 目录结构
 
 ```text
-flutter/
-  lib/                  Flutter 界面与状态模型
-  android/app/          Android 宿主、Kotlin 后端和 Rust 构建任务
-  test/                 Flutter 与界面交互测试
+flutter/android/        原生 Android Gradle 工程、Kotlin 界面与后端、单元测试
+flutter/lib/            旧版 Flutter 界面，保留作迁移对照
 macos/                  macOS 原生应用、构建脚本与测试
 windows/                Windows 原生应用、便携打包与测试
 src/
@@ -28,33 +26,30 @@ tools/                  图标、抓包和诊断辅助工具
 
 项目只有 `flutter/android/app` 一个 Android 应用模块；Rust 动态库由该模块的 `buildRustNative` 任务生成到 Gradle 构建目录，不会写入源码树。
 
+## 原生 Android 播放器
+
+界面以 [FusionPlay iPadOS 参考分支 c6520c1](https://github.com/ZrimYoung/FusionPlay/tree/c6520c10c8d23badc88c0a8ba710bada2a74eab5/ios) 为依据。宽屏在无歌词时左右摆放封面和控制，打开歌词后左侧是封面和曲目信息、右侧是歌词。窄窗和大字体模式将同一内容纵向排列。播放页可点按唤出歌词、音量和设置，电视用遥控器进入相同控件。歌词依现有接收数据和曲目位置跟随，手动浏览一段时间后自动恢复。
+
+设置在播放器上打开，接收服务继续运行。保留设备名称、各协议独立开关、妙播设备类型、同步校准、自动唤醒、播放亮屏和日志导出。进度、播放按钮、歌词、工具栏和曲目信息换行的显示偏好在本机保存。
+
 ## 构建环境
 
 - Windows 10/11 与 PowerShell 7。
-- Flutter 3.32.8、Dart 3.8.1。
 - Android SDK 36、Android NDK 28.2.13676358。
-- JDK 21。
-- Rust 工具链以 `src/AirPlayReceiver.Core/rust-toolchain.toml` 为准。
+- JDK 17 或 21，Gradle 由工程 Wrapper 提供。
+- Rust 工具链以 `src/AirPlayReceiver.Core/rust-toolchain.toml` 为准。Windows 已安装 MSVC Build Tools 时，也可用 `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` 配合 NDK。给所用工具链安装 `armv7-linux-androideabi`、`aarch64-linux-android`、`x86_64-linux-android` 目标。
 - `cargo-ndk` 可执行文件位于 `CARGO_HOME/bin` 或 `PATH`。
 
-标准环境变量为 `FLUTTER_ROOT`、`ANDROID_HOME`（或 `ANDROID_SDK_ROOT`）、`JAVA_HOME` 与 `CARGO_HOME`。如使用集中工具目录，也可以设置 `FUSIONPLAY_TOOLS_ROOT`；构建脚本会将缓存放入该目录并自动处理包含非 ASCII 字符的工程路径。
+标准环境变量为 `ANDROID_HOME`（或 `ANDROID_SDK_ROOT`）、`JAVA_HOME` 与 `CARGO_HOME`。使用集中工具目录时也可设置 `FUSIONPLAY_TOOLS_ROOT`。本分支的 Android 构建无需 Flutter SDK。
 
 ## 检查与测试
 
-```powershell
-Set-Location .\flutter
-flutter pub get --enforce-lockfile
-flutter analyze --no-pub
-flutter test --no-pub
-Set-Location ..
-```
-
-Kotlin 单元测试可通过 Flutter Android 工程的 Gradle Wrapper 执行：
+使用 Gradle Wrapper 执行 Kotlin 单元测试：
 
 ```powershell
 .\flutter\android\gradlew.bat `
   -p .\flutter\android `
-  :app:testReleaseUnitTest `
+  :app:testDebugUnitTest `
   --no-daemon
 ```
 
@@ -66,7 +61,11 @@ Rust 模块可分别运行 `cargo test` 和 `cargo clippy`。Android 原生库�
 .\flutter\tool\build_universal.ps1
 ```
 
-脚本读取根目录 `VERSION`，计算 Android `versionCode`，构建包含 32 位 ARM、64 位 ARM 与 x86_64 的单一 APK，并将 APK 与 Dart 混淆符号保存到 `artifacts/releases/`。该目录不进入版本控制。
+脚本通过 Gradle 构建包含 32 位 ARM、64 位 ARM 与 x86_64 的单一 APK，并将 APK 保存到 `artifacts/android-native/`。需要与旧版并存时，可用独立测试包名构建：
+
+```powershell
+.\flutter\tool\build_universal.ps1 -Configuration Debug -ApplicationId com.fusionplay.android.nativepreview
+```
 
 当前 Release 配置在没有私有签名配置时使用 Android 调试签名，公开发布商店版本前应替换为自己的安全签名流程，且不得提交密钥文件。
 

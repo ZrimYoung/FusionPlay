@@ -1,10 +1,13 @@
 package com.airplayreceiver.desktop.bridge
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+
+private const val MAX_MIPLAY_LYRICS_BYTES = 256 * 1024
 
 data class XiaomiPlaybackState(
     val sessionActive: Boolean,
@@ -30,6 +33,7 @@ data class XiaomiMediaInfo(
     val bitsPerSample: Int? = null,
     val channels: Int? = null,
     val metadataChangeType: Int? = null,
+    val lyricsText: String? = null,
 )
 
 fun WindowsBridgeXiaomiEvent.toVolumePercentOrNull(): Int? {
@@ -127,6 +131,13 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
             ?.longOrNull
             ?.takeIf { it in 0L..2L }
             ?.toInt(),
+        lyricsText = (objectPayload["lyrics_text"] as? JsonPrimitive)
+            ?.takeIf { normalizedEvent == "media_info" && it.isString }
+            ?.content
+            ?.takeIf {
+                it.length <= MAX_MIPLAY_LYRICS_BYTES && it.isNotBlank() &&
+                    it.encodeToByteArray().size <= MAX_MIPLAY_LYRICS_BYTES
+            },
     )
 }
 

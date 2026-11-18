@@ -28,12 +28,9 @@ import com.airplayreceiver.desktop.bridge.XiaomiPlaybackReducer
 import com.airplayreceiver.desktop.bridge.XiaomiReduction
 import com.airplayreceiver.desktop.bridge.toVolumePercentOrNull
 import com.airplayreceiver.desktop.bridge.toXiaomiMiPlayUserMessage
+import com.fusionplay.android.cast.NativeCastState
 import com.fusionplay.android.media.FusionPlayMediaChannel
 import com.fusionplay.android.media.FusionPlayMediaCommand
-import io.flutter.plugin.common.BinaryMessenger
-import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.MethodCall
-import io.flutter.plugin.common.MethodChannel
 import java.io.Closeable
 import java.net.URI
 import java.nio.file.Paths
@@ -45,9 +42,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -58,13 +55,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 
-/**
- * Process-scoped owner of the original FusionPlay backend.
- *
- * Flutter is intentionally only a view layer. Protocol lifecycle, source
- * arbitration, playback projection and transport controls remain here and use
- * the same backend policies as the original Android frontend.
- */
+data class ReceiverUiState(
+    val state: AppState,
+    val nativeCast: NativeCastState,
+    val miPlayOutputAdvanceMs: Int,
+    val volumePercent: Int,
+    val receiverName: String,
+)
+
+/** Process-scoped owner of protocol lifecycle, routing, and Android media state. */
 class FusionPlayRuntime(
     private val context: Context,
     private val diagnosticLogger: FusionPlayDiagnosticLogger,
@@ -75,11 +74,6 @@ class FusionPlayRuntime(
         diagnosticLogger = diagnosticLogger,
         parentScope = scope,
     )
-    // A cold flow emits the current setting/playback on every Activity start.
-    val keepScreenOn = viewModel.state.map { state ->
-        state.settings.keepScreenOnWhilePlaying && state.playback.isPlaying
-    }.distinctUntilChanged()
-
     private val bridge = WindowsBridgeClient(parentScope = scope, stopXiaomiOnClose = false)
     private val xiaomiReducer = XiaomiPlaybackReducer()
     private val xiaomiTakeoverGate = XiaomiTakeoverGate()
@@ -91,7 +85,6 @@ class FusionPlayRuntime(
     }
     private val closed = AtomicBoolean(false)
 
-    private var eventSink: EventChannel.EventSink? = null
     private var lastDesiredCoreConfiguration: CoreReceiverConfiguration? = null
     private var lastDesiredMiPlayConfiguration: MiPlayReceiverConfiguration? = null
     private var appliedMiPlayConfiguration: MiPlayReceiverConfiguration? = null
@@ -103,11 +96,12 @@ class FusionPlayRuntime(
     private var artworkJob: Job? = null
     private var xiaomiRestartGeneration = 0L
     private var pendingManualXiaomiStop = false
-    private var xiaomiTrackChangeDirection: String? = null
     private var lastMiPlayProgressLogNanos = 0L
     private val nativeCast = com.fusionplay.android.cast.NativeCastManager(context, scope)
     private val audioCalibration = context.getSharedPreferences("audio_sync", Context.MODE_PRIVATE)
     private var miPlayOutputAdvanceMs = audioCalibration.getInt("advance_ms", 0).coerceIn(0, 500)
+    private val mutableUiState = MutableStateFlow(projectUiState(viewModel.state.value))
+    val uiState = mutableUiState.asStateFlow()
 
     init {
         com.airplayreceiver.desktop.nativebridge.FusionPlayNative
@@ -192,98 +186,71 @@ class FusionPlayRuntime(
         }
     }
 
-    fun attach(messenger: BinaryMessenger) {
-        MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler(::onMethodCall)
-        EventChannel(messenger, EVENT_CHANNEL).setStreamHandler(
-            object : EventChannel.StreamHandler {
-                override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                    eventSink = events
-                    events?.success(stateMap(viewModel.state.value))
-                }
-
-                override fun onCancel(arguments: Any?) {
-                    eventSink = null
-                }
-            },
-        )
-    }
-
-    private fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        if (call.method == "state") {
-            result.success(stateMap(viewModel.state.value))
-            return
-        }
+    private fun runUiAction(action: suspend () -> Unit) {
         scope.launch {
-            runCatching {
-                when (call.method) {
-                    "setReceiverName" -> viewModel.setReceiverName(call.string("value"))
-                    "setStartupEnabled" -> {
-                        val enabled = call.boolean("value")
-                        viewModel.setStartupEnabled(enabled)
-                        if (enabled) {
-                            AccessibilityKeepAliveController.requestAuthorization(context)
-                        }
-                    }
-                    "setAutoWakeEnabled" -> {
-                        val enabled = call.boolean("value")
-                        viewModel.setAutoWakeEnabled(enabled)
-                        if (enabled) {
-                            AccessibilityKeepAliveController.requestAuthorization(context)
-                        }
-                    }
-                    "setKeepScreenOnWhilePlaying" ->
-                        viewModel.setKeepScreenOnWhilePlaying(call.boolean("value"))
-                    "setAdvancedEffectsEnabled" ->
-                        viewModel.setAdvancedEffectsEnabled(call.boolean("value"))
-                    "setNativeCastPaused" -> nativeCast.setPaused(call.boolean("value"))
-                    "setMiPlayOutputAdvance" -> {
-                        val millis = call.int("value")
-                        require(millis in 0..500) { "补偿范围为 0 至 500 毫秒" }
-                        com.airplayreceiver.desktop.nativebridge.FusionPlayNative.nativeSetMiPlayOutputAdvance(millis)
-                        audioCalibration.edit().putInt("advance_ms", millis).apply()
-                        miPlayOutputAdvanceMs = millis
-                        publishState(viewModel.state.value)
-                    }
-                    "setProtocolEnabled" -> viewModel.setProtocolEnabled(
-                        ReceiverProtocol.valueOf(call.string("protocol").uppercase()),
-                        call.boolean("value"),
-                    )
-                    "setMiPlayDeviceIdentity" -> viewModel.setMiPlayDeviceIdentity(
-                        MiPlayDeviceIdentity.fromPersistedValue(call.string("value")),
-                    )
-                    "playback" -> when (call.string("command")) {
-                        "previous" -> dispatchPlayback(PlaybackCommand.PREVIOUS_TRACK)
-                        "next" -> dispatchPlayback(PlaybackCommand.NEXT_TRACK)
-                        else -> dispatchPlayback(PlaybackCommand.PLAY_PAUSE)
-                    }
-                    "seek" -> dispatchSeek(call.long("positionMs"))
-                    "volume" -> dispatchVolume(call.int("percent"), applyLocal = true)
-                    "exportLogs" -> {
-                        viewModel.reportExternalLog("用户请求导出诊断日志。")
-                        val intent = withContext(Dispatchers.IO) {
-                            FusionPlayLogExporter.createShareIntent(
-                                context,
-                                diagnosticLogger,
-                            )
-                        }
-                        context.startActivity(
-                            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                        )
-                        viewModel.reportExternalLog("已打开系统日志导出菜单。")
-                    }
-                    "clearError" -> viewModel.clearError()
-                    else -> error("Unknown method ${call.method}")
-                }
-                stateMap(viewModel.state.value)
-            }.fold(
-                onSuccess = result::success,
-                onFailure = { error ->
-                    reportError("前后端调用失败", error)
-                    result.error("fusionplay_runtime", error.message, null)
-                },
-            )
+            try {
+                action()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportError("操作失败", error)
+            } finally {
+                publishState(viewModel.state.value)
+            }
         }
     }
+
+    fun setReceiverName(name: String) = runUiAction { viewModel.setReceiverName(name) }
+
+    fun setStartupEnabled(enabled: Boolean) = runUiAction {
+        viewModel.setStartupEnabled(enabled)
+        if (enabled) AccessibilityKeepAliveController.requestAuthorization(context)
+    }
+
+    fun setAutoWakeEnabled(enabled: Boolean) = runUiAction {
+        viewModel.setAutoWakeEnabled(enabled)
+        if (enabled) AccessibilityKeepAliveController.requestAuthorization(context)
+    }
+
+    fun setKeepScreenOnWhilePlaying(enabled: Boolean) = runUiAction {
+        viewModel.setKeepScreenOnWhilePlaying(enabled)
+    }
+
+    fun setAdvancedEffectsEnabled(enabled: Boolean) = runUiAction {
+        viewModel.setAdvancedEffectsEnabled(enabled)
+    }
+
+    fun setNativeCastPaused(paused: Boolean) = runUiAction { nativeCast.setPaused(paused) }
+
+    fun setMiPlayOutputAdvance(millis: Int) = runUiAction {
+        require(millis in 0..500) { "补偿范围为 0 至 500 毫秒" }
+        com.airplayreceiver.desktop.nativebridge.FusionPlayNative.nativeSetMiPlayOutputAdvance(millis)
+        audioCalibration.edit().putInt("advance_ms", millis).apply()
+        miPlayOutputAdvanceMs = millis
+    }
+
+    fun setProtocolEnabled(protocol: ReceiverProtocol, enabled: Boolean) = runUiAction {
+        viewModel.setProtocolEnabled(protocol, enabled)
+    }
+
+    fun setMiPlayDeviceIdentity(identity: MiPlayDeviceIdentity) = runUiAction {
+        viewModel.setMiPlayDeviceIdentity(identity)
+    }
+
+    fun playback(command: PlaybackCommand) = runUiAction { dispatchPlayback(command) }
+    fun seek(positionMs: Long) = runUiAction { dispatchSeek(positionMs) }
+    fun setVolume(percent: Int) = runUiAction { dispatchVolume(percent, applyLocal = true) }
+
+    fun exportLogs() = runUiAction {
+        viewModel.reportExternalLog("用户请求导出诊断日志。")
+        val intent = withContext(Dispatchers.IO) {
+            FusionPlayLogExporter.createShareIntent(context, diagnosticLogger)
+        }
+        context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        viewModel.reportExternalLog("已打开系统日志导出菜单。")
+    }
+
+    fun clearError() = viewModel.clearError()
 
     private fun routesControlsToXiaomi(state: AppState): Boolean {
         if (state.activeMediaSource == MediaSource.XIAOMI_MIPLAY) return true
@@ -478,7 +445,7 @@ class FusionPlayRuntime(
      */
     fun syncVolumeFromReceiver() {
         val percent = FusionPlayMediaChannel.currentSystemMediaVolumePercent()
-        scope.launch { dispatchVolume(percent, applyLocal = false) }
+        runUiAction { dispatchVolume(percent, applyLocal = false) }
     }
 
     private suspend fun dispatchVolume(percent: Int, applyLocal: Boolean) {
@@ -789,6 +756,7 @@ class FusionPlayRuntime(
             if (!FusionPlayMediaChannel.setSystemMediaVolumePercent(percent)) {
                 viewModel.reportExternalLog("无法将被控端媒体音量同步到 $percent%。", isError = true)
             }
+            publishState(viewModel.state.value)
         }
         val reduction = xiaomiReducer.reduce(event)
         if (shouldPersistMiPlayEvent(event.eventName)) {
@@ -857,7 +825,6 @@ class FusionPlayRuntime(
                     }
                 }
                 is XiaomiPlaybackMutation.Deactivate -> {
-                    xiaomiTrackChangeDirection = null
                     xiaomiTakeoverGate.reset()
                     // Pause already releases the arbiter; still remove the cached/UI
                     // session when its media route subsequently ends.
@@ -865,13 +832,6 @@ class FusionPlayRuntime(
                     viewModel.deactivateXiaomiPlayback()
                 }
                 is XiaomiPlaybackMutation.ApplyMediaInfo -> mutation.mediaInfo.let { media ->
-                    if (mutation.replaceTrack) {
-                        xiaomiTrackChangeDirection = when (media.metadataChangeType) {
-                            1 -> TRACK_CHANGE_NEXT
-                            2 -> TRACK_CHANGE_PREVIOUS
-                            else -> null
-                        }
-                    }
                     viewModel.updateXiaomiMediaInfo(
                         trackId = media.trackId,
                         title = media.title,
@@ -886,13 +846,14 @@ class FusionPlayRuntime(
                         sampleRate = media.sampleRate,
                         bitsPerSample = media.bitsPerSample,
                         channels = media.channels,
+                        lyricsText = media.lyricsText,
                     )
                 }
             }
         }
         runCatching {
             bridge.reportDiagnostic(
-                component = "flutter_xiaomi",
+                component = "android_xiaomi",
                 event = "event_reduced",
                 outcome = reduction.outcome.name.lowercase(),
                 reason = reduction.reason,
@@ -1056,9 +1017,19 @@ class FusionPlayRuntime(
         else -> null
     }
 
+    private fun projectUiState(state: AppState) = ReceiverUiState(
+        state = state,
+        nativeCast = nativeCast.state.value,
+        miPlayOutputAdvanceMs = miPlayOutputAdvanceMs,
+        volumePercent = FusionPlayMediaChannel.currentSystemMediaVolumePercent(),
+        receiverName = viewModel.receiverName,
+    )
+
     private fun publishState(state: AppState) {
-        eventSink?.success(stateMap(state))
+        mutableUiState.value = projectUiState(state)
     }
+
+    fun refreshUiState() = publishState(viewModel.state.value)
 
     private fun publishMediaSession(state: AppState) {
         val playback = state.playback
@@ -1140,60 +1111,6 @@ class FusionPlayRuntime(
             }
         }
     }
-
-    private fun stateMap(state: AppState): Map<String, Any?> = mapOf(
-        "nativeCast" to nativeCast.state.value.toMap(),
-        "miPlayOutputAdvanceMs" to miPlayOutputAdvanceMs,
-        "initialized" to state.initialized,
-        "busy" to state.busy,
-        "coreRunning" to state.coreRunning,
-        "receiverReady" to state.receiverReady,
-        "receiverPort" to state.receiverPort,
-        "receiverDeviceId" to state.receiverDeviceId,
-        "connectedClient" to state.connectedClient,
-        "activeMediaSource" to state.activeMediaSource?.name?.lowercase(),
-        "selectedCoreMediaSource" to state.selectedCoreMediaSource?.name?.lowercase(),
-        "receiverName" to viewModel.receiverName,
-        "settings" to mapOf(
-            "schemaVersion" to state.settings.schemaVersion,
-            "receiverName" to state.settings.receiverName,
-            "startupEnabled" to state.settings.startupEnabled,
-            "autoWakeEnabled" to state.settings.autoWakeEnabled,
-            "keepScreenOnWhilePlaying" to state.settings.keepScreenOnWhilePlaying,
-            "advancedEffectsEnabled" to state.settings.advancedEffectsEnabled,
-            "miPlayEnabled" to state.settings.miPlayEnabled,
-            "miPlayDeviceIdentity" to state.settings.miPlayDeviceIdentity.persistedValue,
-            "airPlayEnabled" to state.settings.airPlayEnabled,
-            "dlnaEnabled" to state.settings.dlnaEnabled,
-        ),
-        "playback" to mapOf(
-            "title" to state.playback.title,
-            "artist" to state.playback.artist,
-            "album" to state.playback.album,
-            "coverArt" to state.playback.coverArt,
-            "mediaUrl" to state.playback.mediaUrl,
-            "mediaKind" to state.playback.mediaKind,
-            "protocol" to state.playback.protocol,
-            "qualityText" to state.playback.qualityText,
-            "durationMs" to state.playback.durationMs,
-            "positionMs" to state.playback.positionMs,
-            "volumePercent" to FusionPlayMediaChannel.currentSystemMediaVolumePercent(),
-            "isPlaying" to state.playback.isPlaying,
-            "streamActive" to state.playback.streamActive,
-            "sourceEpoch" to state.playback.sourceEpoch,
-            "trackIdentity" to state.playback.trackIdentity,
-            "trackChangeDirection" to xiaomiTrackChangeDirection.takeIf {
-                state.playback.protocol.equals(XIAOMI_PROTOCOL, ignoreCase = true)
-            },
-        ),
-        "remoteControl" to mapOf(
-            "available" to state.remoteControl.available,
-            "commands" to state.remoteControl.commands.toList(),
-            "transport" to state.remoteControl.transport,
-            "experimental" to state.remoteControl.experimental,
-        ),
-        "lastError" to state.lastError,
-    )
 
     private fun reportError(prefix: String, error: Throwable) {
         viewModel.reportExternalLog("$prefix：${error.message}", isError = true)
@@ -1277,11 +1194,6 @@ class FusionPlayRuntime(
 
     fun setAppForeground(value: Boolean) = nativeCast.setForeground(value)
 
-    private fun MethodCall.string(name: String): String = argument<String>(name).orEmpty()
-    private fun MethodCall.boolean(name: String): Boolean = argument<Boolean>(name) == true
-    private fun MethodCall.long(name: String): Long = (argument<Number>(name) ?: 0).toLong()
-    private fun MethodCall.int(name: String): Int = (argument<Number>(name) ?: 0).toInt()
-
     private data class CoreReceiverConfiguration(
         val name: String,
         val airPlayEnabled: Boolean,
@@ -1327,11 +1239,7 @@ class FusionPlayRuntime(
             "output_latency_calibrated",
             "output_advance_ms",
         )
-        private const val METHOD_CHANNEL = "com.fusionplay.android/runtime"
-        private const val EVENT_CHANNEL = "com.fusionplay.android/runtime_events"
         private const val XIAOMI_PROTOCOL = "小米妙播"
-        private const val TRACK_CHANGE_PREVIOUS = "previous"
-        private const val TRACK_CHANGE_NEXT = "next"
         private const val CORE_SOURCE_AIRPLAY = "airplay"
         private const val CORE_SOURCE_DLNA = "dlna"
         private const val CORE_SOURCE_XIAOMI = "xiaomi_miplay"

@@ -193,6 +193,7 @@ class XiaomiPlaybackReducer(
             }
             sessionActive = false
             pendingSeek = null
+            currentMediaInfo = currentMediaInfo?.copy(lyricsText = null)
             pendingMediaInfo = pendingMediaInfo
                 ?.takeIf { it.sessionSequence > resolvedSession }
             return XiaomiReduction(
@@ -289,7 +290,7 @@ class XiaomiPlaybackReducer(
             val previous = pendingMediaInfo
                 ?.takeIf { it.sessionSequence == resolvedSession }
                 ?.mediaInfo
-                ?: currentMediaInfo
+                ?: currentMediaInfo?.copy(lyricsText = null)
             val replaceTrack = isNewTrack(previous, mediaInfo)
             val merged = mergeMediaInfo(previous, mediaInfo, replaceTrack)
             pendingMediaInfo = PendingMediaInfo(
@@ -328,12 +329,18 @@ class XiaomiPlaybackReducer(
             reconciledMediaInfo,
             replaceTrack,
         )
+        // Progress and repeated metadata reuse the parsed lyrics already in the
+        // playback snapshot, instead of parsing the same text on every tick.
+        val updatedLyrics = reconciledMediaInfo.lyricsText?.takeIf {
+            replaceTrack || it != currentMediaInfo?.lyricsText
+        }
         currentMediaInfo = mergedMediaInfo
         return XiaomiReduction(
             mutations = listOf(
                 XiaomiPlaybackMutation.ApplyMediaInfo(
                     sessionSequence = resolvedSession,
-                    mediaInfo = mergedMediaInfo,
+                    mediaInfo = if (mergedMediaInfo.lyricsText == updatedLyrics) mergedMediaInfo else
+                        mergedMediaInfo.copy(lyricsText = updatedLyrics),
                     replaceTrack = replaceTrack,
                 ),
             ),
@@ -433,6 +440,7 @@ class XiaomiPlaybackReducer(
             channels = incoming.channels ?: previous.channels,
             metadataChangeType =
                 incoming.metadataChangeType ?: previous.metadataChangeType,
+            lyricsText = incoming.lyricsText ?: previous.lyricsText,
         )
     }
 

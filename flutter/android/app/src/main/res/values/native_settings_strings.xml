@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_settings_title">接收设置</string>
+    <string name="native_settings_done">完成</string>
+    <string name="native_settings_receiver_status">接收状态</string>
+    <string name="native_settings_initializing">正在初始化…</string>
+    <string name="native_settings_working">正在应用…</string>
+    <string name="native_settings_playing">正在播放</string>
+    <string name="native_settings_connected">已连接</string>
+    <string name="native_settings_waiting">等待投送</string>
+    <string name="native_settings_protocols_off">全部接收协议已关闭</string>
+    <string name="native_settings_device_name">设备名称</string>
+    <string name="native_settings_default_name">使用默认名称</string>
+    <string name="native_settings_edit_name">编辑名称，%1$s</string>
+    <string name="native_settings_apply_name">保存名称</string>
+    <string name="native_settings_reset_name">恢复默认</string>
+    <string name="native_settings_protocols">接收协议</string>
+    <string name="native_settings_miplay">MiPlay 妙播</string>
+    <string name="native_settings_airplay">AirPlay</string>
+    <string name="native_settings_dlna">DLNA</string>
+    <string name="native_settings_identity">妙播设备类型</string>
+    <string name="native_settings_current_identity">妙播设备类型：%1$s</string>
+    <string name="native_settings_audio_sync">声音同步校准</string>
+    <string name="native_settings_advance_value">提前 %1$d 毫秒</string>
+    <string name="native_settings_audio_hint">此设备比其他音响慢时增加。调整时会短暂淡出再恢复。更换输出设备后请重新校准。</string>
+    <string name="native_settings_decrease">−10</string>
+    <string name="native_settings_increase">+10</string>
+    <string name="native_settings_decrease_description">减少提前量 10 毫秒</string>
+    <string name="native_settings_increase_description">增加提前量 10 毫秒</string>
+    <string name="native_settings_zero">归零</string>
+    <string name="native_settings_native_cast">原生投屏</string>
+    <string name="native_settings_cast_pause">暂停原生投屏</string>
+    <string name="native_settings_device_behavior">设备行为</string>
+    <string name="native_settings_startup">开机自启</string>
+    <string name="native_settings_auto_wake">自动唤起</string>
+    <string name="native_settings_keep_screen_on">播放时保持亮屏</string>
+    <string name="native_settings_advanced">高级效果</string>
+    <string name="native_settings_player">播放显示</string>
+    <string name="native_settings_progress">显示进度与时间</string>
+    <string name="native_settings_transport">显示播放控制</string>
+    <string name="native_settings_wrap_metadata">允许歌名和艺人信息换行</string>
+    <string name="native_settings_lyrics">显示歌词</string>
+    <string name="native_settings_toolbar">始终显示顶部按钮</string>
+    <string name="native_settings_about">关于应用</string>
+    <string name="native_settings_version">FusionPlay %1$s</string>
+    <string name="native_settings_export">导出日志</string>
+</resources>

@@ -4,8 +4,6 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.serialization")
-    // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
-    id("dev.flutter.flutter-gradle-plugin")
 }
 
 val repositoryRoot = layout.projectDirectory.dir("../../..")
@@ -34,10 +32,10 @@ android {
             .getOrElse("com.fusionplay.android")
         resValue("string", "fusionplay_launcher_label",
             if (applicationId == "com.fusionplay.android.portfix") "FusionPlay 修复版" else "FusionPlay")
-        minSdk = maxOf(flutter.minSdkVersion, 24) // Shizuku API 13.1.5 requires Android 7.
+        minSdk = 24 // Shizuku API 13.1.5 requires Android 7.
         targetSdk = 36
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = providers.gradleProperty("fusionPlayVersionCode").map(String::toInt).getOrElse(10204)
+        versionName = providers.gradleProperty("fusionPlayVersionName").getOrElse("1.2.4-native-preview1")
         ndk {
             abiFilters += nativeAbis
         }
@@ -86,10 +84,6 @@ kotlin {
     compilerOptions {
         jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
     }
-}
-
-flutter {
-    source = "../.."
 }
 
 dependencies {
@@ -141,13 +135,10 @@ fun ndkPath(): String {
     return "$sdk/ndk/28.2.13676358"
 }
 
-val fusionPlayCargoHome = System.getenv("CARGO_HOME")
-    ?.takeIf { it.isNotBlank() }
-    ?: error("CARGO_HOME must point to a writable Cargo home directory.")
-
 tasks.register("buildRustNative") {
     group = "build"
     description = "Cross-compiles FusionPlay's Rust receiver for Android ABIs"
+    inputs.property("nativeAbis", nativeAbis)
     inputs.files(fileTree(repositoryRoot.dir("src/AirPlayReceiver.Core")) {
         include("Cargo.toml", "Cargo.lock", "build.rs", "src/**")
     })
@@ -162,6 +153,9 @@ tasks.register("buildRustNative") {
     })
     outputs.dir(generatedNativeLibs)
     doLast {
+        val cargoHome = System.getenv("CARGO_HOME")
+            ?.takeIf { it.isNotBlank() }
+            ?: error("CARGO_HOME must point to a writable Cargo home directory.")
         val ndk = ndkPath()
         val cargo = cargoExecutable()
         val outputDirectory = generatedNativeLibs.get().asFile
@@ -176,7 +170,7 @@ tasks.register("buildRustNative") {
         nativeAbis.forEach { abi ->
             exec {
                 workingDir = coreDirectory
-                environment("CARGO_HOME", fusionPlayCargoHome)
+                environment("CARGO_HOME", cargoHome)
                 environment("ANDROID_NDK_HOME", ndk)
                 environment("ANDROID_NDK_ROOT", ndk)
                 commandLine(
@@ -186,6 +180,7 @@ tasks.register("buildRustNative") {
                     "--platform", "21",
                     "--output-dir", outputDirectory.absolutePath,
                     "build",
+                    "--locked",
                     "--release",
                     "--lib",
                 )
@@ -212,9 +207,5 @@ tasks.matching {
     it.name.startsWith("merge") &&
         (it.name.endsWith("JniLibFolders") || it.name.contains("NativeLibs"))
 }.configureEach {
-    dependsOn("buildRustNative")
-}
-
-tasks.named("preBuild").configure {
     dependsOn("buildRustNative")
 }

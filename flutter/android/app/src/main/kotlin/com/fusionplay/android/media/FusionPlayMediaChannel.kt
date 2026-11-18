@@ -309,6 +309,9 @@ object FusionPlayMediaChannel {
     fun currentSnapshot(): FusionPlayMediaSnapshot =
         synchronized(stateLock) { snapshot }
 
+    /** The native player and system media card share the same decoded cover. */
+    fun currentArtwork(): Bitmap? = synchronized(stateLock) { artwork }
+
     fun sessionToken(): MediaSessionCompat.Token? =
         if (initialized) mediaSession.sessionToken else null
 

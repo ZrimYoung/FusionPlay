@@ -1,6 +1,8 @@
 package com.airplayreceiver.desktop.backend
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,5 +34,22 @@ class XiaomiPlaybackContinuityTest {
         assertEquals(previous.artist, resumed.artist)
         assertEquals(previous.coverArt, resumed.coverArt)
         assertEquals(previous.trackIdentity, resumed.trackIdentity)
+    }
+
+    @Test
+    fun partialMetadataKeepsParsedLyricsUntilTrackReplacement() {
+        val document = requireNotNull(LrcParser.parse("[00:01.00]One line"))
+        val playback = PlaybackSnapshot(protocol = XIAOMI_PROTOCOL, lyrics = document)
+        fun update(replaceTrack: Boolean) = playback.applyXiaomiMediaInfo(
+            title = null,
+            artist = null,
+            album = null,
+            artworkUrl = null,
+            durationMs = null,
+            positionMs = 1_500,
+            replaceTrack = replaceTrack,
+        )
+        assertSame(document, update(false).lyrics)
+        assertNull(update(true).lyrics)
     }
 }
