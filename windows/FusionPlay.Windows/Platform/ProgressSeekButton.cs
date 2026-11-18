@@ -78,6 +78,7 @@ public sealed class ProgressSeekButton : Button
         return request != null && Dispatch(request);
     }
     internal void CancelPointer() { ++pointerVersion; pointerRequest = null; pointerId = null; }
+    internal bool PointerSeekActive => pointerRequest != null;
     private void QueuePointerCancellation()
     {
         long request = pointerVersion;

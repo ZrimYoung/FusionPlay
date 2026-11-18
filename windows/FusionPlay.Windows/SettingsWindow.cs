@@ -65,7 +65,11 @@ internal sealed class SettingsWindow : Window
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
         settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
         correctLyricTitles = new("\uE8D2") { Name = "CorrectLyricTitles", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
+        lyricsStagger = new("\uE8CB") { Name = "LyricsStaggerEnabled", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
+        narrowLyricsPaging = new("\uE8AB") { Name = "NarrowLyricsPaging", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
+    private readonly Slider lyricsStaggerTiming = new() { Name = "LyricsStaggerMilliseconds", Minimum = 0, Maximum = 1000, StepFrequency = 10, Width = 180 },
+        lyricsFollowTiming = new() { Name = "LyricsFollowDurationMilliseconds", Minimum = 100, Maximum = 1500, StepFrequency = 10, Width = 180 };
     private readonly ToggleButton pinned = new() { Name = "Pinned", MinWidth = 94, Padding = new Thickness(12, 7, 12, 7) };
     private FontSettingsPanel fontSettings = null!;
     private readonly TextBlock fontSummary = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
@@ -455,6 +459,25 @@ internal sealed class SettingsWindow : Window
         var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
             Text("播放控制与进度设置适用于大小播放器；进度条支持点击跳转。", "Playback controls and progress settings apply to both layouts. Click the progress bar to seek.", true));
         page.Children.Add(display);
+        ConfigureCard(lyricsStagger, "逐行错峰", "Stagger lyric lines", (p, value) => p with { LyricsStaggerEnabled = value }, activationLabels: true);
+        const string staggerTimingLabel = "错峰跨度（毫秒）", followTimingLabel = "跟随时长（毫秒）";
+        Label(() =>
+        {
+            AutomationProperties.SetName(lyricsStaggerTiming, L.Text(staggerTimingLabel, "Stagger span in milliseconds"));
+            AutomationProperties.SetName(lyricsFollowTiming, L.Text(followTimingLabel, "Follow duration in milliseconds"));
+        });
+        lyricsStaggerTiming.ValueChanged += (_, args) =>
+        {
+            if (!renderingPreferences) UpdatePreferences(p => p with { LyricsStaggerMilliseconds = (int)args.NewValue });
+        };
+        lyricsFollowTiming.ValueChanged += (_, args) =>
+        {
+            if (!renderingPreferences) UpdatePreferences(p => p with { LyricsFollowDurationMilliseconds = (int)args.NewValue });
+        };
+        var lyricTiming = new StackPanel { Spacing = 12 };
+        lyricTiming.Children.Add(Row(Text(staggerTimingLabel, "Stagger span (ms)"), lyricsStaggerTiming));
+        lyricTiming.Children.Add(Row(Text(followTimingLabel, "Follow duration (ms)"), lyricsFollowTiming));
+        page.Children.Add(Group("歌词动效", "Lyrics motion", lyricsStagger, Surface(lyricTiming)));
         ConfigureCard(correctLyricTitles, "修正歌词标题", "Correct lyric titles", (p, value) => p with { CorrectLyricTitles = value }, activationLabels: true);
         var titleCorrectionDescription = Text("仅在手机歌词提供可信歌名信息时修正播放器、托盘和系统媒体中的显示。不会改动原始曲目或播放控制；无法核实时保留原样。", "Corrects the player, tray, and system media display only when the phone's lyrics provide verifiable track information. Original track data and playback controls stay intact; unverified titles are kept.", true);
         titleCorrectionDescription.Name = "TitleCorrectionDescription";
@@ -469,7 +492,8 @@ internal sealed class SettingsWindow : Window
         Label(() => AutomationProperties.SetName(miniVisibility, L.Text("迷你窗口控件显隐", "Mini player controls visibility")));
         miniVisibility.SelectionChanged += (_, _) => { if (!renderingPreferences && SegmentKey(miniVisibility) is string key) UpdatePreferences(p => p with { AlwaysShowControls = key == "always" }); };
         var miniLabel = new StackPanel { Spacing = 4 }; miniLabel.Children.Add(Text("控件显隐", "Controls visibility")); miniLabel.Children.Add(Text("歌曲信息、进度和已开启的控件", "Track info, progress, and enabled controls", true));
-        page.Children.Add(Group("迷你窗口", "Mini player", Surface(Row(miniLabel, miniVisibility))));
+        ConfigureCard(narrowLyricsPaging, "播放与歌词左右翻页", "Swipe between player and lyrics", (p, value) => p with { NarrowLyricsPaging = value }, activationLabels: true);
+        page.Children.Add(Group("迷你窗口", "Mini player", Surface(Row(miniLabel, miniVisibility)), narrowLyricsPaging));
         RoutedEventHandler pinChanged = (_, _) =>
         {
             if (renderingPreferences) return;
@@ -620,6 +644,11 @@ internal sealed class SettingsWindow : Window
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             SelectSegment(lyricsBackgroundMode, preferences.LyricsBackgroundMode);
+            lyricsStagger.IsChecked = preferences.LyricsStaggerEnabled;
+            lyricsStaggerTiming.IsEnabled = preferences.LyricsStaggerEnabled;
+            lyricsStaggerTiming.Value = preferences.LyricsStaggerMilliseconds;
+            lyricsFollowTiming.Value = preferences.LyricsFollowDurationMilliseconds;
+            narrowLyricsPaging.IsChecked = preferences.NarrowLyricsPaging;
             transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
             settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
             correctLyricTitles.IsChecked = preferences.CorrectLyricTitles;

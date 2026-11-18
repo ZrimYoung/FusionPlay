@@ -889,6 +889,89 @@ internal static class LyricsPlayerCheck
                 Require(!Descendants(component!).OfType<FrameworkElement>().Any(item => item.Name == "LyricsReturnToCurrent")
                     && requested.Count == 1, "return_button_retained_or_automatic_follow_dispatched_seek");
             }));
+            step = "native_lyric_reading_anchor_and_stagger";
+            if (!WindowSizing.ScreenReaderActive)
+            {
+                var followFixture = LyricsDocument.Parse(string.Join("\n", Enumerable.Range(0, 18)
+                    .Select(index => $"[00:{index:00}.000]A repeating synthetic line changes its height as the narrow lyric column wraps its words {index}")));
+                const int active = 7;
+                double anchorTop = 0;
+                LyricsRowItem? anchorItem = null;
+                ListView FollowList() => Descendants(component!).OfType<ListView>().Single(view => view.Name == "LyricsLines");
+                FrameworkElement FollowContainer(int index)
+                {
+                    return FollowList().ContainerFromIndex(index) as FrameworkElement ?? throw new CheckFailure("native_reading_anchor_not_realized");
+                }
+                double FollowTop(int index) => FollowContainer(index).TransformToVisual(component).TransformPoint(new Point()).Y;
+                void SizeComponent(double width)
+                {
+                    var content = (Grid)componentWindow!.Content;
+                    content.Width = width;
+                    WindowSizing.ResizeContent(componentWindow, width, 340);
+                    Arrange(content, width, 340);
+                }
+                await OnUi(queue!, () =>
+                {
+                    var content = (Grid)componentWindow!.Content;
+                    if (row != null && content.Children.Contains(row)) content.Children.Remove(row);
+                    SizeComponent(400);
+                    component!.Update(followFixture, active * 1_000, true);
+                });
+                bool anchorReady = false;
+                double? previousTop = null;
+                var readiness = Stopwatch.StartNew();
+                while (!anchorReady && readiness.ElapsedMilliseconds < 2_000)
+                {
+                    await Task.Delay(45);
+                    await OnUi(queue!, () =>
+                    {
+                        if (FollowList().ContainerFromIndex(active) is not FrameworkElement current || current.ActualHeight <= 0)
+                            return;
+                        double top = current.TransformToVisual(component).TransformPoint(new Point()).Y;
+                        bool overlaps = LyricsViewport.IntersectsViewport(top, current.ActualHeight, component!.ActualHeight, bleed: 0);
+                        anchorReady = overlaps && previousTop.HasValue && Math.Abs(top - previousTop.Value) <= .5;
+                        previousTop = overlaps ? top : null;
+                    });
+                }
+                await OnUi(queue!, () =>
+                {
+                    Require(anchorReady, "native_reading_anchor_not_in_viewport");
+                    anchorTop = FollowTop(active);
+                    anchorItem = ((LyricsRowItem[])Field(component!, "items")!)[active];
+                    component!.BeginViewportResize();
+                    SizeComponent(280);
+                });
+                await Task.Delay(120);
+                await OnUi(queue!, () =>
+                {
+                    double during = FollowTop(active);
+                    animationSamples.Add(new { stage = "reading_anchor_narrow_during_resize", before = anchorTop, during });
+                    Require(Math.Abs(during - anchorTop) <= 2, "reading_anchor_drifted_during_width_reflow");
+                    SizeComponent(420);
+                    component!.EndViewportResize();
+                });
+                await Task.Delay(250);
+                await OnUi(queue!, () => Pass("native_reading_anchor_pins_same_row_during_and_after_width_reflow", () =>
+                {
+                    double settled = FollowTop(active);
+                    animationSamples.Add(new { stage = "reading_anchor_wide_released", before = anchorTop, settled });
+                    Require(Math.Abs(settled - anchorTop) <= 2 && ReferenceEquals(anchorItem, ((LyricsRowItem[])Field(component!, "items")!)[active]),
+                        "reading_anchor_jumped_on_release_or_replaced_items");
+                    component!.Update(followFixture, (active + 1) * 1_000, true);
+                }));
+                await Task.Delay(120);
+                await OnUi(queue!, () => Pass("native_adjacent_follow_motion_respects_preferences_and_cancellation", () =>
+                {
+                    if (component!.MotionEnabled)
+                    {
+                        Require(Field(component, "followMotion") is LyricsFollowMotion, "adjacent_follow_did_not_start");
+                        component.CancelFollowAnimation();
+                    }
+                    Require(Field(component, "followMotion") == null
+                        && Descendants(component).OfType<LyricsRowPresenter>().All(presenter => presenter.Translation.Y == 0),
+                        "cancelled_follow_left_row_translations");
+                }));
+            }
             step = "coalesced_gpu_wrap_and_rapid_reverse";
             LyricsRowPresenter? wrapRow = null; long transitionsBefore = 0; bool canCheckWrap = false, observedWrap = false;
             await OnUi(queue!, () =>
@@ -944,6 +1027,64 @@ internal static class LyricsPlayerCheck
                 cases.Add("wrap_animation_not_exercised_reduced_motion_or_native_fallback");
                 animationSamples.Add(new { stage = "wrap_scope", reason = component!.MotionEnabled ? "composition_unavailable_native_fallback" : "system_motion_disabled", visible_presentation_verified = false });
             }
+            step = "shaped_clusters_reflow_within_existing_plane_budget";
+            Border? shapedHost = null;
+            LyricsRowPresenter? shapedRow = null;
+            if (canCheckWrap && !WindowSizing.ScreenReaderActive)
+            {
+                await OnUi(queue!, () =>
+                {
+                    var content = (Grid)componentWindow!.Content;
+                    content.Children.Remove(wrapRow!);
+                    component!.Update(LyricsDocument.Parse("[00:00.000]MOVE 字形 WRAP"), 0, false);
+                    shapedRow = new LyricsRowPresenter
+                    {
+                        DataContext = ((Array)Field(component, "items")!).GetValue(0),
+                        Width = 400, Style = (Style)component.Resources["LyricsRowButtonStyle"]
+                    };
+                    shapedHost = new Border { Child = shapedRow, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 95, 0, 0) };
+                    content.Children.Add(shapedHost); Arrange(content, 400, 340);
+                });
+                await Task.Delay(330);
+                await OnUi(queue!, () =>
+                {
+                    Require(shapedRow!.UsesCompositionSurface, "shaped_reflow_fixture_did_not_realize_glyphs");
+                    shapedRow.Width = 220; Arrange((Grid)componentWindow!.Content, 400, 340);
+                });
+                bool observedClusters = false;
+                for (int attempt = 0; attempt < 28 && !observedClusters; attempt++)
+                {
+                    await Task.Delay(18);
+                    await OnUi(queue!, () =>
+                    {
+                        observedClusters = shapedRow!.GlyphReflowTransitionsStarted > 0 && shapedRow.GlyphReflowClusterCount > 1;
+                        if (!observedClusters) return;
+                        Require(shapedRow.CachedPlaneCount == 2 && shapedRow.WrapTransitionDurationMs is >= 190 and <= 480,
+                            "shaped_reflow_exceeded_plane_or_duration_budget");
+                        animationSamples.Add(new { stage = "directwrite_cluster_reflow", shapedRow.GlyphReflowClusterCount,
+                            shapedRow.CachedPlaneCount, shapedRow.WrapTransitionDurationMs });
+                        var content = (Grid)componentWindow!.Content;
+                        shapedRow.Width = 260; Arrange(content, 400, 340);
+                        shapedRow.Width = 400; Arrange(content, 400, 340);
+                    });
+                }
+                if (!observedClusters) await OnUi(queue!, () => animationSamples.Add(new
+                {
+                    stage = "directwrite_cluster_reflow_unavailable", shapedRow!.GlyphReflowStatus, shapedRow.GlyphRasterizations,
+                    shapedRow.WrapTransitionsStarted, shapedRow.ActualHeight, shapedRow.ActualWidth, shapedRow.GlyphBounds,
+                    surface_top = Field(shapedRow, "surfaceTop"), edge_radius = Field(shapedRow, "edgeRadius"),
+                    viewport_height = Field(shapedRow, "viewportHeight")
+                }));
+                Require(observedClusters, "directwrite_cluster_reflow_did_not_engage");
+                await Task.Delay(720);
+                await OnUi(queue!, () => Pass(step, () =>
+                {
+                    Require(shapedRow!.GlyphReflowClusterCount == 0 && !shapedRow.WrapTransitionActive
+                        && shapedRow.CachedPlaneCount <= 2 && shapedRow.UsesCompositionSurface && requested.Count == 1,
+                        "shaped_reflow_did_not_retire_with_current_glyphs_or_changed_seek");
+                    ((Grid)componentWindow!.Content).Children.Remove(shapedHost!);
+                }));
+            }
             step = "interval_marker_narrow_single_line_fonts";
             var markerDocument = LyricsDocument.Parse("[00:00.000]A synthetic phrase\n[00:02.000]\n[00:04.000]The fixture continues");
             string secondMarkerFont = (NativeTypography.FindFamily("Microsoft YaHei UI")
@@ -991,6 +1132,30 @@ internal static class LyricsPlayerCheck
                 Require(Math.Abs(LyricsViewport.FollowOffset(50, 200, 100, 500, 1_000) - 122) < .001, "lyric_follow_anchor_changed");
                 Require(LyricsViewport.EdgeBlur(0, 1_000, false, true) == 4 && LyricsViewport.EdgeBlur(1_000, 1_000, false, true) == 12
                     && LyricsViewport.EdgeBlur(320, 1_000, false, true) == 0 && LyricsViewport.EdgeBlur(0, 1_000, false, false) == 0, "lyric_edge_effect_policy_changed");
+            }));
+            await OnUi(queue!, () => Pass("follow_wave_rolls_forward_continuously_and_keeps_bounded_offsets", () =>
+            {
+                const long start = 10_000_000;
+                long At(double milliseconds) => start + (long)(milliseconds * Stopwatch.Frequency / 1_000);
+                var forward = new LyricsFollowMotion(start, 50, 120, 420, 140, null);
+                Require(LyricsViewport.AnchorOffset(140, 210, 90, 1_000) == 260
+                    && LyricsViewport.AnchorOffset(10, 5, 30, 500) == 0
+                    && LyricsViewport.AnchorOffset(490, 100, 20, 500) == 500, "reading_anchor_offset_outside_scroll_extent");
+                Require(forward.ScrollOffset(start) == 50 && forward.ScrollOffset(At(421)) == 120
+                    && !forward.IsComplete(At(559)) && forward.IsComplete(At(561)), "follow_scroll_does_not_settle_within_configured_timing");
+                Require(forward.RowOffset(At(250), 0) == 0 && forward.RowOffset(At(250), 32) > 0
+                    && forward.RowOffset(At(561), 32) == 0, "follow_lag_does_not_respect_row_rank");
+                long reverseAt = At(250);
+                var reverse = new LyricsFollowMotion(reverseAt, forward.ScrollOffset(reverseAt), 50, 420, 1_000, forward);
+                for (int rank = 0; rank <= 32; rank++)
+                {
+                    Require(Math.Abs(reverse.RowOffset(reverseAt, rank) - forward.RowOffset(reverseAt, rank)) < .001,
+                        "follow_lag_is_discontinuous_at_reverse");
+                    for (int t = 250; t <= 1_700; t += 25)
+                        Require(Math.Abs(reverse.RowOffset(At(t), rank)) <= 36.001, "follow_lag_exceeded_bound");
+                }
+                Require(reverse.IsComplete(At(1_671)) && reverse.RowOffset(At(1_671), 32) == 0,
+                    "follow_lag_did_not_finish");
             }));
             step = "fullscreen_policy_without_presenter_attachment";
             await OnUi(queue!, () => Pass(step, () =>
