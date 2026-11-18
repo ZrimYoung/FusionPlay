@@ -15,6 +15,7 @@ struct AppearanceSettingsPage: View {
     @AppStorage("playerLyricsDisplayMode") private var lyricsDisplayMode = "automatic"
     @AppStorage("playerProgressColorMode") private var progressColorMode = "white"
     @AppStorage("playerProgressCustomHex") private var customHex = PlayerAppearance.defaultCustomHex
+    @AppStorage(MenuPanelBackgroundStyle.storageKey) private var menuBackgroundStyle = MenuPanelBackgroundStyle.defaultValue.rawValue
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.appTypography) private var typography
@@ -23,6 +24,7 @@ struct AppearanceSettingsPage: View {
         Form {
             playbackSection
             miniPlayerSection
+            menuPanelSection
             FontSettingsSection()
             appAccessSection
             Section(L("语言")) {
@@ -81,6 +83,24 @@ struct AppearanceSettingsPage: View {
         }
     }
 
+    private var menuPanelSection: some View {
+        Section {
+            Picker(L("背景样式"), selection: Binding(
+                get: { MenuPanelBackgroundStyle.resolve(menuBackgroundStyle).rawValue },
+                set: { menuBackgroundStyle = $0 }
+            )) {
+                ForEach(MenuPanelBackgroundStyle.choices, id: \.rawValue) { style in
+                    Text(L(style.title)).tag(style.rawValue)
+                }
+            }.pickerStyle(.menu).controlSize(.small)
+        } header: {
+            Text(L("菜单面板"))
+        } footer: {
+            if !MenuPanelBackgroundStyle.supportsLiquidGlass {
+                Text(L("液态玻璃需要 macOS 26 或更高版本。"))
+            }
+        }
+    }
     private var appAccessSection: some View {
         Section {
             Toggle(L("Dock 图标"), isOn: $showDockIcon)

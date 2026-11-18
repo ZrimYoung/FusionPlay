@@ -8,7 +8,7 @@ enum ReceiverSettingsPage: String, CaseIterable, Identifiable {
         switch self { case .receiver: return "接收"; case .appearance: return "外观"; case .advanced: return "高级"; case .about: return "关于" }
     }
     var symbol: String {
-        switch self { case .receiver: return "antenna.radiowaves.left.and.right"; case .appearance: return "paintbrush"; case .advanced: return "slider.horizontal.3"; case .about: return "info.circle" }
+        switch self { case .receiver: return "speaker.wave.2"; case .appearance: return "circle.lefthalf.filled"; case .advanced: return "gearshape"; case .about: return "info.circle" }
     }
 }
 
@@ -137,7 +137,9 @@ struct SettingsPanel: View {
                 Label {
                     Text(L(page.title)).font(typography.font(size: 13))
                 } icon: {
-                    Image(systemName: page.symbol).font(.system(size: 16))
+                    Image(systemName: page.symbol)
+                        .font(.system(size: 14, weight: .regular))
+                        .imageScale(.medium).frame(width: 18, height: 18)
                 }.tag(page)
             }.listStyle(.sidebar).scrollContentBackground(.hidden)
                 // Refresh native row labels when changing language; keep the

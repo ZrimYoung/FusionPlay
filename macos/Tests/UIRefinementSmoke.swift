@@ -28,7 +28,7 @@ import SwiftUI
             var values: [String: Any] = ["appLanguage": language, "playerControlsAlwaysVisible": true,
                 "playerShowsTransport": true, "playerShowsProgress": true, "playerLyricsDisplayMode": "automatic", "playerProgressColorMode": "white",
                 "showDockIcon": true, "showMenuBarIcon": true, "playerWindowPinned": false, "playerShowsPinButton": false,
-                "settingsSidebarVisible": true, "uiFontFamily": "", "uiFontWeight": 400, "uiCorrectLyricTitles": false]
+                "settingsSidebarVisible": true, "uiFontFamily": "", "uiFontWeight": 400, "uiCorrectLyricTitles": false, "menuPanelBackgroundStyle": MenuPanelBackgroundStyle.defaultValue.rawValue]
             values.merge(extras) { _, new in new }
             UserDefaults.standard.setVolatileDomain(values, forName: UserDefaults.argumentDomain)
         }
@@ -301,6 +301,8 @@ import SwiftUI
         preferences("zh-Hans", ["uiCorrectLyricTitles": true, "playerLyricsDisplayMode": "never"])
         try render(ReceiverPanel(model: captionModel), width: 280, height: 180, name: "menu-corrected-title")
         try render(PlayerView(model: captionModel), width: 760, height: 400, name: "player-corrected-title")
+
+        // Native material and menu lifecycle checks live in MenuPanelNativeSmoke.
 
         var metadataGapResult: Result<Void, Error>?
         Task { @MainActor in

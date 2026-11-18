@@ -1,8 +1,28 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var showPlayer: (() -> Void)?
+    private var menuPanelController: MenuPanelController?
+
+    func configureMenuPanel(model: ReceiverModel, openWindow: @escaping (String) -> Void) {
+        showPlayer = {
+            let defaults = UserDefaults.standard
+            let dockVisible = defaults.object(forKey: "showDockIcon") as? Bool ?? true
+            let menuVisible = defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true
+            openWindow(!dockVisible && !menuVisible ? "settings" : "player")
+        }
+        if let menuPanelController {
+            menuPanelController.setOpenWindowAction(openWindow)
+            menuPanelController.syncPreferences()
+        } else {
+            menuPanelController = MenuPanelController(model: model, openWindow: openWindow)
+        }
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        menuPanelController?.invalidate()
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
         applyDockVisibility(UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true)
         AppBrand.applyDockIcon()
@@ -33,7 +53,6 @@ func applyDockVisibility(_ visible: Bool) {
 @main
 #endif
 struct FusionPlayApp: App {
-    @AppStorage("showMenuBarIcon") private var showMenuBarIcon = true
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = ReceiverModel.shared
@@ -50,18 +69,8 @@ struct FusionPlayApp: App {
               ReceiverSettingsCommands()
               PlayerFullScreenCommands()
           }
-        MenuBarExtra(isInserted: $showMenuBarIcon) {
-            ReceiverPanel(model: model)
-                .appTypography()
-                .environment(\.locale, Locale(identifier: language))
-        } label: {
-            Image(nsImage: AppBrand.menuIcon(for: model.snapshot?.phase == .playing ? .playing :
-                                           model.snapshot?.phase == .paused ? .paused : .idle))
-                .accessibilityLabel("FusionPlay · " + L(model.phaseLabel))
-                .help("FusionPlay · " + L(model.phaseLabel))
-        }.menuBarExtraStyle(.window)
         Window(L("FusionPlay 设置"), id: "settings") {
-            SettingsPanel(model: model)
+            SettingsWindowContent(model: model, delegate: delegate)
                 .appTypography()
                 .environment(\.locale, Locale(identifier: language))
         }.defaultSize(width: 820, height: 620)
@@ -89,12 +98,8 @@ private struct PlayerWindowContent: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         PlayerView(model: model).focusedSceneValue(\.playerSupportsFullScreen, true).onAppear {
-            // Keep SwiftUI responsible for recreating a closed player window.
-            delegate.showPlayer = {
-                let defaults = UserDefaults.standard
-                let dockVisible = defaults.object(forKey: "showDockIcon") as? Bool ?? true
-                let menuVisible = defaults.object(forKey: "showMenuBarIcon") as? Bool ?? true
-                openWindow(id: !dockVisible && !menuVisible ? "settings" : "player")
+            delegate.configureMenuPanel(model: model) { id in
+                openWindow(id: id)
                 NSApp.activate(ignoringOtherApps: true)
             }
             // A cold launch must also offer a way back when both entry icons are hidden.
@@ -102,6 +107,21 @@ private struct PlayerWindowContent: View {
             if defaults.object(forKey: "showDockIcon") as? Bool == false,
                defaults.object(forKey: "showMenuBarIcon") as? Bool == false {
                 openWindow(id: "settings")
+            }
+        }
+    }
+}
+
+/// A restored settings-only session must also restore the status item.
+private struct SettingsWindowContent: View {
+    @ObservedObject var model: ReceiverModel
+    let delegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
+    var body: some View {
+        SettingsPanel(model: model).onAppear {
+            delegate.configureMenuPanel(model: model) { id in
+                openWindow(id: id)
+                NSApp.activate(ignoringOtherApps: true)
             }
         }
     }
@@ -116,6 +136,7 @@ struct ReceiverPanel: View {
     @State private var menuInfoHeight: CGFloat = 72
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var model: ReceiverModel
+    var onOpenWindow: ((String) -> Void)? = nil
     @Environment(\.openWindow) private var openWindow
     var body: some View {
         VStack(spacing: 10) {
@@ -159,7 +180,7 @@ struct ReceiverPanel: View {
             }
             HStack(spacing: 8) {
                 action("gearshape", label: L("设置")) {
-                    openWindow(id: "settings"); NSApp.activate(ignoringOtherApps: true)
+                    openAppWindow("settings")
                 }
                 HStack(spacing: 8) {
                     Button { volumeExpanded.toggle() } label: {
@@ -199,8 +220,14 @@ struct ReceiverPanel: View {
     }
     private func openMiniPlayer() {
         model.miniPlayerRequest &+= 1
-        openWindow(id: "player")
-        NSApp.activate(ignoringOtherApps: true)
+        openAppWindow("player")
+    }
+    private func openAppWindow(_ id: String) {
+        if let onOpenWindow { onOpenWindow(id) }
+        else {
+            openWindow(id: id)
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
     private func action(_ symbol: String, label: String, perform: @escaping () -> Void) -> some View {
         Button(action: perform) {
@@ -310,6 +337,12 @@ struct PlayerView: View {
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var showMiniControls: Bool { hovering || controlsAlwaysVisible || voiceOver || model.playerInteractionActive }
     private var playing: Bool { model.snapshot?.phase == .playing }
+    private var hasTrack: Bool {
+        guard let state = model.snapshot, state.controlsAvailable else { return false }
+        return state.phase == .playing || state.phase == .paused
+            || !state.trackId.isEmpty || !state.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || (state.durationMs ?? 0) > 0
+    }
     private var showLyrics: Bool {
         (LyricsDisplayMode(rawValue: lyricsDisplayMode) ?? .automatic).isVisible(hasLyrics: model.lyricsAvailable)
     }
@@ -347,7 +380,13 @@ struct PlayerView: View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 600
             ZStack {
-                if compact { mini(size: geometry.size).transition(.opacity) }
+                if !hasTrack {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 64, weight: .ultraLight))
+                        .foregroundStyle(.white.opacity(0.28))
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .accessibilityLabel(L("等待你的音乐"))
+                } else if compact { mini(size: geometry.size).transition(.opacity) }
                 else { expanded(size: geometry.size).transition(.opacity) }
             }.animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: compact)
             PlayerWindowBehavior(square: compact && !showLyrics,
@@ -500,8 +539,9 @@ struct PlayerView: View {
                     .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.36 : 0.42)
                         .delay(showControls ? 0.1 : 0), value: showControls)
             }.frame(width: size.width, height: coverHeight).clipped()
-            Rectangle().fill(.white.opacity(0.06)).frame(height: 0.5)
-                .frame(height: showLyrics ? 8 : 0).opacity(showLyrics ? 1 : 0)
+            // Retain the lyric pane's spacing without painting a hairline
+            // below the cover, which looked like a misaligned material edge.
+            Color.clear.frame(height: showLyrics ? 8 : 0)
                 .accessibilityHidden(true)
             lyricsPanel(compact: true)
                 .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
@@ -600,23 +640,27 @@ struct PlayerView: View {
             ], startPoint: .top, endPoint: .bottom)
         }.frame(width: size.width, height: size.height).clipped()
     }
-    private var backdrop: some View {
-        GeometryReader { geometry in
-            ZStack {
-                LinearGradient(colors: [Color(red: 0.17, green: 0.21, blue: 0.30),
-                                        Color(red: 0.16, green: 0.13, blue: 0.22),
-                                        Color(red: 0.08, green: 0.10, blue: 0.16)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                if let artwork = model.artwork {
-                    ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
-                        .frame(width: geometry.size.width, height: geometry.size.height)
-                        .scaleEffect(1.15).blur(radius: 48)
-                    Color.black.opacity(colorContrast == .increased ? 0.72 : 0.48)
-                }
-                LinearGradient(colors: [.clear, .black.opacity(0.22)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-            }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-        }.accessibilityHidden(true)
+    @ViewBuilder private var backdrop: some View {
+        if hasTrack {
+            GeometryReader { geometry in
+                ZStack {
+                    LinearGradient(colors: [Color(red: 0.17, green: 0.21, blue: 0.30),
+                                            Color(red: 0.16, green: 0.13, blue: 0.22),
+                                            Color(red: 0.08, green: 0.10, blue: 0.16)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    if let artwork = model.artwork {
+                        ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
+                            .frame(width: geometry.size.width, height: geometry.size.height)
+                            .scaleEffect(1.15).blur(radius: 48)
+                        Color.black.opacity(colorContrast == .increased ? 0.72 : 0.48)
+                    }
+                    LinearGradient(colors: [.clear, .black.opacity(0.22)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
+            }.accessibilityHidden(true)
+        } else {
+            IdlePlayerBackdrop().accessibilityHidden(true)
+        }
     }
     private func cover(side: CGFloat) -> some View {
         ZStack {

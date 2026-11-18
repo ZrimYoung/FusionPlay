@@ -127,6 +127,10 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 .subtracting([.auxiliary, .canJoinAllApplications, .fullScreenAuxiliary, .fullScreenNone])
                 .union([.primary, .fullScreenPrimary])
             if window.collectionBehavior != collection { window.collectionBehavior = collection }
+            // The idle visual-effect view samples content behind this window.
+            // Keep painting transparent without changing its geometry policy.
+            if window.isOpaque { window.isOpaque = false }
+            if window.backgroundColor != .clear { window.backgroundColor = .clear }
             window.isMovableByWindowBackground = true
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
