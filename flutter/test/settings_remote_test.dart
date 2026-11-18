@@ -7,6 +7,53 @@ import 'package:fusionplay_android_flutter/models/app_state.dart';
 import 'package:fusionplay_android_flutter/ui/settings_view.dart';
 
 void main() {
+  testWidgets('keep screen on defaults on and can be toggled', (tester) async {
+    expect(AppSettings.fromMap({}).keepScreenOnWhilePlaying, isTrue);
+    final disabled = AppSettings.fromMap({'keepScreenOnWhilePlaying': false});
+    expect(
+      disabled.copyWith(receiverName: 'TV').keepScreenOnWhilePlaying,
+      isFalse,
+    );
+    expect(disabled, isNot(const AppSettings()));
+    final initial = FocusNode();
+    addTearDown(initial.dispose);
+    tester.view.physicalSize = const Size(600, 1800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final values = <bool>[];
+    Widget screen(AppSettings settings) => MaterialApp(
+      home: Scaffold(
+        body: SettingsView(
+          state: AppState(initialized: true, settings: settings),
+          initialFocusNode: initial,
+          onClose: () {},
+          onReceiverName: (_) {},
+          onStartup: (_) {},
+          onAutoWake: (_) {},
+          onKeepScreenOn: values.add,
+          onAdvancedEffects: (_) {},
+          onMiPlay: (_) {},
+          onMiPlayIdentity: (_) {},
+          onAirPlay: (_) {},
+          onDlna: (_) {},
+          onExportLogs: () async {},
+        ),
+      ),
+    );
+    await tester.pumpWidget(screen(const AppSettings()));
+    final label = find.text('播放时保持亮屏');
+    await tester.ensureVisible(label);
+    await tester.tap(label);
+    await tester.pump();
+    expect(values, [false]);
+    await tester.pumpWidget(screen(disabled));
+    await tester.ensureVisible(label);
+    await tester.tap(label);
+    await tester.pump();
+    expect(values, [false, true]);
+  });
+
   testWidgets('audio calibration respects limits and can return to zero', (
     tester,
   ) async {
@@ -26,6 +73,7 @@ void main() {
           onReceiverName: (_) {},
           onStartup: (_) {},
           onAutoWake: (_) {},
+          onKeepScreenOn: (_) {},
           onAdvancedEffects: (_) {},
           onMiPlay: (_) {},
           onMiPlayIdentity: (_) {},
@@ -78,6 +126,7 @@ void main() {
               onReceiverName: saved.add,
               onStartup: (_) {},
               onAutoWake: (_) {},
+              onKeepScreenOn: (_) {},
               onAdvancedEffects: (_) {},
               onMiPlay: (_) {},
               onMiPlayIdentity: (_) {},
@@ -142,6 +191,7 @@ void main() {
             onReceiverName: (_) {},
             onStartup: (_) {},
             onAutoWake: (_) {},
+            onKeepScreenOn: (_) {},
             onAdvancedEffects: (_) {},
             onMiPlay: (_) {
               miPlayChanges++;
@@ -230,6 +280,7 @@ void main() {
             onReceiverName: (_) {},
             onStartup: (_) {},
             onAutoWake: (_) {},
+            onKeepScreenOn: (_) {},
             onAdvancedEffects: (_) {},
             onMiPlay: (_) {},
             onMiPlayIdentity: (_) {},
@@ -271,6 +322,7 @@ void main() {
             onReceiverName: (_) {},
             onStartup: (_) {},
             onAutoWake: (_) {},
+            onKeepScreenOn: (_) {},
             onAdvancedEffects: (_) {},
             onMiPlay: (_) {},
             onMiPlayIdentity: (_) {},
@@ -334,6 +386,89 @@ void main() {
     );
     expect(panel.right, lessThan(0));
   });
+
+  for (final startIdle in [false, true]) {
+    testWidgets('playback defaults to play pause (start idle: $startIdle)', (
+      tester,
+    ) async {
+      final controller = NativeAppController();
+      addTearDown(controller.dispose);
+      tester.view.physicalSize = const Size(1200, 600);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const idle = AppState(initialized: true);
+      const playing = AppState(
+        initialized: true,
+        remoteControl: RemoteControlState(
+          available: true,
+          commands: {'seek', 'play_pause'},
+        ),
+        playback: PlaybackSnapshot(
+          title: 'Track',
+          protocol: 'MiPlay',
+          durationMs: 180000,
+          streamActive: true,
+        ),
+      );
+      Widget screen(AppState state) => MaterialApp(
+        home: FusionPlayHome(controller: controller, state: state),
+      );
+      if (startIdle) {
+        await tester.pumpWidget(screen(idle));
+        await tester.pumpAndSettle();
+      }
+      await tester.pumpWidget(screen(playing));
+      await tester.pumpAndSettle();
+      expect(
+        FocusManager.instance.primaryFocus?.debugLabel,
+        'player-play-pause',
+      );
+
+      // Position and metadata updates must not steal a user's chosen focus.
+      final progress = FocusManager.instance.rootScope.descendants.singleWhere(
+        (node) => node.debugLabel == 'player-progress',
+      );
+      progress.requestFocus();
+      await tester.pump();
+      await tester.pumpWidget(
+        screen(
+          const AppState(
+            initialized: true,
+            remoteControl: RemoteControlState(
+              available: true,
+              commands: {'seek', 'play_pause'},
+            ),
+            playback: PlaybackSnapshot(
+              title: 'Track',
+              protocol: 'MiPlay',
+              durationMs: 180000,
+              positionMs: 5000,
+              streamActive: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(progress.hasPrimaryFocus, isTrue);
+
+      // A new casting session arriving in settings must leave settings usable.
+      await tester.sendKeyEvent(LogicalKeyboardKey.contextMenu);
+      await tester.pumpAndSettle();
+      final settingsFocus = FocusManager.instance.primaryFocus;
+      expect(settingsFocus?.debugLabel, 'settings-miplay');
+      await tester.pumpWidget(screen(idle));
+      await tester.pumpWidget(screen(playing));
+      await tester.pumpAndSettle();
+      expect(FocusManager.instance.primaryFocus, same(settingsFocus));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(
+        FocusManager.instance.primaryFocus?.debugLabel,
+        'player-play-pause',
+      );
+    });
+  }
 
   testWidgets('player focus follows settings progress and play pause space', (
     tester,
