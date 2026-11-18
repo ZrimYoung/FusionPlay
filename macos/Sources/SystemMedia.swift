@@ -51,6 +51,31 @@ struct MediaPresentation: Equatable {
     }
 }
 
+// A seek from a system widget must still target the item selected when it was issued.
+struct MediaSeekTrack: Equatable, Sendable {
+    let id: String
+    let fallbackTitle: String
+    let duration: UInt64
+
+    init?(_ state: Snapshot) {
+        guard state.controlsAvailable, let duration = state.durationMs, duration > 0, state.positionMs != nil else { return nil }
+        self.duration = duration
+        id = state.trackId
+        fallbackTitle = id.isEmpty ? state.title : ""
+    }
+
+    func request(at seconds: TimeInterval) -> MediaSeekRequest? {
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        let milliseconds = min(Double(duration), (seconds * 1_000).rounded())
+        return MediaSeekRequest(track: self, positionMs: UInt64(exactly: milliseconds) ?? duration)
+    }
+}
+
+struct MediaSeekRequest: Sendable {
+    let track: MediaSeekTrack
+    let positionMs: UInt64
+}
+
 // Remote-command callbacks need not arrive on the main thread. Take a small
 // locked snapshot, enqueue the command and return immediately; never wait for
 // a phone acknowledgement on the system callback thread.
@@ -58,9 +83,17 @@ final class MediaCommandGate: @unchecked Sendable {
     private let lock = NSLock()
     private var enabled = false
     private var playing = false
-    func update(enabled: Bool, playing: Bool) {
+    private var seekTrack: MediaSeekTrack?
+    func update(enabled: Bool, playing: Bool, seekTrack: MediaSeekTrack? = nil) {
         lock.lock(); defer { lock.unlock() }
         self.enabled = enabled; self.playing = playing
+        self.seekTrack = seekTrack
+    }
+    func resolveSeek(_ seconds: TimeInterval) -> MediaSeekRequest? {
+        lock.lock(); defer { lock.unlock() }
+        guard enabled, let request = seekTrack?.request(at: seconds) else { return nil }
+        enabled = false
+        return request
     }
     func resolve(_ command: PlaybackCommand?) -> PlaybackCommand? {
         lock.lock(); defer { lock.unlock() }
@@ -78,8 +111,10 @@ final class SystemMediaController {
     private var targets: [(MPRemoteCommand, Any)] = []
     private var last: MediaPresentation?
     private var active = false
+    private let supportsSeek: Bool
 
-    init(send: @escaping @MainActor (PlaybackCommand) -> Void) {
+    init(seek: (@MainActor (MediaSeekRequest) -> Void)? = nil, send: @escaping @MainActor (PlaybackCommand) -> Void) {
+        supportsSeek = seek != nil
         for (remote, action) in [
             (commands.playCommand, PlaybackCommand.play as PlaybackCommand?),
             (commands.pauseCommand, PlaybackCommand.pause as PlaybackCommand?),
@@ -96,7 +131,18 @@ final class SystemMediaController {
             }
             targets.append((remote, token))
         }
-        commands.changePlaybackPositionCommand.isEnabled = false
+        let position = commands.changePlaybackPositionCommand
+        position.isEnabled = false
+        if let seek {
+            let gate = self.gate
+            let token = position.addTarget { event in
+                guard let event = event as? MPChangePlaybackPositionCommandEvent,
+                      let request = gate.resolveSeek(event.positionTime) else { return .noActionableNowPlayingItem }
+                DispatchQueue.main.async { seek(request) }
+                return .success
+            }
+            targets.append((position, token))
+        }
         commands.seekForwardCommand.isEnabled = false
         commands.seekBackwardCommand.isEnabled = false
         commands.skipForwardCommand.isEnabled = false
@@ -104,13 +150,16 @@ final class SystemMediaController {
         commands.stopCommand.isEnabled = false
     }
 
-    func update(_ state: Snapshot, busy: Bool, artwork: NowPlayingArtwork?, force: Bool = false) {
-        let enabled = state.controlsAvailable && !busy
-        gate.update(enabled: enabled, playing: state.phase == .playing)
-        for (command, _) in targets { command.isEnabled = enabled }
+    func update(_ state: Snapshot, busy: Bool, artwork: NowPlayingArtwork?, force: Bool = false, canSeek: Bool = false) {
         let labels = DisplayMetadata(state, correctLyricTitles: UserDefaults.standard.bool(forKey: "uiCorrectLyricTitles"))
         guard let presentation = MediaPresentation(state, previouslyActive: active, metadata: labels) else {
             clear(); return
+        }
+        let enabled = state.controlsAvailable && !busy
+        let seekTrack = supportsSeek && canSeek ? MediaSeekTrack(state) : nil
+        gate.update(enabled: enabled, playing: state.phase == .playing, seekTrack: seekTrack)
+        for (command, _) in targets {
+            command.isEnabled = enabled && (command !== commands.changePlaybackPositionCommand || seekTrack != nil)
         }
         guard force || last != presentation else { return }
         var info = presentation.info
@@ -118,13 +167,20 @@ final class SystemMediaController {
             info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(boundsSize: artwork.size) { _ in artwork }
         }
         center.nowPlayingInfo = info
+#if os(macOS)
         center.playbackState = presentation.playing ? .playing : .paused
+#endif
         last = presentation; active = true
     }
     func clear() {
         gate.update(enabled: false, playing: false)
         for (command, _) in targets { command.isEnabled = false }
-        if active { center.playbackState = .stopped; center.nowPlayingInfo = nil }
+        if active {
+#if os(macOS)
+            center.playbackState = .stopped
+#endif
+            center.nowPlayingInfo = nil
+        }
         active = false; last = nil
     }
     func shutdown() {

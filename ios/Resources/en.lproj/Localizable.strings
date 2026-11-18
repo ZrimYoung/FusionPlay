@@ -58,3 +58,11 @@
 "打开 App 时自动接收" = "Start Receiving on Launch";
 "始终显示顶部按钮" = "Always Show Top Controls";
 "允许歌名和艺人信息换行" = "Wrap Song Details";
+"设置" = "Settings";
+"接收" = "Receiver";
+"外观" = "Appearance";
+"音频" = "Audio";
+"关于" = "About";
+"版本" = "Version";
+"开源许可" = "Open Source License";
+"项目主页" = "Project Home";

@@ -114,6 +114,15 @@ impl PcmRing {
             pts: (pts != NO_PTS).then_some(pts as f64),
         })
     }
+    #[cfg(any(target_os = "ios", test))]
+    fn discard_before(&self, boundary: usize) {
+        let tail = self.tail.load(Ordering::Relaxed);
+        let count = boundary.wrapping_sub(tail);
+        if count <= self.buffered_frames() {
+            self.consume(count);
+        }
+    }
+
     fn consume(&self, frames: usize) -> usize {
         let tail = self.tail.load(Ordering::Relaxed);
         let n = frames.min(self.head.load(Ordering::Acquire).wrapping_sub(tail));
@@ -134,17 +143,25 @@ struct Health {
     callback_frames: AtomicUsize,
     failed: AtomicBool,
     stop: AtomicBool,
+    #[cfg(target_os = "ios")]
+    reset_after_pause: AtomicBool,
+    #[cfg(target_os = "ios")]
+    discard_before_resume: AtomicUsize,
 }
 pub(super) struct DesktopAudioStream {
+    #[cfg(not(target_os = "ios"))]
     stream: Option<cpal::Stream>,
     health: Arc<Health>,
     reporter: Option<thread::JoinHandle<()>>,
 }
 impl Drop for DesktopAudioStream {
     fn drop(&mut self) {
-        self.stream.take();
         self.health.stop.store(true, Ordering::Release);
+        #[cfg(not(target_os = "ios"))]
+        self.stream.take();
         if let Some(reporter) = self.reporter.take() {
+            #[cfg(target_os = "ios")]
+            reporter.thread().unpark();
             let _ = reporter.join();
         }
     }
@@ -298,6 +315,12 @@ fn build<T: SizedSample + FromSample<f32>>(
         config,
         move |output: &mut [T], info| {
             let frames = output.len() / channels;
+            #[cfg(target_os = "ios")]
+            if health.reset_after_pause.swap(false, Ordering::AcqRel) {
+                queue.discard_before(health.discard_before_resume.load(Ordering::Relaxed));
+                renderer = Renderer::new(nominal);
+                latency = 0.0;
+            }
             let requested_adjustment = sync_adjustment_ms();
             if requested_adjustment != applied_adjustment {
                 renderer.realign();
@@ -461,6 +484,8 @@ pub(super) fn open_native_audio_output(
     let queue = Arc::new(PcmRing::new(CAPACITY));
     let health = Arc::new(Health::default());
     let report_volume = volume.clone();
+    #[cfg(target_os = "ios")]
+    let transport_paused = paused.clone();
     let stream = match supported.sample_format() {
         cpal::SampleFormat::F32 => build::<f32>(
             &device,
@@ -497,12 +522,61 @@ pub(super) fn open_native_audio_output(
     events(
         json!({"event":"audio_output_ready", "device_name":device.description()?.name(), "sample_rate":config.sample_rate, "channels":config.channels}),
     );
+    #[cfg(target_os = "ios")]
+    stream.play()?;
     let report_health = health.clone();
     let report_queue = queue.clone();
     let reporter = thread::Builder::new().name("miplay-audio-health".into()).spawn(move || {
-        let mut last = 0; let mut ticks = 0;
+        let mut last = 0;
+        let mut ticks = 0;
+        #[cfg(target_os = "ios")]
+        let mut output_paused = false;
+        #[cfg(target_os = "ios")]
+        let mut transport_failures = 0_u8;
         while !report_health.stop.load(Ordering::Acquire) {
-            thread::sleep(StdDuration::from_millis(100)); ticks += 1;
+            #[cfg(not(target_os = "ios"))]
+            thread::sleep(StdDuration::from_millis(100));
+            #[cfg(target_os = "ios")]
+            thread::park_timeout(StdDuration::from_millis(100));
+            if report_health.stop.load(Ordering::Acquire) {
+                break;
+            }
+            #[cfg(target_os = "ios")]
+            {
+                let requested_pause = transport_paused.load(Ordering::Acquire);
+                if requested_pause == output_paused {
+                    transport_failures = 0;
+                } else {
+                    // iPadOS reads the native output state for the system media card.
+                    // Stop RemoteIO off the audio callback, leaving the cast connected.
+                    let changed = if requested_pause {
+                        stream.pause().is_ok()
+                    } else {
+                        report_health.reset_after_pause.store(true, Ordering::Release);
+                        stream.play().is_ok()
+                    };
+                    if changed {
+                        if requested_pause {
+                            report_health.discard_before_resume.store(
+                                report_queue.head.load(Ordering::Acquire),
+                                Ordering::Relaxed,
+                            );
+                        }
+                        output_paused = requested_pause;
+                        transport_failures = 0;
+                        events(json!({"event":"ios_output_transport", "playing":!output_paused}));
+                    } else {
+                        transport_failures = transport_failures.saturating_add(1);
+                        if transport_failures == 1 {
+                            events(json!({"event":"ios_output_transport_error", "playing":!requested_pause}));
+                        }
+                        if !requested_pause && transport_failures == 5 {
+                            report_health.failed.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
+            ticks += 1;
             if ticks < 10 { continue; } ticks = 0;
             let rendered = report_health.output_frames.load(Ordering::Relaxed);
             events(json!({"event":"audio_health", "queue_ms":report_queue.buffered_frames() as f64 / 48.0,
@@ -521,10 +595,12 @@ pub(super) fn open_native_audio_output(
         }
     })?;
     let managed = DesktopAudioStream {
+        #[cfg(not(target_os = "ios"))]
         stream: Some(stream),
         health,
         reporter: Some(reporter),
     };
+    #[cfg(not(target_os = "ios"))]
     managed.stream.as_ref().unwrap().play()?;
     Ok((queue, managed))
 }
@@ -628,6 +704,22 @@ mod tests {
         assert_eq!(q.peek(0).unwrap().left, 5.);
         assert_eq!(q.peek(2).unwrap().right, 10.);
     }
+    #[test]
+    fn discarding_paused_pcm_retains_frames_from_resume() {
+        let q = PcmRing::new(8);
+        q.head.store(usize::MAX, Ordering::Relaxed);
+        q.tail.store(usize::MAX, Ordering::Relaxed);
+        q.push_timed(&[1., 1., 2., 2.], Some(1000.));
+        let before_resume = q.head.load(Ordering::Acquire);
+        q.push_timed(&[3., 3., 4., 4.], Some(5000.));
+        q.discard_before(before_resume);
+        assert_eq!(q.buffered_frames(), 2);
+        assert_eq!(q.peek(0).unwrap().pts, Some(5000.));
+        q.consume(1);
+        q.discard_before(before_resume);
+        assert_eq!(q.peek(0).unwrap().left, 4.);
+    }
+
     #[test]
     fn underrun_fades_instead_of_clicking() {
         let q = PcmRing::new(1024);

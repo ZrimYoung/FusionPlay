@@ -43,6 +43,7 @@ final class ReceiverModel: ObservableObject {
     @Published private var volumeState = VolumeInteraction()
     @Published private var controlBusy = false
     private var currentControl: UUID?
+    private var systemCommandTask: UIBackgroundTaskIdentifier = .invalid
     private var receiver: Receiver?
     private var subscription: UInt64?
     private let backend = DispatchQueue(label: "tech.zrim.fusionplay.ios.receiver", qos: .userInitiated)
@@ -53,6 +54,8 @@ final class ReceiverModel: ObservableObject {
     private var runningName: String?
     private var generation: UInt64 = 0
     private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+    private var audioSessionActive = false
+    private var audioSessionRelease: Task<Void, Never>?
     private var seekTimeout: Task<Void, Never>?
     private var volumeTimeout: Task<Void, Never>?
     private var metadataKey: TrackKey?
@@ -63,7 +66,10 @@ final class ReceiverModel: ObservableObject {
     private var lyricsSource = ""
     private var lyricsTask: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
-    private lazy var systemMedia = SystemMediaController { [weak self] command in self?.control(command) }
+    private lazy var systemMedia = SystemMediaController(
+        seek: { [weak self] request in self?.handleSystemSeek(request) },
+        send: { [weak self] command in self?.control(command, fromSystem: true) }
+    )
 
     private struct TrackKey: Equatable {
         let id: String
@@ -101,21 +107,27 @@ final class ReceiverModel: ObservableObject {
 
     deinit {
         if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
+        audioSessionRelease?.cancel()
         let token = subscription
+        let releaseAudioSession = audioSessionActive
         if let receiver {
             backend.async {
                 if let token { receiver.unsubscribe(token: token) }
                 receiver.stop()
+                if releaseAudioSession {
+                    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                }
             }
         }
     }
 
     var volume: Double { volumeState.value }
     var displayedPositionMs: UInt64? { timeline.displayPosition(now: ProcessInfo.processInfo.systemUptime) }
-    var canControl: Bool {
-        wantsReceiving && !interrupted && !busy && !controlBusy && snapshot?.controlsAvailable == true
+    private var hasRemoteControlSession: Bool {
+        wantsReceiving && !interrupted && !busy && snapshot?.controlsAvailable == true
             && (foreground || canContinueBackgroundPlayback)
     }
+    var canControl: Bool { hasRemoteControlSession && !controlBusy }
     var canSeek: Bool { canControl && timeline.source?.canSeek == true }
 
     private var canContinueBackgroundPlayback: Bool {
@@ -187,12 +199,13 @@ final class ReceiverModel: ObservableObject {
         foreground = active
         if active, snapshot?.controlsAvailable != true { playedInCurrentSession = false }
         reconcile()
+        if snapshot != nil { publishSystemMedia() }
     }
 
     private func handleInterruption(_ type: AVAudioSession.InterruptionType, mayResume: Bool) {
         switch type {
         case .began:
-            guard runningName != nil || (wantsReceiving && busy) else { return }
+            guard audioSessionActive else { return }
             interrupted = true
         case .ended:
             guard interrupted else { return }
@@ -266,6 +279,10 @@ final class ReceiverModel: ObservableObject {
         subscription = nil
         snapshot = nil
         playedInCurrentSession = false
+        audioSessionRelease?.cancel()
+        audioSessionRelease = nil
+        let releaseAudioSession = audioSessionActive
+        audioSessionActive = false
         clearMedia()
         let startSettings = target.map {
             Settings(name: $0, interfaceName: "", outputDevice: "", volume: UInt32(volume.rounded()))
@@ -274,22 +291,17 @@ final class ReceiverModel: ObservableObject {
         backend.async { [weak self] in
             if let previous { receiver.unsubscribe(token: previous) }
             receiver.stop()
+            let session = AVAudioSession.sharedInstance()
+            if releaseAudioSession {
+                try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            }
             let result = Result<UInt64?, Error> {
-                guard let startSettings else {
-                    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-                    return nil
-                }
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-                try session.setActive(true)
-                do {
-                    try receiver.start(settings: startSettings)
-                    return receiver.subscribe(listener: listener)
-                } catch {
-                    receiver.stop()
-                    try? session.setActive(false, options: .notifyOthersOnDeactivation)
-                    throw error
-                }
+                guard let startSettings else { return nil }
+                // Configure the output for CPAL before opening the listener.
+                // Activation waits for a phone to establish a playback route.
+                try session.setCategory(.playback, mode: .default)
+                try receiver.start(settings: startSettings)
+                return receiver.subscribe(listener: listener)
             }
             DispatchQueue.main.async { [weak self] in
                 guard let self else {
@@ -317,7 +329,7 @@ final class ReceiverModel: ObservableObject {
 
     private func updateBackgroundGrace(keepingReceiver: Bool) {
         let length: Duration?
-        if keepingReceiver, let phase = snapshot?.phase, phase != .playing {
+        if keepingReceiver, let phase = snapshot?.phase, phase != .playing, phase != .paused {
             // RTSP may briefly close while the phone opens the next track.
             // Only a previously playing cast gets this short route handoff.
             length = .seconds(phase == .ready ? 2 : 30)
@@ -353,9 +365,39 @@ final class ReceiverModel: ObservableObject {
         backgroundTask = .invalid
     }
 
+    private func prepareAudioSession(for state: Snapshot) -> Bool {
+        if state.controlsAvailable && (state.phase == .connected || state.phase == .playing || state.phase == .paused) {
+            audioSessionRelease?.cancel()
+            audioSessionRelease = nil
+            if !audioSessionActive {
+                do {
+                    try AVAudioSession.sharedInstance().setActive(true)
+                    audioSessionActive = true
+                } catch {
+                    self.error = error.localizedDescription
+                    wantsReceiving = false
+                    reconcile()
+                    return false
+                }
+            }
+        } else if foreground, state.phase == .ready, audioSessionActive, audioSessionRelease == nil {
+            // The phone can replace its media route between tracks.
+            audioSessionRelease = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self else { return }
+                self.audioSessionRelease = nil
+                guard !Task.isCancelled, self.snapshot?.phase == .ready, self.audioSessionActive else { return }
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+                self.audioSessionActive = false
+            }
+        }
+        return true
+    }
+
     fileprivate func receive(_ state: Snapshot, generation: UInt64) {
         guard generation == self.generation, runningName != nil, !interrupted else { return }
         if snapshot != state { snapshot = state }
+        guard prepareAudioSession(for: state) else { return }
         if state.controlsAvailable, state.phase == .playing {
             playedInCurrentSession = true
         } else if !state.controlsAvailable, foreground || state.phase != .ready {
@@ -366,7 +408,7 @@ final class ReceiverModel: ObservableObject {
             position: state.positionMs, connected: state.controlsAvailable, playing: state.phase == .playing),
             now: ProcessInfo.processInfo.systemUptime)
         let artworkChanged = updateMetadata(state)
-        systemMedia.update(state, busy: !canControl, artwork: systemArtwork(for: state), force: artworkChanged)
+        publishSystemMedia(force: artworkChanged)
         if state.phase == .failed {
             error = state.message.isEmpty ? String(localized: "接收失败") : state.message
             wantsReceiving = false
@@ -394,6 +436,7 @@ final class ReceiverModel: ObservableObject {
         controlBusy = false
         controlMessage = ""
         systemMedia.clear()
+        endSystemCommandTask()
     }
 
     private func updateMetadata(_ state: Snapshot) -> Bool {
@@ -463,7 +506,7 @@ final class ReceiverModel: ObservableObject {
             self.loadedArtwork = request
             let decoded = UIImage(cgImage: image)
             self.artwork = decoded
-            self.systemMedia.update(state, busy: !self.canControl, artwork: decoded, force: true)
+            self.publishSystemMedia(force: true)
         }
         return true
     }
@@ -476,18 +519,32 @@ final class ReceiverModel: ObservableObject {
         return artwork
     }
 
-    func refreshDisplayPresentation() {
-        guard foreground, !busy, let snapshot else { return }
-        systemMedia.update(snapshot, busy: controlBusy, artwork: systemArtwork(for: snapshot))
+    func refreshDisplayPresentation() { publishSystemMedia() }
+
+    private func publishSystemMedia(force: Bool = false) {
+        guard let state = snapshot, audioSessionActive, wantsReceiving, !interrupted else {
+            systemMedia.clear()
+            return
+        }
+        systemMedia.update(state, busy: !hasRemoteControlSession,
+                           artwork: systemArtwork(for: state), force: force,
+                           canSeek: hasRemoteControlSession && timeline.source?.canSeek == true)
+    }
+
+    private func handleSystemSeek(_ request: MediaSeekRequest) {
+        guard let snapshot, MediaSeekTrack(snapshot) == request.track else { return }
+        seek(to: request.positionMs, fromSystem: true)
     }
 
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
 
-    func control(_ command: PlaybackCommand) {
-        submitControl { try $0.control(command: command) }
+    func control(_ command: PlaybackCommand, fromSystem: Bool = false) {
+        submitControl(fromSystem: fromSystem) { try $0.control(command: command) }
     }
 
-    func seek(to value: UInt64) {
+    func seek(to value: UInt64) { seek(to: value, fromSystem: false) }
+
+    private func seek(to value: UInt64, fromSystem: Bool) {
         guard canSeek, let state = snapshot, let duration = state.durationMs else { return }
         let position = min(value, duration)
         guard let token = timeline.begin(target: position, now: ProcessInfo.processInfo.systemUptime) else { return }
@@ -497,19 +554,22 @@ final class ReceiverModel: ObservableObject {
             guard let self, self.timeline.expire(token, now: ProcessInfo.processInfo.systemUptime) else { return }
             self.controlMessage = String(localized: "手机尚未确认跳转")
         }
-        submitControl(seekToken: token) {
+        submitControl(seekToken: token, fromSystem: fromSystem) {
             try $0.seek(positionMs: position, expectedTrackId: state.trackId, expectedTitle: state.title)
         }
     }
 
-    private func submitControl(seekToken: UInt64? = nil, _ action: @escaping @Sendable (Receiver) throws -> CommandOutcome) {
+    private func submitControl(seekToken: UInt64? = nil, fromSystem: Bool,
+                               _ action: @escaping @Sendable (Receiver) throws -> CommandOutcome) {
         guard canControl, let receiver else { return }
         controlBusy = true
         controlMessage = ""
         let id = UUID()
         currentControl = id
-        if let snapshot {
-            systemMedia.update(snapshot, busy: true, artwork: systemArtwork(for: snapshot))
+        if fromSystem {
+            systemCommandTask = UIApplication.shared.beginBackgroundTask(withName: "Finish FusionPlay media command") { [weak self] in
+                Task { @MainActor [weak self] in self?.endSystemCommandTask() }
+            }
         }
         backend.async { [weak self] in
             let result = Result { try action(receiver) }
@@ -521,8 +581,15 @@ final class ReceiverModel: ObservableObject {
                 if let seekToken { self.timeline.complete(seekToken, dispatched: dispatched) }
                 if !dispatched { self.controlMessage = String(localized: "发送控制指令失败") }
                 self.receive(receiver.snapshot(), generation: self.generation)
+                self.endSystemCommandTask()
             }
         }
+    }
+
+    private func endSystemCommandTask() {
+        guard systemCommandTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(systemCommandTask)
+        systemCommandTask = .invalid
     }
 
     func setSyncAdjustment(_ millis: Int) {

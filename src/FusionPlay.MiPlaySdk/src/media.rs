@@ -2071,6 +2071,8 @@ struct AacPlayer {
     decoder: AacDecoder,
     queue: DecoderQueue,
     _stream: NativeAudioStream,
+    #[cfg(target_os = "ios")]
+    output_paused: Arc<AtomicBool>,
     adts_framer: AdtsFramer,
     timestamp: i64,
     next_media_pts_micros: Option<f64>,
@@ -2129,6 +2131,8 @@ impl AacPlayer {
         let decoder = AacDecoder::try_new(&parameters, &AudioDecoderOptions::default())
             .context("initialize AAC-LC decoder")?;
 
+        #[cfg(target_os = "ios")]
+        let output_paused = paused.clone();
         let (queue, stream) = open_native_audio_output(
             requested_device,
             paused,
@@ -2142,6 +2146,8 @@ impl AacPlayer {
             decoder,
             queue,
             _stream: stream,
+            #[cfg(target_os = "ios")]
+            output_paused,
             adts_framer: AdtsFramer::default(),
             timestamp: 0,
             next_media_pts_micros: None,
@@ -2240,6 +2246,11 @@ impl AacPlayer {
                     "non_silent": non_silent,
                 }));
             }
+        }
+        #[cfg(target_os = "ios")]
+        if self.output_paused.load(Ordering::Acquire) {
+            // Continue decoding to keep AAC state and timestamps aligned with the source.
+            return Ok(());
         }
         #[cfg(any(windows, target_os = "macos", target_os = "ios"))]
         {

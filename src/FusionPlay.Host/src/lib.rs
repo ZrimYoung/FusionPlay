@@ -886,6 +886,8 @@ fn write_diagnostic(dir: &Path, event: &Value) {
             | "playback_state"
             | "volume"
             | "audio_pcm_decoded"
+            | "ios_output_transport"
+            | "ios_output_transport_error"
     ) {
         return;
     }
