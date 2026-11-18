@@ -11,6 +11,10 @@ struct PlayerWindowBehavior: NSViewRepresentable {
     let dimButtons: Bool
     let pinned: Bool
     let duration: Double
+    // The old boolean remains an initializer compatibility path for isolated
+    // callers. New player code always passes the explicit three-way layout.
+    var pagingEnabled = false
+    var layoutMode: NarrowPlayerLayout? = nil
 
     final class WindowAttachmentView: NSView {
         weak var coordinator: Coordinator?
@@ -33,6 +37,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
         private var lastLyricsPreference: Bool?
         private var expandLyricsAfterResize = false
         private var lastMiniRequest = 0
+        private var lastLayoutMode = NarrowPlayerLayout.original
         private var preferredLyricsPaneHeight: CGFloat?
 
         func update(_ view: WindowAttachmentView, policy: PlayerWindowBehavior) {
@@ -52,7 +57,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             PlayerWindowDiagnostics.record("attach", window: window, force: true)
             fullScreenTransition = false; fullScreenTransitionGeneration &+= 1
             appliedSquare = nil; appliedDimButtons = nil; normalizeSquareAfterResize = false
-            lastLyricsPreference = nil; expandLyricsAfterResize = false
+            lastLyricsPreference = nil; expandLyricsAfterResize = false; lastLayoutMode = .original
             preferredLyricsPaneHeight = nil
             if let window {
                 windowObservers.append(NotificationCenter.default.addObserver(
@@ -122,7 +127,8 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             preferredLyricsPaneHeight = content.height - content.width
         }
         private func apply(_ policy: PlayerWindowBehavior, to window: NSWindow) {
-            let diagnosticPolicy = ["square": String(policy.square), "lyrics": String(policy.miniLyrics),
+            let layout = policy.layoutMode ?? (policy.pagingEnabled ? .ipadPaged : .original)
+            let diagnosticPolicy = ["layout": layout.rawValue, "square": String(policy.square), "lyrics": String(policy.miniLyrics),
                                     "pinned": String(policy.pinned), "transition": String(fullScreenTransition)]
             PlayerWindowDiagnostics.record("apply.before", window: window, details: diagnosticPolicy)
             defer { PlayerWindowDiagnostics.record("apply.after", window: window, details: diagnosticPolicy) }
@@ -156,7 +162,8 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             if fullScreen {
                 // Consume changing media/appearance state without changing the
                 // native full-screen frame or the frame AppKit is restoring.
-                lastLyricsPreference = policy.miniLyrics
+                lastLyricsPreference = policy.miniLyrics && layout == .original
+                lastLayoutMode = layout
                 releaseFullScreenSizing(window)
                 return
             }
@@ -164,24 +171,28 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             // normalize the cover to a square. Keep its height independent of
             // whether the next track sends its metadata immediately.
             if lastLyricsPreference == true { rememberLyricsPane(in: window) }
-            let enabledLyrics = lastLyricsPreference == false && policy.miniLyrics
-            lastLyricsPreference = policy.miniLyrics
+            let restoringStacked = lastLayoutMode.isPaged && layout == .original
+            let wantsStackedLyrics = policy.miniLyrics && layout == .original
+            let enabledLyrics = lastLyricsPreference == false && wantsStackedLyrics && !restoringStacked
+            lastLyricsPreference = wantsStackedLyrics
+            lastLayoutMode = layout
             if policy.miniRequest > 0 && lastMiniRequest != policy.miniRequest {
                 lastMiniRequest = policy.miniRequest
                 let side = min(420, max(260, window.contentLayoutRect.width))
-                setSquare(!policy.miniLyrics, window: window)
+                setSquare(layout == .squarePaged || (layout == .original && !policy.miniLyrics), window: window)
                 expandLyricsAfterResize = false
-                applyMinimumSize(lyrics: policy.miniLyrics, width: side, window: window)
-                let desiredHeight = policy.miniLyrics ? lyricHeight(width: side, window: window) : side
+                applyMinimumSize(lyrics: wantsStackedLyrics, width: side, window: window)
+                let desiredHeight = layout == .ipadPaged ? max(260, window.contentLayoutRect.height)
+                    : (wantsStackedLyrics ? lyricHeight(width: side, window: window) : side)
                 window.setContentSize(NSSize(width: side, height: desiredHeight))
                 normalizeSquareAfterResize = false
-                if policy.miniLyrics { rememberLyricsPane(in: window) }
+                if wantsStackedLyrics { rememberLyricsPane(in: window) }
                 window.makeKeyAndOrderFront(nil)
                 return
             }
             let content = window.contentRect(forFrameRect: window.frame).size
             let compact = content.width < 600
-            let miniLyrics = policy.miniLyrics && compact
+            let miniLyrics = wantsStackedLyrics && compact
             // A width-boundary crossing is a user's resize, not a request to
             // choose a new height. Preserve it, including restored cold-launch
             // geometry; expand only when lyrics are explicitly enabled here.
@@ -189,7 +200,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             else if enabledLyrics { expandLyricsAfterResize = true }
             // Native geometry can be restored before SwiftUI publishes its
             // matching width. Use it rather than a stale full-screen policy.
-            let shouldBeSquare = compact && !policy.miniLyrics
+            let shouldBeSquare = compact && (layout == .squarePaged || (layout == .original && !policy.miniLyrics))
             let squareRatio = NSSize(width: 1, height: 1)
             let nativeConstraintChanged = shouldBeSquare
                 ? window.contentAspectRatio != squareRatio
@@ -211,9 +222,9 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 if content.height < height {
                     window.setContentSize(NSSize(width: content.width, height: height))
                 }
-            } else if shouldBeSquare && normalizeSquareAfterResize {
+            } else if shouldBeSquare && (normalizeSquareAfterResize || (layout == .squarePaged && abs(content.width - content.height) > 0.5)) {
                 normalizeSquareAfterResize = false
-                let width = max(260, content.width)
+                let width = max(260, content.width, window.contentMinSize.width, window.contentMinSize.height)
                 window.setContentSize(NSSize(width: width, height: width))
             }
             if miniLyrics { rememberLyricsPane(in: window) }

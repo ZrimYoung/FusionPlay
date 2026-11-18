@@ -56,7 +56,7 @@ struct FusionPlayApp: App {
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     @StateObject private var model = ReceiverModel.shared
-    init() { LyricsDisplayMode.migrateLegacyPreference() }
+    init() { LyricsDisplayMode.migrateLegacyPreference(); NarrowPlayerLayout.migrateLegacyPreference() }
     var body: some Scene {
         Window(L("FusionPlay · 正在播放"), id: "player") {
             PlayerWindowContent(model: model, delegate: delegate)
@@ -328,12 +328,19 @@ struct PlayerView: View {
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
     @AppStorage("playerShowsProgress") private var showProgress = true
     @AppStorage("playerLyricsDisplayMode") private var lyricsDisplayMode = "automatic"
+    @AppStorage("playerShowsLyricsButton") private var showLyricsButton = true
+    @AppStorage("wrapPlayerMetadata") private var wrapPlayerMetadata = false
+    @AppStorage(NarrowPlayerLayout.storageKey) private var narrowPlayerLayout = NarrowPlayerLayout.original.rawValue
+    @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
+    @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
     @ObservedObject var model: ReceiverModel
     @Environment(\.colorSchemeContrast) private var colorContrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     @State private var pointerInside = false
+    @State private var lyricsVisibility = PlayerLyricsVisibilityState()
+    @State private var compactPage = CompactPlayerPage.playback
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     private var showMiniControls: Bool { hovering || controlsAlwaysVisible || voiceOver || model.playerInteractionActive }
     private var playing: Bool { model.snapshot?.phase == .playing }
@@ -343,9 +350,11 @@ struct PlayerView: View {
             || !state.trackId.isEmpty || !state.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || (state.durationMs ?? 0) > 0
     }
-    private var showLyrics: Bool {
-        (LyricsDisplayMode(rawValue: lyricsDisplayMode) ?? .automatic).isVisible(hasLyrics: model.lyricsAvailable)
-    }
+    private var lyricMode: LyricsDisplayMode { LyricsDisplayMode(rawValue: lyricsDisplayMode) ?? .automatic }
+    private var showLyrics: Bool { lyricsVisibility.isVisible(mode: lyricMode, hasLyrics: model.lyricsAvailable) }
+    private var stableTrackID: String { model.snapshot?.trackId ?? "" }
+    private var connected: Bool { model.snapshot?.controlsAvailable == true }
+    private var narrowLayout: NarrowPlayerLayout { NarrowPlayerLayout.resolve(narrowPlayerLayout) }
     private func horizontalInset(for width: CGFloat) -> CGFloat {
         min(80, 36 + max(0, width - 600) * 0.1)
     }
@@ -383,14 +392,25 @@ struct PlayerView: View {
                         .foregroundStyle(.white.opacity(0.28))
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .accessibilityLabel(L("等待你的音乐"))
+                } else if NarrowPlayerPresentation.isPaged(width: geometry.size.width, layout: narrowLayout) {
+                    pagedMini(size: geometry.size).transition(.opacity)
                 } else if compact { mini(size: geometry.size).transition(.opacity) }
                 else { expanded(size: geometry.size).transition(.opacity) }
             }.animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: compact)
-            PlayerWindowBehavior(square: compact && !showLyrics,
+            PlayerWindowBehavior(square: compact && (narrowLayout == .squarePaged || (narrowLayout == .original && !showLyrics)),
                                  miniRequest: model.miniPlayerRequest, miniLyrics: showLyrics,
                                  dimButtons: compact && !showMiniControls,
-                                 pinned: pinned, duration: reduceMotion ? 0 : (showMiniControls ? 0.25 : 0.65))
+                                 pinned: pinned, duration: reduceMotion ? 0 : (showMiniControls ? 0.25 : 0.65),
+                                 layoutMode: narrowLayout)
                 .frame(width: 0, height: 0)
+        }.overlay(alignment: .topTrailing) {
+            GeometryReader { geometry in
+                if hasTrack {
+                    playerTools(compact: geometry.size.width < 600,
+                                paged: NarrowPlayerPresentation.isPaged(width: geometry.size.width, layout: narrowLayout))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
+            }.allowsHitTesting(hasTrack)
         }.frame(minWidth: 260, minHeight: 260)
             .ignoresSafeArea(.container, edges: .top)
             .foregroundStyle(.white)
@@ -400,6 +420,28 @@ struct PlayerView: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showProgress)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.36), value: showLyrics)
             .modifier(PlayerFullScreenEligibility())
+            .onAppear { lyricsVisibility.observe(trackID: stableTrackID, connected: connected) }
+            .onChange(of: stableTrackID) { _, id in
+                lyricsVisibility.observe(trackID: id, connected: connected)
+            }
+            .onChange(of: connected) { _, value in
+                lyricsVisibility.observe(trackID: stableTrackID, connected: value)
+                if !value { compactPage = .playback }
+            }
+            .onChange(of: lyricsDisplayMode) { _, _ in
+                lyricsVisibility.reset()
+            }
+            .onHover { inside in
+                pointerInside = inside
+                if inside { hovering = true }
+            }
+            .task(id: pointerInside) {
+                guard !pointerInside else { return }
+                do { try await Task.sleep(nanoseconds: 400_000_000) } catch { return }
+                guard !Task.isCancelled else { return }
+                hovering = false
+            }
+            .onDisappear { pointerInside = false; hovering = false }
     }
     private func expanded(size: CGSize) -> some View {
         let lyricsLayout = ExpandedLyricsLayout(size: size, showsProgress: showProgress,
@@ -410,7 +452,8 @@ struct PlayerView: View {
         let column = lyricsLayout.albumColumnWidth
         let padding = lyricsLayout.verticalPadding
         let standardSide = min(360, size.height - 48, size.width * 0.37)
-        let side = showLyrics ? lyricsLayout.artworkSide : standardSide
+        let metadataExtra = metadataExtraHeight(width: column, titleSize: 20, subtitleSize: 12, defaultTitleLines: 1)
+        let side = showLyrics ? max(60, lyricsLayout.artworkSide - metadataExtra) : standardSide
         let detailWidth = min(440, max(0, availableWidth - standardSide - 28))
         let albumWidth = showLyrics ? column : standardSide + 28 + detailWidth
         let lyricsWidth = lyricsLayout.lyricsWidth
@@ -420,12 +463,23 @@ struct PlayerView: View {
         return HStack(spacing: showLyrics ? gap : 0) {
             // AnyLayout moves the same cover/details between horizontal and
             // vertical arrangements instead of replacing the player subtree.
-            albumLayout {
-                cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
-                expandedDetails
-                    .frame(width: showLyrics ? column : detailWidth)
-                    .frame(height: showLyrics ? nil : side)
-            }.frame(width: albumWidth)
+            if wrapPlayerMetadata {
+                ScrollView(.vertical) {
+                    albumLayout {
+                        cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
+                        expandedDetails(width: showLyrics ? column : detailWidth)
+                            .frame(width: showLyrics ? column : detailWidth)
+                    }.frame(width: albumWidth)
+                }.scrollIndicators(.hidden)
+                    .frame(width: albumWidth, height: max(0, size.height - (showLyrics ? padding * 2 : 24)))
+            } else {
+                albumLayout {
+                    cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
+                    expandedDetails(width: showLyrics ? column : detailWidth)
+                        .frame(width: showLyrics ? column : detailWidth)
+                        .frame(height: showLyrics ? nil : side)
+                }.frame(width: albumWidth)
+            }
             // Keep the lyric viewport and its scroll identity alive at their
             // reading width while the surrounding slot collapses and fades.
             lyricsPanel(compact: false)
@@ -439,17 +493,13 @@ struct PlayerView: View {
         }.padding(.horizontal, inset).padding(.vertical, showLyrics ? padding : 0)
             .frame(width: size.width, height: size.height, alignment: .center)
     }
-    private var expandedDetails: some View {
+    private func expandedDetails(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: showLyrics ? 5 : 9) {
-                Text(title).font(typography.font(size: showLyrics ? 20 : 28, weight: .semibold))
-                    .lineLimit(showLyrics ? 1 : 2).textSelection(.enabled).help(title)
-                if !subtitle.isEmpty {
-                    Text(subtitle).font(typography.font(size: showLyrics ? 12 : 14))
-                        .foregroundStyle(.white.opacity(showLyrics ? 0.7 : 0.72))
-                        .lineLimit(1).help(subtitle)
-                }
-            }.frame(maxWidth: .infinity, minHeight: showLyrics ? nil : 86, alignment: .topLeading)
+            PlayerTrackMetadataView(title: title, subtitle: subtitle, width: width,
+                                    titleSize: showLyrics ? 20 : 28, subtitleSize: showLyrics ? 12 : 14,
+                                    spacing: showLyrics ? 5 : 9, defaultTitleLines: showLyrics ? 1 : 2,
+                                    subtitleOpacity: showLyrics ? 0.7 : 0.72, allowsSelection: true)
+                .frame(minHeight: showLyrics ? nil : 86, alignment: .topLeading)
                 .padding(.top, showLyrics ? 14 : 0).padding(.bottom, showLyrics ? 10 : 0)
             if !showLyrics {
                 Spacer(minLength: 18)
@@ -494,12 +544,19 @@ struct PlayerView: View {
                 .transition(.opacity)
         }
     }
-    private func mini(size: CGSize) -> some View {
+    private func mini(size: CGSize, includesLyrics: Bool? = nil) -> some View {
         let showControls = showMiniControls
-        let coverHeight = showLyrics ? size.width : size.height
+        let showsLyrics = includesLyrics ?? showLyrics
+        let coverHeight = showsLyrics ? size.width : size.height
         let coverSize = CGSize(width: size.width, height: coverHeight)
-        let artworkMode: ContentMode = showLyrics ? .fit : .fill
+        let artworkMode: ContentMode = showsLyrics ? .fit : .fill
         let lyricsHeight = max(128, size.height - size.width - 8)
+        let titleSize: CGFloat = showsLyrics ? (size.width < 320 ? 17 : 20) : 19
+        let controlsBudget: CGFloat = 32 + (showProgress ? 44 : 0) + (showPlaybackControls ? (showsLyrics ? 44 : 46) : 0)
+        let lineBudget = PlayerMetadataLineBudget(availableHeight: max(0, coverHeight - controlsBudget - 6),
+            titleLineHeight: NSLayoutManager().defaultLineHeight(for: typography.nsFont(size: titleSize, weight: .semibold)),
+            subtitleLineHeight: NSLayoutManager().defaultLineHeight(for: typography.nsFont(size: 12)),
+            spacing: showsLyrics ? 4 : 5, hasSubtitle: !subtitle.isEmpty)
         return VStack(spacing: 0) {
             ZStack(alignment: .bottom) {
                 if let artwork = model.artwork {
@@ -507,23 +564,18 @@ struct PlayerView: View {
                         .frame(width: size.width, height: coverHeight).clipped()
                         .accessibilityHidden(true)
                 } else {
-                    Image(systemName: "music.note").font(.system(size: showLyrics ? 56 : 64, weight: .ultraLight))
-                        .foregroundStyle(.white.opacity(showLyrics ? 0.35 : 0.4))
+                    Image(systemName: "music.note").font(.system(size: showsLyrics ? 56 : 64, weight: .ultraLight))
+                        .foregroundStyle(.white.opacity(showsLyrics ? 0.35 : 0.4))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(title).font(typography.font(size: showLyrics ? (size.width < 320 ? 17 : 20) : 19, weight: .semibold))
-                        .lineLimit(showLyrics ? 1 : 2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentTransition(.opacity)
-                    if !subtitle.isEmpty {
-                        Text(subtitle).font(typography.font(size: 12))
-                            .foregroundStyle(.white.opacity(showLyrics ? 0.7 : 0.75))
-                            .lineLimit(1).help(subtitle).padding(.top, showLyrics ? 4 : 5)
-                            .contentTransition(.opacity)
-                    }
+                    PlayerTrackMetadataView(title: title, subtitle: subtitle, width: max(0, size.width - 32),
+                                            titleSize: titleSize, subtitleSize: 12, spacing: showsLyrics ? 4 : 5,
+                                            defaultTitleLines: showsLyrics ? 1 : 2,
+                                            wrappedTitleLines: lineBudget.titleLines, wrappedSubtitleLines: lineBudget.subtitleLines,
+                                            subtitleOpacity: showsLyrics ? 0.7 : 0.75)
                     progress.padding(.top, showProgress ? 8 : 0)
-                    miniTransport.padding(.top, !showLyrics && showPlaybackControls ? 2 : 0)
+                    miniTransport.padding(.top, !showsLyrics && showPlaybackControls ? 2 : 0)
                 }.padding(16)
                     .background {
                         GeometryReader { geometry in
@@ -541,59 +593,162 @@ struct PlayerView: View {
             }.frame(width: size.width, height: coverHeight).clipped()
             // Retain the lyric pane's spacing without painting a hairline
             // below the cover, which looked like a misaligned material edge.
-            Color.clear.frame(height: showLyrics ? 8 : 0)
+            Color.clear.frame(height: showsLyrics ? 8 : 0)
                 .accessibilityHidden(true)
-            lyricsPanel(compact: true)
-                .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
-                .frame(width: size.width, height: lyricsHeight)
-                .animation(nil, value: CGSize(width: size.width, height: lyricsHeight))
-                .frame(height: showLyrics ? lyricsHeight : 0, alignment: .top)
-                .clipped().opacity(showLyrics ? 1 : 0)
-                .offset(y: showLyrics ? 0 : 12)
-                .allowsHitTesting(showLyrics).accessibilityHidden(!showLyrics)
+            if includesLyrics != false {
+                lyricsPanel(compact: true)
+                    .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
+                    .frame(width: size.width, height: lyricsHeight)
+                    .animation(nil, value: CGSize(width: size.width, height: lyricsHeight))
+                    .frame(height: showsLyrics ? lyricsHeight : 0, alignment: .top)
+                    .clipped().opacity(showsLyrics ? 1 : 0)
+                    .offset(y: showsLyrics ? 0 : 12)
+                    .allowsHitTesting(showsLyrics).accessibilityHidden(!showsLyrics)
+            }
         }.frame(width: size.width, height: size.height).clipped()
-            .overlay(alignment: .topTrailing) {
-                if showPinButton {
-                    Button { pinned.toggle() } label: {
-                        Image(systemName: pinned ? "pin.fill" : "pin")
-                            .font(.system(size: 12, weight: .regular))
-                            .rotationEffect(.degrees(35))
-                            .foregroundStyle(.white.opacity(pinned ? 1 : 0.65))
-                            .frame(width: 28, height: 28)
-                    }.buttonStyle(PlayerTransportStyle())
-                        .help(pinned ? L("取消置顶") : L("置顶窗口"))
-                        .accessibilityLabel(pinned ? L("取消置顶") : L("置顶窗口"))
-                        .accessibilityValue(pinned ? L("已开启") : L("已关闭"))
-                        .padding(12)
-                        .opacity(showControls ? 1 : 0)
-                        .allowsHitTesting(showControls).accessibilityHidden(!showControls)
-                        .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.36 : 0.42)
-                            .delay(showControls ? 0.1 : 0), value: showControls)
-                }
-            }
             .contentShape(Rectangle())
-            .onHover { inside in
-                pointerInside = inside
-                if inside { hovering = true }
-            }
-            .task(id: pointerInside) {
-                guard !pointerInside else { return }
-                do { try await Task.sleep(nanoseconds: 400_000_000) }
-                catch { return }
-                guard !Task.isCancelled else { return }
-                hovering = false
-            }
-            .onDisappear { pointerInside = false; hovering = false }
             .accessibilityLabel(L("迷你播放器") + ", " + title)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: title)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: subtitle)
     }
-    private func lyricsPanel(compact: Bool) -> some View {
+    private func metadataExtraHeight(width: CGFloat, titleSize: CGFloat, subtitleSize: CGFloat,
+                                     defaultTitleLines: Int) -> CGFloat {
+        guard wrapPlayerMetadata else { return 0 }
+        let titleFont = typography.nsFont(size: titleSize, weight: .semibold)
+        let subtitleFont = typography.nsFont(size: subtitleSize)
+        let base = PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
+            titleFont: titleFont, subtitleFont: subtitleFont, spacing: 5, wraps: false,
+            defaultTitleLines: defaultTitleLines)
+        let expanded = PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
+            titleFont: titleFont, subtitleFont: subtitleFont, spacing: 5, wraps: true,
+            defaultTitleLines: defaultTitleLines)
+        return max(0, expanded - base)
+    }
+    private func requestCompactPage(_ page: CompactPlayerPage) {
+        compactPage = page
+    }
+    private func pagedMini(size: CGSize) -> some View {
+        PlayerNarrowPager(selection: $compactPage, requestPage: requestCompactPage) {
+            if narrowLayout == .squarePaged { mini(size: size, includesLyrics: false) }
+            else { pagedPlayback(size: size) }
+        } lyrics: {
+            VStack(spacing: 0) {
+                if lyricsPageShowsArtwork || lyricsPageShowsTrackInfo {
+                    Group {
+                        if narrowLayout == .ipadPaged {
+                            Button { requestCompactPage(.playback) } label: { lyricsPageSummary(size: size) }
+                                .buttonStyle(.plain)
+                                .accessibilityIdentifier("fusionplay.player.lyrics.header")
+                                .accessibilityLabel(L("返回播放页"))
+                                .accessibilityValue([title, subtitle].filter { !$0.isEmpty }.joined(separator: ", "))
+                                .help(L("点击歌曲信息返回播放页"))
+                        } else { lyricsPageSummary(size: size) }
+                    }.padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 10)
+                }
+                lyricsPanel(compact: true, presentationActive: compactPage == .lyrics)
+                    .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }.padding(.top, 44)
+        }.frame(width: size.width, height: size.height)
+    }
+    private func lyricsPageSummary(size: CGSize) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            if lyricsPageShowsArtwork { cover(side: 56) }
+            if lyricsPageShowsTrackInfo {
+                PlayerTrackMetadataView(title: title, subtitle: subtitle,
+                    width: max(0, size.width - 40 - (lyricsPageShowsArtwork ? 68 : 0)),
+                    titleSize: 15, subtitleSize: 11, spacing: 3, wrappedTitleLines: 2)
+            }
+            if !lyricsPageShowsTrackInfo { Spacer(minLength: 0) }
+        }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+    }
+    private func pagedPlayback(size: CGSize) -> some View {
+        let width = max(0, size.width - (size.width < 320 ? 36 : 48))
+        let metadataHeight = PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
+            titleFont: typography.nsFont(size: 22, weight: .semibold), subtitleFont: typography.nsFont(size: 13),
+            spacing: 5, wraps: wrapPlayerMetadata, defaultTitleLines: 2)
+        let layout = PagedPlaybackLayout(size: size, metadataHeight: metadataHeight,
+                                         showsProgress: showProgress, showsTransport: showPlaybackControls)
+        return ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
+                cover(side: layout.artworkSide)
+                    .accessibilityIdentifier("fusionplay.player.paged-artwork")
+                    .frame(maxWidth: .infinity, alignment: .center)
+                PlayerTrackMetadataView(title: title, subtitle: subtitle, width: layout.contentWidth,
+                    titleSize: 22, subtitleSize: 13, spacing: 5, defaultTitleLines: 2, allowsSelection: true)
+                    .padding(.top, 18)
+                progress.padding(.top, showProgress ? 12 : 0)
+                miniTransport.padding(.top, showPlaybackControls ? 8 : 0)
+                currentLyricSummary.padding(.top, 14)
+            }.frame(width: layout.contentWidth)
+                .padding(.horizontal, layout.horizontalInset)
+                .padding(.bottom, layout.bottomInset)
+                .frame(minHeight: max(0, size.height - layout.topInset), alignment: .top)
+        }.scrollIndicators(.automatic)
+            .frame(width: size.width, height: max(0, size.height - layout.topInset))
+            .padding(.top, layout.topInset)
+            .frame(width: size.width, height: size.height)
+    }
+    private var currentLyricSummary: some View {
+        TimelineView(.animation(minimumInterval: 0.15, paused: !playing || compactPage != .playback)) { _ in
+            let current = PlayerCurrentLyricSummary.text(document: model.lyrics, positionMs: model.displayedPositionMs)
+            let emptyCaption = model.lyrics.lines.isEmpty ? L("暂无歌词") : L("查看歌词")
+            let caption = model.lyricsLoading ? L("正在载入歌词…") : (current ?? emptyCaption)
+            Button { requestCompactPage(.lyrics) } label: {
+                HStack(spacing: 8) {
+                    Text(verbatim: caption).font(typography.font(size: 13))
+                        .lineLimit(1).truncationMode(.tail).contentTransition(.opacity)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                }.foregroundStyle(.white.opacity(current == nil ? 0.55 : 0.8))
+                    .padding(.horizontal, 10).frame(height: 34)
+                    .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                    .contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .accessibilityIdentifier("fusionplay.player.lyric-summary")
+                .accessibilityLabel(L("查看歌词"))
+                .accessibilityValue(caption)
+                .help(L("点击当前歌词进入歌词页"))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: caption)
+        }
+    }
+    private func playerTools(compact: Bool, paged: Bool) -> some View {
+        HStack(spacing: 4) {
+            if showLyricsButton {
+                let selected = paged ? compactPage == .lyrics : showLyrics
+                Button {
+                    if paged { requestCompactPage(selected ? .playback : .lyrics) }
+                    else { lyricsVisibility.toggle(mode: lyricMode, hasLyrics: model.lyricsAvailable) }
+                } label: {
+                    Image(systemName: selected ? "quote.bubble.fill" : "quote.bubble")
+                        .font(.system(size: 13, weight: .medium)).frame(width: 28, height: 28)
+                }.buttonStyle(PlayerTransportStyle())
+                    .accessibilityIdentifier("fusionplay.player.lyrics.toggle")
+                    .help(L(paged ? (selected ? "返回播放页" : "切换到歌词页") : (selected ? "隐藏歌词（当前歌曲）" : "显示歌词（当前歌曲）")))
+                    .accessibilityLabel(L(paged ? (selected ? "返回播放页" : "切换到歌词页") : (selected ? "隐藏歌词（当前歌曲）" : "显示歌词（当前歌曲）")))
+                    .accessibilityValue(L(selected ? "已开启" : "已关闭"))
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
+            }
+            if compact && showPinButton {
+                Button { pinned.toggle() } label: {
+                    Image(systemName: pinned ? "pin.fill" : "pin")
+                        .font(.system(size: 12)).rotationEffect(.degrees(35)).frame(width: 28, height: 28)
+                }.buttonStyle(PlayerTransportStyle())
+                    .help(L(pinned ? "取消置顶" : "置顶窗口"))
+                    .accessibilityLabel(L(pinned ? "取消置顶" : "置顶窗口"))
+            }
+        }.padding(10)
+            .opacity(!compact || showMiniControls ? 1 : 0)
+            .allowsHitTesting(!compact || showMiniControls)
+            .accessibilityHidden(compact && !showMiniControls)
+            .animation(reduceMotion ? nil : .easeInOut(duration: showMiniControls ? 0.36 : 0.42), value: showMiniControls)
+    }
+    private func lyricsPanel(compact: Bool, presentationActive: Bool = true) -> some View {
         let track = model.snapshot?.trackId
         let trackTitle = model.snapshot?.title
         return LyricsView(document: model.lyrics, positionMs: model.displayedPositionMs,
                           loading: model.lyricsLoading, connected: model.snapshot?.controlsAvailable == true,
-                          compact: compact, canSeek: model.canSeek) { position in
+                          compact: compact, canSeek: model.canSeek, presentationActive: presentationActive) { position in
             // A row from a disappearing track must not seek the newly selected one.
             let sameTrack = (track?.isEmpty == false) ? track == model.snapshot?.trackId : trackTitle == model.snapshot?.title
             guard sameTrack else { return }

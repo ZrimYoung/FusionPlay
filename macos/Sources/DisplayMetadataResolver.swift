@@ -51,6 +51,23 @@ enum DisplayMetadataResolver {
                                wasCorrected: corrected)
     }
 
+    /// Prefer the protocol projection when supplied. An explicit empty value
+    /// is meaningful; only a source with no projection uses the legacy resolver.
+    static func resolveProjected(title: String, artist: String, album: String, lyricsText: String,
+                                 displayTitle: String?, displayArtist: String?, displayAlbum: String?,
+                                 correctLyricTitles: Bool = true) -> DisplayMetadata {
+        let raw = DisplayMetadata(title: title, artist: artist, album: album)
+        guard correctLyricTitles else { return raw }
+        guard displayTitle != nil || displayArtist != nil || displayAlbum != nil else {
+            return resolve(title: title, artist: artist, album: album, lyricsText: lyricsText)
+        }
+        let resolvedTitle = displayTitle ?? title
+        let resolvedArtist = displayArtist ?? artist
+        let resolvedAlbum = displayAlbum ?? album
+        return DisplayMetadata(title: resolvedTitle, artist: resolvedArtist, album: resolvedAlbum,
+                               wasCorrected: resolvedTitle != title || resolvedArtist != artist || resolvedAlbum != album)
+    }
+
     private struct Headers {
         var values: [String: String] = [:]
         var conflicts = Set<String>()
@@ -205,13 +222,19 @@ enum DisplayMetadataResolver {
         let artist: String
         let album: String
         let lyricsText: String
+        let displayTitle: String?
+        let displayArtist: String?
+        let displayAlbum: String?
     }
     private var previous: Input?
     private var result: DisplayMetadata?
-    func resolve(title: String, artist: String, album: String, lyricsText: String) -> DisplayMetadata {
-        let input = Input(title: title, artist: artist, album: album, lyricsText: lyricsText)
+    func resolve(title: String, artist: String, album: String, lyricsText: String,
+                 displayTitle: String? = nil, displayArtist: String? = nil, displayAlbum: String? = nil) -> DisplayMetadata {
+        let input = Input(title: title, artist: artist, album: album, lyricsText: lyricsText,
+                          displayTitle: displayTitle, displayArtist: displayArtist, displayAlbum: displayAlbum)
         if previous == input, let result { return result }
-        let resolved = DisplayMetadataResolver.resolve(title: title, artist: artist, album: album, lyricsText: lyricsText)
+        let resolved = DisplayMetadataResolver.resolveProjected(title: title, artist: artist, album: album, lyricsText: lyricsText,
+            displayTitle: displayTitle, displayArtist: displayArtist, displayAlbum: displayAlbum)
         previous = input; result = resolved
         return resolved
     }

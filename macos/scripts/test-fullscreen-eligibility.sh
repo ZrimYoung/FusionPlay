@@ -17,7 +17,7 @@ cat > "$CHECK/Contents/Info.plist" <<'PLIST'
 PLIST
 xcrun swiftc -swift-version 5 -parse-as-library -target arm64-apple-macosx14.0 \
   -module-cache-path "$PROJECT/cache/swift" -framework SwiftUI -framework AppKit \
-  "$REPO/macos/Sources/PlayerWindowBehavior.swift" "$REPO/macos/Tests/PlayerFullScreenEligibilitySmoke.swift" \
+  "$REPO/macos/Sources/NarrowPlayerLayout.swift" "$REPO/macos/Sources/PlayerWindowBehavior.swift" "$REPO/macos/Tests/PlayerFullScreenEligibilitySmoke.swift" \
   -o "$CHECK/Contents/MacOS/FullscreenEligibilityCheck"
 CFFIXED_USER_HOME="$PROJECT/tmp/fullscreen-eligibility-check-state" \
   FUSIONPLAY_FULLSCREEN_CHECK_RESULT="$RESULT/result.json" \

@@ -10,6 +10,7 @@ struct LyricsView: View {
     let connected: Bool
     let compact: Bool
     let canSeek: Bool
+    var presentationActive = true
     let seek: (UInt64) -> Void
 #if FUSIONPLAY_UI_CHECKS
     var checkReduceMotion: Bool? = nil
@@ -34,6 +35,9 @@ struct LyricsView: View {
     @State private var viewportSettling = false
     @State private var viewportRevision = 0
     @State private var viewportFollowRequest: Int?
+    @State private var presentationRevision = 0
+    @State private var presentationFollowRequest: Int?
+    @State private var needsPresentationFollow = false
     @State private var followWave: LyricsFollowWave?
     @StateObject private var viewportAnchor = LyricsViewportAnchor()
 
@@ -116,7 +120,7 @@ struct LyricsView: View {
                     .scrollIndicators(.hidden)
                     .background {
                         LyricsScrollActivity(anchor: viewportAnchor, activeID: activeID,
-                                             browsing: browsing, anchoringEnabled: !voiceOver,
+                                             browsing: browsing, anchoringEnabled: !voiceOver && (presentationActive || browsing),
                                              onScroll: { userBeganBrowsing() }, onLiveResize: { resizing in
                             guard liveResizing != resizing else { return }
                             liveResizing = resizing
@@ -145,9 +149,44 @@ struct LyricsView: View {
                             follow(proxy, animated: true, reason: "playback", previousID: previous)
                         }
                     }
+                    .onChange(of: presentationActive) { _, active in
+                        presentationRevision &+= 1
+                        presentationFollowRequest = nil
+                        needsPresentationFollow = active && !browsing && !dragging && !voiceOver
+                        // An offscreen pane's old visible row is not a reading
+                        // anchor for the page the user is just opening.
+                        if !browsing { viewportAnchor.cancel() }
+                        if !active {
+                            viewportSettling = false
+                            viewportRevision &+= 1
+                            viewportFollowRequest = nil
+                            clearFollowWave()
+                        }
+                    }
+                    .task(id: presentationRevision) {
+                        guard presentationRevision > 0, presentationActive, needsPresentationFollow else { return }
+                        // The pager changes its transform without changing this
+                        // viewport's size. Wait for that motion and lazy rows.
+                        do { try await Task.sleep(for: .milliseconds(reduceMotion ? 50 : 300)) }
+                        catch { return }
+                        let deadline = Date().addingTimeInterval(1.6)
+                        while (viewportSettling || Date().timeIntervalSince(viewportAnchor.lastGeometryChange) < 0.1), Date() < deadline {
+                            do { try await Task.sleep(for: .milliseconds(20)) }
+                            catch { return }
+                        }
+                        guard !Task.isCancelled, presentationActive, !liveResizing else { return }
+                        presentationFollowRequest = presentationRevision
+                    }
+                    .onChange(of: presentationFollowRequest) { _, revision in
+                        guard revision == presentationRevision, presentationActive, needsPresentationFollow,
+                              !viewportSettling, !liveResizing else { return }
+                        needsPresentationFollow = false
+                        viewportAnchor.cancel()
+                        follow(proxy, animated: false, reason: "presentation")
+                    }
                     .onChange(of: geometry.size) { _, _ in viewportChanged() }
                     .task(id: viewportRevision) {
-                        guard viewportRevision > 0, !liveResizing else { return }
+                        guard viewportRevision > 0, presentationActive, !liveResizing else { return }
                         // Let the final word reflow and row-height move finish before
                         // restoring the reading anchor, as on the iPad player.
                         let settle = reduceMotion ? 0.18 : LyricsReflowText.transitionDuration + staggerSpan + 0.05
@@ -161,21 +200,27 @@ struct LyricsView: View {
                             do { try await Task.sleep(for: .milliseconds(20)) }
                             catch { return }
                         }
-                        guard !Task.isCancelled, !liveResizing else { return }
+                        guard !Task.isCancelled, presentationActive, !liveResizing else { return }
                         viewportSettling = false
                         // Trigger a fresh view callback after the quiet period;
                         // an async task's captured playback position can be old.
                         viewportFollowRequest = viewportRevision
                     }
                     .onChange(of: viewportFollowRequest) { _, revision in
-                        guard revision == viewportRevision, !viewportSettling, !liveResizing else { return }
-                        let preserved = viewportAnchor.finish(activeID: activeID)
+                        guard revision == viewportRevision, presentationActive, !viewportSettling, !liveResizing else { return }
+                        let presentationFollow = needsPresentationFollow
+                        let preserved: Bool
+                        if presentationFollow { viewportAnchor.cancel(); preserved = false }
+                        else { preserved = viewportAnchor.finish(activeID: activeID) }
 #if FUSIONPLAY_UI_CHECKS
                         LyricsViewCheckEvents.anchorFinished?(activeID, preserved)
 #endif
                         if browsing { browsingRevision &+= 1 }
                         guard document.isTimed, !browsing, !dragging, !voiceOver else { return }
-                        if !preserved { follow(proxy, animated: true, reason: "viewport") }
+                        if presentationFollow {
+                            needsPresentationFollow = false
+                            follow(proxy, animated: false, reason: "presentation")
+                        } else if !preserved { follow(proxy, animated: true, reason: "viewport") }
                     }
                     .onChange(of: document) { _, _ in
                         DispatchQueue.main.async {
@@ -335,6 +380,10 @@ struct LyricsView: View {
     }
 
     private func viewportChanged() {
+        guard presentationActive else {
+            if !browsing { viewportAnchor.cancel() }
+            return
+        }
         viewportAnchor.configure(activeID: activeID, browsing: browsing, enabled: !voiceOver)
         viewportAnchor.beginIfNeeded(retryWhenReady: true)
         if !viewportSettling {
@@ -371,7 +420,7 @@ struct LyricsView: View {
                         previousID: Int? = nil) {
         // Respect native browsing and accessibility even for asynchronous
         // appear/document callbacks captured before the activity began.
-        guard !browsing, !dragging, !voiceOver, !liveResizing, !viewportSettling else { return }
+        guard presentationActive, !browsing, !dragging, !voiceOver, !liveResizing, !viewportSettling else { return }
         // Unknown progress is not an instruction to jump to the first line.
         guard document.isTimed, followPosition.current(positionMs, connected: connected) != nil else { return }
         guard let id = activeID ?? document.lines.first?.id else { return }

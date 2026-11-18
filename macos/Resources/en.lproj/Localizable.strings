@@ -182,3 +182,53 @@
 "歌词字号" = "Lyric Text Size";
 
 "单行移动时长" = "Line Movement Duration";
+
+"允许歌曲信息换行" = "Wrap Song Information";
+
+"歌名最多三行，艺人与专辑最多两行；信息高度平滑过渡。" = "Use up to three title lines and two artist/album lines, with smooth height changes.";
+
+"歌词快捷按钮" = "Lyrics Shortcut Button";
+
+"仅临时切换当前歌曲的歌词显示，不改变自动、始终开启或始终关闭设置。" = "Temporarily toggle lyrics for the current song without changing Automatic, Always On or Always Off.";
+
+"窄窗左右分页" = "Page Narrow Windows Horizontally";
+
+"小窗口中将播放与歌词分为独立页面，支持点击页签或用触控板左右滑动。" = "In narrow windows, show playback and lyrics on separate pages. Click a tab or swipe left or right on a trackpad.";
+
+"歌词页显示小封面" = "Show Small Artwork on Lyrics Page";
+
+"歌词页显示歌曲信息" = "Show Song Information on Lyrics Page";
+
+"隐藏歌词（当前歌曲）" = "Hide Lyrics for This Song";
+
+"显示歌词（当前歌曲）" = "Show Lyrics for This Song";
+
+"非分页时显示歌词" = "Lyrics Outside Paging";
+
+"此设置控制非分页布局。分页中的歌词页由页签或触控板切换，不改变此设置。" = "This controls the non-paged layout. In paging, use tabs or a trackpad to visit lyrics without changing this setting.";
+
+"窄窗布局" = "Narrow Window Layout";
+
+"原有布局" = "Original Layout";
+
+"分页布局" = "Paged Layout";
+
+"分页布局可左右滑动；点击当前歌词进入歌词页，点击歌曲摘要返回播放页。" = "Swipe horizontally between pages. Click the current lyric to open lyrics, or the song summary to return to playback.";
+
+"返回播放页" = "Back to Playback";
+
+"点击歌曲信息返回播放页" = "Click song information to return to playback";
+
+"查看歌词" = "View Lyrics";
+
+"点击当前歌词进入歌词页" = "Click the current lyric to open the lyrics page";
+
+"切换到歌词页" = "Go to Lyrics";
+
+"此设置控制原有布局。分页时可滑动或点击当前歌词与歌曲摘要切换页面，不改变此设置。" = "This controls the original layout. In paging, swipe or click the lyric and song summaries to change pages without changing this setting.";
+
+"方形分页" = "Square Paging";
+
+"独立播放页" = "Separate Playback Page";
+
+"原有布局保留上下封面与歌词；方形分页保持窗口方形；独立播放页显示封面、播放信息与当前歌词。" = "Original keeps artwork above lyrics. Square Paging keeps the window square. Separate Playback Page shows artwork, playback information and the current lyric.";

@@ -33,6 +33,7 @@ struct BridgeSmoke {
             let presentation = MediaPresentation(state)!
             precondition(presentation.info[MPMediaItemPropertyTitle] as? String == "Track")
             precondition(presentation.position == 5 && presentation.duration == 120)
+            SystemMediaSeekChecks.run(state: state)
             state.queueMs = 80
             precondition(MediaPresentation(state) == presentation, "Health updates must not reset elapsed time")
             state.phase = .paused

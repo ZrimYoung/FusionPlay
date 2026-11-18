@@ -11,6 +11,11 @@ struct AppearanceSettingsPage: View {
     @AppStorage("playerShowsPinButton") private var showPinButton = false
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
     @AppStorage("playerShowsProgress") private var showProgress = true
+    @AppStorage("playerShowsLyricsButton") private var showLyricsButton = true
+    @AppStorage("wrapPlayerMetadata") private var wrapPlayerMetadata = false
+    @AppStorage(NarrowPlayerLayout.storageKey) private var narrowPlayerLayout = NarrowPlayerLayout.original.rawValue
+    @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
+    @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
     @AppStorage("uiCorrectLyricTitles") private var correctLyricTitles = false
     @AppStorage("playerLyricsDisplayMode") private var lyricsDisplayMode = "automatic"
     @AppStorage("playerProgressColorMode") private var progressColorMode = "white"
@@ -19,6 +24,8 @@ struct AppearanceSettingsPage: View {
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.appTypography) private var typography
+
+    private var narrowLayout: NarrowPlayerLayout { NarrowPlayerLayout.resolve(narrowPlayerLayout) }
 
     var body: some View {
         Form {
@@ -45,14 +52,18 @@ struct AppearanceSettingsPage: View {
         Section(L("播放显示")) {
             Toggle(L("播放控制"), isOn: $showPlaybackControls)
             Toggle(L("进度与时间"), isOn: $showProgress)
-            Picker(L("歌词"), selection: $lyricsDisplayMode) {
+            Toggle(L("允许歌曲信息换行"), isOn: $wrapPlayerMetadata)
+                .help(L("歌名最多三行，艺人与专辑最多两行；信息高度平滑过渡。"))
+            Toggle(L("歌词快捷按钮"), isOn: $showLyricsButton)
+                .help(L("仅临时切换当前歌曲的歌词显示，不改变自动、始终开启或始终关闭设置。"))
+            Picker(L(narrowLayout.isPaged ? "非分页时显示歌词" : "歌词"), selection: $lyricsDisplayMode) {
                 ForEach(LyricsDisplayMode.allCases, id: \.rawValue) { mode in
                     Text(L(mode.title)).tag(mode.rawValue)
                 }
             }
             .pickerStyle(.menu)
             .controlSize(.small)
-            .help(L("自动：有歌词时显示，无歌词时隐藏。歌词由手机提供。"))
+            .help(L(narrowLayout.isPaged ? "此设置控制原有布局。分页时可滑动或点击当前歌词与歌曲摘要切换页面，不改变此设置。" : "自动：有歌词时显示，无歌词时隐藏。歌词由手机提供。"))
             Toggle(L("修正歌词标题"), isOn: $correctLyricTitles)
                 .onChange(of: correctLyricTitles) { _, _ in onTitleCorrectionChanged() }
                 .help(L("手机用歌词更新歌名时，尝试恢复真实歌名；无法确认时保留原始信息。"))
@@ -81,6 +92,18 @@ struct AppearanceSettingsPage: View {
             Toggle(L("窗口置顶"), isOn: $pinned)
             // Pinning and the optional pin control are independent preferences.
             Toggle(L("置顶按钮"), isOn: $showPinButton)
+            Picker(L("窄窗布局"), selection: Binding(
+                get: { narrowLayout.rawValue }, set: { narrowPlayerLayout = $0 }
+            )) {
+                ForEach(NarrowPlayerLayout.allCases, id: \.rawValue) { layout in
+                    Text(L(layout.title)).tag(layout.rawValue)
+                }
+            }.pickerStyle(.menu).controlSize(.small)
+                .help(L("原有布局保留上下封面与歌词；方形分页保持窗口方形；独立播放页显示封面、播放信息与当前歌词。"))
+            if narrowLayout.isPaged {
+                Toggle(L("歌词页显示小封面"), isOn: $lyricsPageShowsArtwork)
+                Toggle(L("歌词页显示歌曲信息"), isOn: $lyricsPageShowsTrackInfo)
+            }
         }
     }
 

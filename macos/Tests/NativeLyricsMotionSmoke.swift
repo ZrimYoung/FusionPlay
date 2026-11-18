@@ -159,6 +159,32 @@ private struct NativeMotionFixtureView: View {
         precondition(custom.fontName == model.font.fontName && custom.text == model.text && custom.poses.count > 10)
         try save(custom, "native-custom-unicode")
 
+        // Keep native shaping intact while batching adjacent glyph draws:
+        // this mixes Latin ligatures, CJK fallback, emoji and an Arabic run.
+        model.reduced = false
+        await resize(520); await pause(0.6)
+        await resize(190); await pause(0.07)
+        let unicodeFade = current()
+        precondition(unicodeFade.text == model.text && unicodeFade.movingClusterCount > 0 &&
+                     unicodeFade.poses.values.contains { $0.moving && $0.blur > 0 },
+                     "Mixed-script native glyphs did not animate during reflow")
+        try save(unicodeFade, "native-unicode-vanish")
+        await pause(0.6)
+        let unicodeNarrow = current()
+        precondition(unicodeNarrow.poses.values.allSatisfy { $0.opacity == 1 && $0.blur == 0 })
+        try save(unicodeNarrow, "native-unicode-narrow")
+        let firstFontSizePhase = phases.count
+        for size in [33.0, 29.0, 26.0, 31.0, 34.0] {
+            model.font = NSFont(name: "HelveticaNeue-Bold", size: size)!
+            await pause(0.04); host.layoutSubtreeIfNeeded()
+            precondition(current().text == model.text)
+        }
+        await pause(0.7)
+        precondition(!phases.dropFirst(firstFontSizePhase).contains { $0.phase == "reset" },
+                     "Continuous point-size changes reset the native lyric identity")
+        precondition(current().poses.values.allSatisfy { $0.opacity == 1 && $0.blur == 0 },
+                     "Continuous font resizing retained stale glyph motion")
+
         // Exercise the full 240ms setting through the production wrapper. The
         // prior 140ms cap would already blur text at +180ms and move height by
         // +380ms, so these checks cannot pass with the old cap still present.

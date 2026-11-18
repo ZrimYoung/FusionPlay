@@ -18,12 +18,8 @@ struct NativeLyricsReflowText: View {
     @State private var motion = NativeGlyphMotion()
     @State private var rowMotion: NativeLyricRowMotion?
     @State private var naturalHeight: CGFloat?
-    @State private var intrinsicSize: CGSize?
-    @State private var pendingHeightTopology = false
-    @State private var input: NativeLyricInput?
+    @State private var intrinsicGeometry = NativeLyricIntrinsicGeometry()
     @State private var revision: UInt64 = 0
-    @State private var layoutCount = 0
-    @State private var direction = "none"
     @State private var clock: Date?
 #if FUSIONPLAY_UI_CHECKS
     @State private var checkOwner = UUID()
@@ -46,9 +42,9 @@ struct NativeLyricsReflowText: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: safeWidth, alignment: .topLeading)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                    intrinsicSize = size
-                    let topology = pendingHeightTopology
-                    pendingHeightTopology = false
+                    intrinsicGeometry.size = size
+                    let topology = intrinsicGeometry.pendingTopology
+                    intrinsicGeometry.pendingTopology = false
                     acceptHeight(size.height, topologyChanged: topology, at: Date())
                 }
                 .frame(height: rowMotion?.height(at: context.date) ?? naturalHeight, alignment: .topLeading)
@@ -68,31 +64,53 @@ struct NativeLyricsReflowText: View {
     }
 
     private func accept(_ measured: NativeGlyphLayout) {
-        input = NativeLyricInput(text: text, font: font, spacing: lineSpacing, width: safeWidth)
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("layoutCallbacks")
+        if let prior = target, prior.width != measured.width, prior.positions == measured.positions,
+           prior.lineStarts == measured.lineStarts, prior.height == measured.height, prior.identity == measured.identity {
+            NativeLyricsReflowBenchmark.hit("widthOnlyCallbacks")
+        }
+#endif
+#if FUSIONPLAY_UI_CHECKS
+        intrinsicGeometry.input = NativeLyricInput(text: text, font: font, spacing: lineSpacing, width: safeWidth)
+        intrinsicGeometry.layoutCount += 1
+#endif
         guard target != measured else { return }
-        layoutCount += 1
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("acceptedLayouts")
+#endif
         let now = Date()
         let previous = target
         let changedWrap = previous.map { $0.lineStarts != measured.lineStarts } ?? false
         let start = now.addingTimeInterval(LyricsStaggerTiming.clampSpan(motionDelay))
         if let previous, allowed, previous.identity == measured.identity {
             if changedWrap {
-                direction = measured.height > previous.height + 0.5 ? "expand" :
+#if FUSIONPLAY_UI_CHECKS
+                intrinsicGeometry.direction = measured.height > previous.height + 0.5 ? "expand" :
                     measured.height < previous.height - 0.5 ? "contract" : "reflow"
+#endif
                 clock = start
-            } else if end == nil { direction = "position"; clock = start }
+            } else if end == nil {
+#if FUSIONPLAY_UI_CHECKS
+                intrinsicGeometry.direction = "position"
+#endif
+                clock = start
+            }
             motion = motion.retarget(from: previous, to: measured, now: now, start: start)
         } else {
-            motion = NativeGlyphMotion(); rowMotion = nil; direction = "none"; clock = nil
+            motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+#if FUSIONPLAY_UI_CHECKS
+            intrinsicGeometry.direction = "none"
+#endif
         }
         target = measured
         // Native Text's intrinsic geometry is the sole source of row height.
         // Typographic bounds below are used only to describe wrap direction.
         if changedWrap {
-            pendingHeightTopology = true
-            if let intrinsicSize, abs(intrinsicSize.width - safeWidth) < 0.75 {
-                pendingHeightTopology = false
-                acceptHeight(intrinsicSize.height, topologyChanged: true, at: now)
+            intrinsicGeometry.pendingTopology = true
+            if let size = intrinsicGeometry.size, abs(size.width - safeWidth) < 0.75 {
+                intrinsicGeometry.pendingTopology = false
+                acceptHeight(size.height, topologyChanged: true, at: now)
             }
         }
         revision &+= 1
@@ -105,6 +123,9 @@ struct NativeLyricsReflowText: View {
     }
 
     private func acceptHeight(_ height: CGFloat, topologyChanged: Bool, at now: Date) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("heightCallbacks")
+#endif
         guard height.isFinite, height >= 0 else { return }
         guard let previous = naturalHeight, allowed, target != nil else {
             naturalHeight = height; rowMotion = nil; return
@@ -126,10 +147,16 @@ struct NativeLyricsReflowText: View {
     }
 
     private func reset(clearLayout: Bool) {
-        revision &+= 1; motion = NativeGlyphMotion(); rowMotion = nil; clock = nil; direction = "none"
-        pendingHeightTopology = false
+        revision &+= 1; motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+#if FUSIONPLAY_UI_CHECKS
+        intrinsicGeometry.direction = "none"
+#endif
+        intrinsicGeometry.pendingTopology = false
         if clearLayout && target?.identity != identity {
-            target = nil; naturalHeight = intrinsicSize?.height; input = nil
+            target = nil; naturalHeight = intrinsicGeometry.size?.height
+#if FUSIONPLAY_UI_CHECKS
+            intrinsicGeometry.input = nil
+#endif
         }
 #if FUSIONPLAY_UI_CHECKS
         LyricsReflowTextCheckEvents.transition?("reset", 0)
@@ -138,6 +165,9 @@ struct NativeLyricsReflowText: View {
     }
 
     private func finishMotion() async {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("motionTasks")
+#endif
         guard let expected = end else { return }
         let token = revision
         let expectedIdentity = identity
@@ -151,12 +181,18 @@ struct NativeLyricsReflowText: View {
             report("end")
             return
         }
+#if FUSIONPLAY_UI_CHECKS
+        // Phase sampling is a test concern. Production only needs the final
+        // deadline, rather than five Date allocations for every moving glyph.
         var boundaries = motion.dissolves.values.flatMap { fade in
             [NativeLyricTiming.hideEnd, NativeLyricTiming.rowStart, NativeLyricTiming.rowEnd,
              NativeLyricTiming.showStart, 1].map { fade.startedAt.addingTimeInterval(NativeLyricTiming.duration * $0) }
         }
         if let rowMotion { boundaries += [rowMotion.start, rowMotion.end] }
         boundaries.append(expected)
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("phaseBoundaries", value: Double(boundaries.count))
+#endif
         for boundary in Set(boundaries.filter { $0 > Date() }).sorted() {
             do { try await Task.sleep(for: .seconds(max(0, boundary.timeIntervalSinceNow))) }
             catch { return }
@@ -171,6 +207,12 @@ struct NativeLyricsReflowText: View {
             }
             report(phase(at: Date()))
         }
+#else
+        do { try await Task.sleep(for: .seconds(max(0, expected.timeIntervalSinceNow))) }
+        catch { return }
+        guard !Task.isCancelled, revision == token, identity == expectedIdentity else { return }
+        motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+#endif
     }
 
     private func phase(at now: Date) -> String {
@@ -204,7 +246,7 @@ struct NativeLyricsReflowText: View {
     }
 #if FUSIONPLAY_UI_CHECKS
     private func sample(_ phase: String) -> NativeLyricsReflowCheckEvents.Sample? {
-        guard let target, let input else { return nil }
+        guard let target, let input = intrinsicGeometry.input else { return nil }
         let now = Date()
         var poses: [String: NativeLyricsReflowCheckEvents.Pose] = [:]
         var moving = 0, visible = 0
@@ -225,11 +267,23 @@ struct NativeLyricsReflowText: View {
             .frame(width: input.width, alignment: .topLeading)
             .frame(height: height, alignment: .topLeading).foregroundStyle(.white)
         return NativeLyricsReflowCheckEvents.Sample(renderer: "native-text-renderer", text: input.text,
-            fontName: input.font.fontName, direction: direction, phase: phase, revision: revision,
+            fontName: input.font.fontName, direction: intrinsicGeometry.direction, phase: phase, revision: revision,
             width: input.width, height: height, targetHeight: naturalHeight ?? target.height,
-            lineCount: target.lineStarts.count, nativeLayoutCount: layoutCount,
+            lineCount: target.lineStarts.count, nativeLayoutCount: intrinsicGeometry.layoutCount,
             movingClusterCount: moving, visibleMovingCount: visible, poses: poses, preview: AnyView(preview))
     }
+#endif
+}
+
+/// Intrinsic width/topology are coordination data, not display state. Mutating
+/// them must not request another Text layout for every pixel of a resize.
+@MainActor private final class NativeLyricIntrinsicGeometry {
+    var size: CGSize?
+    var pendingTopology = false
+#if FUSIONPLAY_UI_CHECKS
+    var input: NativeLyricInput?
+    var layoutCount = 0
+    var direction = "none"
 #endif
 }
 
@@ -287,6 +341,10 @@ private struct NativeGlyphLayout: Equatable {
     let positions: [Key: Position]
 
     init(_ layout: Text.Layout, width: CGFloat, identity: NativeLyricIdentity) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        let benchmarkStart = CFAbsoluteTimeGetCurrent()
+        defer { NativeLyricsReflowBenchmark.hit("layoutParseSeconds", value: CFAbsoluteTimeGetCurrent() - benchmarkStart) }
+#endif
         self.identity = identity; self.width = width
         firstCharacter = layout.flatMap { $0.flatMap { $0.characterIndices } }.min()
         let top = layout.first?.typographicBounds.rect.minY ?? 0
@@ -314,6 +372,14 @@ private struct NativeGlyphLayout: Equatable {
         lineWidths = layout.map { $0.typographicBounds.width }
         for key in ambiguous { positions.removeValue(forKey: key) }
         self.positions = positions
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // The proposed canvas width can change while the actual left-aligned
+        // glyph layout is identical. Do not rebuild motion or invalidate Text.
+        lhs.identity == rhs.identity && lhs.height == rhs.height
+            && lhs.lineStarts == rhs.lineStarts && lhs.lineWidths == rhs.lineWidths
+            && lhs.positions == rhs.positions
     }
 
     func matches(_ layout: Text.Layout) -> Bool {
@@ -390,14 +456,19 @@ private struct NativeGlyphSlide {
 
 @available(macOS 15.0, *)
 private struct NativeGlyphMotion {
-    var dissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve] = [:]
-    var slides: [NativeGlyphLayout.Key: NativeGlyphSlide] = [:]
+    let dissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve]
+    let slides: [NativeGlyphLayout.Key: NativeGlyphSlide]
+    let endsAt: Date?
 
-    var endsAt: Date? {
+    init(dissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve] = [:],
+         slides: [NativeGlyphLayout.Key: NativeGlyphSlide] = [:]) {
+        self.dissolves = dissolves; self.slides = slides
+        // A motion is immutable between retargets. Every frame can share the
+        // same deadline rather than scanning and allocating Dates per glyph.
         let slideEnd = slides.values.lazy.map(\.endsAt).max()
         let dissolveEnd = dissolves.values.lazy.map(\.endsAt).max()
-        if let slideEnd, let dissolveEnd { return max(slideEnd, dissolveEnd) }
-        return slideEnd ?? dissolveEnd
+        if let slideEnd, let dissolveEnd { endsAt = max(slideEnd, dissolveEnd) }
+        else { endsAt = slideEnd ?? dissolveEnd }
     }
 
     func appearance(_ key: NativeGlyphLayout.Key, at destination: CGPoint, now: Date) -> NativeGlyphAppearance? {
@@ -414,10 +485,10 @@ private struct NativeGlyphMotion {
             guard let prior = previous.positions[key] else { continue }
             let dissolving = dissolves[key].flatMap { $0.endsAt > now ? $0 : nil }
             let sliding = slides[key].flatMap { $0.endsAt > now ? $0 : nil }
-            let visible = dissolving?.appearance(at: prior.origin, now: now)?.origin
-                ?? sliding?.position(at: prior.origin, now: now) ?? prior.origin
+            let fadingAppearance = dissolving?.appearance(at: prior.origin, now: now)
+            let visible = fadingAppearance?.origin ?? sliding?.position(at: prior.origin, now: now) ?? prior.origin
             if prior.line != destination.line {
-                let from = dissolving?.appearance(at: prior.origin, now: now) ?? NativeGlyphAppearance(origin: visible)
+                let from = fadingAppearance ?? NativeGlyphAppearance(origin: visible)
                 nextDissolves[key] = NativeGlyphDissolve(from: from, startedAt: start)
             } else if var dissolving {
                 // A pixel-width update keeps the existing fade deadline. If
@@ -453,11 +524,20 @@ private struct NativeReflowRenderer: TextRenderer {
         let opacity: Double
 
         func draw(in context: GraphicsContext) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+            NativeLyricsReflowBenchmark.hit("contextDraws")
+#endif
             var ink = context
             ink.opacity *= opacity
             ink.translateBy(x: offset.x, y: offset.y)
             ink.draw(slice)
         }
+    }
+
+    private struct GlyphPaint: Equatable {
+        let offset: CGPoint
+        let opacity: Double
+        let blurStep: Int
     }
 
     let target: NativeGlyphLayout?
@@ -470,22 +550,49 @@ private struct NativeReflowRenderer: TextRenderer {
     var displayPadding: EdgeInsets { EdgeInsets(top: 4, leading: 0, bottom: overflow, trailing: 0) }
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("rendererDraws")
+#endif
         guard let target else {
-            for line in layout { context.draw(line) }
+            for line in layout {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+                NativeLyricsReflowBenchmark.hit("contextDraws")
+#endif
+                context.draw(line)
+            }
             return
         }
         let matches = target.matches(layout)
         guard !matches || motion.endsAt != nil else {
-            for line in layout { context.draw(line) }
+            for line in layout {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+                NativeLyricsReflowBenchmark.hit("contextDraws")
+#endif
+                context.draw(line)
+            }
             return
         }
         let anchor = layout.first?.origin ?? .zero
         var blurLayers: [Int: [GlyphDraw]] = [:]
         for line in layout {
             for run in line {
-                for slice in run {
+                var pending: (start: Int, end: Int, paint: GlyphPaint)?
+                func flush() {
+                    guard let batch = pending else { return }
+                    let glyph = GlyphDraw(slice: run[batch.start..<batch.end], offset: batch.paint.offset,
+                                          opacity: batch.paint.opacity)
+                    if batch.paint.blurStep == 0 { glyph.draw(in: context) }
+                    else { blurLayers[batch.paint.blurStep, default: []].append(glyph) }
+                    pending = nil
+                }
+                for index in run.indices {
+                    let slice = run[index]
                     let key = NativeGlyphLayout.key(for: slice)
                     guard let destination = target.positions[key] else {
+                        flush()
+#if FUSIONPLAY_REFLOW_BENCHMARK
+                        NativeLyricsReflowBenchmark.hit("contextDraws")
+#endif
                         context.draw(slice)
                         continue
                     }
@@ -493,27 +600,34 @@ private struct NativeReflowRenderer: TextRenderer {
                     let origin = matches ? destination.origin :
                         CGPoint(x: nativeOrigin.x - anchor.x, y: nativeOrigin.y - anchor.y)
                     let animated = motion.appearance(key, at: destination.origin, now: now)
+                    let paint: GlyphPaint
                     if animated == nil, !NativeGlyphMotion.hasDisplacement(from: origin, to: destination.origin) {
-                        context.draw(slice)
-                        continue
-                    }
-                    // Until a new measurement arrives, keep moved clusters at
-                    // the previous presentation in the current text coordinate space.
-                    let appearance = animated ?? NativeGlyphAppearance(origin: destination.origin)
-                    guard appearance.opacity > 0 else { continue }
-                    let glyph = GlyphDraw(slice: slice,
-                        offset: CGPoint(x: appearance.origin.x - origin.x, y: appearance.origin.y - origin.y),
-                        opacity: appearance.opacity)
-                    let blurStep = Int((appearance.blur * 4).rounded())
-                    if blurStep == 0 {
-                        glyph.draw(in: context)
+                        paint = GlyphPaint(offset: .zero, opacity: 1, blurStep: 0)
                     } else {
-                        blurLayers[blurStep, default: []].append(glyph)
+                        // Keep the original shaped run. Combining adjacent
+                        // slices with identical paint does not reshape ligatures,
+                        // change stacking order, or quantize their positions.
+                        let appearance = animated ?? NativeGlyphAppearance(origin: destination.origin)
+                        guard appearance.opacity > 0 else { flush(); continue }
+                        paint = GlyphPaint(offset: CGPoint(x: appearance.origin.x - origin.x,
+                                                          y: appearance.origin.y - origin.y),
+                                           opacity: appearance.opacity,
+                                           blurStep: Int((appearance.blur * 4).rounded()))
+                    }
+                    if let batch = pending, batch.end == index, batch.paint == paint {
+                        pending = (batch.start, index + 1, paint)
+                    } else {
+                        flush()
+                        pending = (index, index + 1, paint)
                     }
                 }
+                flush()
             }
         }
         for (step, glyphs) in blurLayers.sorted(by: { $0.key < $1.key }) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+            NativeLyricsReflowBenchmark.hit("blurLayers")
+#endif
             var filtered = context
             filtered.addFilter(.blur(radius: CGFloat(step) / 4))
             filtered.drawLayer { layer in
@@ -557,4 +671,20 @@ private struct NativeReflowRenderer: TextRenderer {
     fileprivate static var sampleOwner: UUID?
 }
 #endif
+#endif
+
+#if FUSIONPLAY_REFLOW_BENCHMARK
+/// Diagnostic counters exist only in the isolated performance executable.
+enum NativeLyricsReflowBenchmark {
+    private final class Counts: @unchecked Sendable {
+        let lock = NSLock()
+        var values: [String: Double] = [:]
+    }
+    private static let counts = Counts()
+    static func hit(_ key: String, value: Double = 1) {
+        counts.lock.lock(); counts.values[key, default: 0] += value; counts.lock.unlock()
+    }
+    static func reset() { counts.lock.lock(); counts.values.removeAll(keepingCapacity: true); counts.lock.unlock() }
+    static func snapshot() -> [String: Double] { counts.lock.lock(); defer { counts.lock.unlock() }; return counts.values }
+}
 #endif

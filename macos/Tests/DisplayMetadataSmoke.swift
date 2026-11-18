@@ -81,6 +81,24 @@ import Foundation
         // Correct titles may clean an independently verified composite without
         // changing the title or guessing a split inside either complete name.
         recovered("A Synthetic Question (Explicit)", artist: composite, lyrics: headers + row)
+        // Preserve Mac's Unicode behavior for nonprojected metadata.
+        recovered("ＣＡＦＥ\u{301}　ＨＯＭＥ", artist: composite,
+                  lyrics: headers + "[00:01]Please Café home tonight\n")
+        let rawCaption = "home"
+        let projected = DisplayMetadataResolver.resolveProjected(title: rawCaption, artist: "Raw Artist", album: "Raw Album",
+            lyricsText: "", displayTitle: "Night Walk", displayArtist: "Verified Artist", displayAlbum: nil)
+        precondition(projected.title == "Night Walk" && projected.artist == "Verified Artist" && projected.album == "Raw Album")
+        let disabled = DisplayMetadataResolver.resolveProjected(title: rawCaption, artist: "Raw Artist", album: "Raw Album",
+            lyricsText: headers + row, displayTitle: "Night Walk", displayArtist: "Verified Artist", displayAlbum: "Record",
+            correctLyricTitles: false)
+        precondition(disabled == DisplayMetadata(title: rawCaption, artist: "Raw Artist", album: "Raw Album"))
+        let unknown = DisplayMetadataResolver.resolveProjected(title: rawCaption, artist: "Raw Artist", album: "Raw Album",
+            lyricsText: headers + row, displayTitle: "", displayArtist: nil, displayAlbum: nil)
+        precondition(unknown.title.isEmpty && unknown.artist == "Raw Artist")
+        let legacy = DisplayMetadataResolver.resolveProjected(title: "touch her", artist: composite, album: "Example Album",
+            lyricsText: headers + row, displayTitle: nil, displayArtist: nil, displayAlbum: nil)
+        precondition(legacy.title == "A Synthetic Question (Explicit)")
+        checks += 4
         print("PASS: \(checks) display-only metadata cases; trusted headers, bounded caption fragments, hyphens, ambiguity, normal titles and malformed inputs")
     }
 }

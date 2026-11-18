@@ -175,6 +175,74 @@ private final class FullScreenTestWindow: NSWindow {
         precondition(window.level == .normal && contentSize() == NSSize(width: 420, height: 730),
                      "Exiting full screen must retain the user's portrait lyric height and latest pin preference")
         fullScreenCoordinator.dismantle()
+        let pagingCoordinator = PlayerWindowBehavior.Coordinator()
+        view.coordinator = pagingCoordinator
+        func pagingPolicy(lyrics: Bool, enabled: Bool = true, request: Int = 0) {
+            pagingCoordinator.update(view, policy: PlayerWindowBehavior(square: !lyrics, miniRequest: request,
+                miniLyrics: lyrics, dimButtons: false, pinned: false, duration: 0, pagingEnabled: enabled))
+        }
+        window.setContentSize(NSSize(width: 420, height: 300))
+        pagingPolicy(lyrics: false); settle(); assertFree()
+        for lyrics in [true, false, true] {
+            pagingPolicy(lyrics: lyrics); settle(); assertFree()
+            precondition(contentSize() == NSSize(width: 420, height: 300),
+                         "Paged metadata/lyric changes resized the user's window")
+            precondition(window.contentMinSize == NSSize(width: 260, height: 260))
+        }
+        pagingPolicy(lyrics: true, enabled: false); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 420, height: 556),
+                     "Restoring the stacked layout must only add its necessary lyric space")
+        pagingPolicy(lyrics: true); settle(); assertFree()
+        window.setContentSize(NSSize(width: 260, height: 260))
+        NotificationCenter.default.post(name: NSWindow.didEndLiveResizeNotification, object: window)
+        pagingPolicy(lyrics: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 260, height: 260),
+                     "Paged resize inherited the square-cover lyric minimum")
+        for lyrics in [false, true, false] {
+            pagingPolicy(lyrics: lyrics); settle(); assertFree()
+            precondition(contentSize() == NSSize(width: 260, height: 260),
+                         "Minimum-size paged stop/metadata updates changed the window size")
+        }
+        pagingCoordinator.dismantle()
+        let modesCoordinator = PlayerWindowBehavior.Coordinator()
+        view.coordinator = modesCoordinator
+        func modePolicy(_ mode: NarrowPlayerLayout, lyrics: Bool) {
+            modesCoordinator.update(view, policy: PlayerWindowBehavior(square: false, miniRequest: 0,
+                miniLyrics: lyrics, dimButtons: false, pinned: false, duration: 0, layoutMode: mode))
+        }
+        window.setContentSize(NSSize(width: 420, height: 700))
+        modePolicy(.squarePaged, lyrics: true); settle()
+        precondition(contentSize() == NSSize(width: 420, height: 420)
+                     && window.contentAspectRatio == NSSize(width: 1, height: 1))
+        for lyrics in [false, true, false] {
+            modePolicy(.squarePaged, lyrics: lyrics); settle()
+            precondition(contentSize() == NSSize(width: 420, height: 420),
+                         "Square paging media/page policy changed the window size")
+        }
+        window.setContentSize(NSSize(width: 840, height: 600))
+        modePolicy(.squarePaged, lyrics: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 840, height: 600))
+        window.setContentSize(NSSize(width: 420, height: 420))
+        modePolicy(.squarePaged, lyrics: true); settle()
+        precondition(window.contentAspectRatio == NSSize(width: 1, height: 1))
+        NotificationCenter.default.post(name: NSWindow.willEnterFullScreenNotification, object: window)
+        window.simulatedFullScreen = true; window.setContentSize(NSSize(width: 1440, height: 900))
+        NotificationCenter.default.post(name: NSWindow.didEnterFullScreenNotification, object: window)
+        modePolicy(.squarePaged, lyrics: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 1440, height: 900))
+        NotificationCenter.default.post(name: NSWindow.willExitFullScreenNotification, object: window)
+        window.simulatedFullScreen = false; window.setContentSize(NSSize(width: 420, height: 420))
+        NotificationCenter.default.post(name: NSWindow.didExitFullScreenNotification, object: window)
+        settle()
+        precondition(contentSize() == NSSize(width: 420, height: 420)
+                     && window.contentAspectRatio == NSSize(width: 1, height: 1))
+        modePolicy(.ipadPaged, lyrics: true); settle(); assertFree()
+        window.setContentSize(NSSize(width: 420, height: 300))
+        modePolicy(.ipadPaged, lyrics: false); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 420, height: 300))
+        modePolicy(.original, lyrics: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 420, height: 556))
+        modesCoordinator.dismantle()
         window.contentView = nil; window.close()
         print("PASS: native aspect reset, coalesced geometry, square-cover mini, portrait lyrics, independent large resizing, boundary crossing, restored geometry and primary full-screen transition policies")
     }
