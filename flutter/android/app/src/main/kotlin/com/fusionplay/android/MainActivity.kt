@@ -21,6 +21,8 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.Window
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
@@ -49,6 +51,7 @@ class MainActivity : Activity() {
             packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
     }
     private lateinit var player: NativePlayerView
+    private var lyricBackCallback: OnBackInvokedCallback? = null
     private lateinit var preferenceStore: NativePlayerPreferenceStore
     private lateinit var preferences: NativePlayerPreferences
     private val uiHandler = Handler(Looper.getMainLooper())
@@ -75,6 +78,7 @@ class MainActivity : Activity() {
             onOpenSettings = ::showSettings,
             onUpdatePreferences = ::updatePreferences,
         )
+        player.onRemoteLyricsBrowsingChanged = ::setLyricBackCallback
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(14, 17, 22))
             addView(player, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -99,6 +103,7 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         if (settingsDialog != null || isFinishing || isDestroyed) return
+        player.exitRemoteLyrics()
         val dialog = Dialog(this)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
         val content = NativeSettingsView(this, ::applySettingsAction, dialog::dismiss)
@@ -204,8 +209,26 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        setLyricBackCallback(false)
         settingsDialog?.dismiss()
         super.onDestroy()
+    }
+
+    private fun setLyricBackCallback(browsing: Boolean) {
+        if (Build.VERSION.SDK_INT < 33) return
+        if (browsing && lyricBackCallback == null) {
+            val callback = OnBackInvokedCallback { player.exitRemoteLyrics() }
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+            lyricBackCallback = callback
+        } else if (!browsing) {
+            lyricBackCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+            lyricBackCallback = null
+        }
+    }
+
+    @Deprecated("Back dispatcher handles API 33 and higher")
+    override fun onBackPressed() {
+        if (!player.exitRemoteLyrics()) super.onBackPressed()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

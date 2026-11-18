@@ -18,7 +18,13 @@ internal data class NativePlayerLayout(
     companion object {
         fun horizontalInset(width: Float): Float = min(width / 4, (width * 0.052f).coerceIn(18f, 64f))
 
-        fun fit(width: Float, height: Float, preferences: NativePlayerPreferences, largeText: Boolean): NativePlayerLayout {
+        fun fit(
+            width: Float,
+            height: Float,
+            preferences: NativePlayerPreferences,
+            largeText: Boolean,
+            playbackHeight: Float? = null,
+        ): NativePlayerLayout {
             val canUseColumns = width >= 660f && !largeText
             val mode = when {
                 canUseColumns && preferences.showLyrics && height >= 360f -> Mode.ARTWORK_AND_LYRICS
@@ -29,7 +35,7 @@ internal data class NativePlayerLayout(
             val gap = (availableWidth * 0.058f).coerceIn(28f, 64f)
             val verticalInset = (12f + (height - 360f) * 0.1f).coerceIn(12f, 24f)
             val availableHeight = max(0f, height - verticalInset * 2)
-            val playbackHeight = 120f + (if (preferences.showProgress) 58f else 0f) +
+            val estimatedPlaybackHeight = 120f + (if (preferences.showProgress) 58f else 0f) +
                 (if (preferences.showTransport) 72f else 0f)
             val contentWidth = min(availableWidth, when (mode) {
                 Mode.STACKED -> 470f
@@ -42,9 +48,9 @@ internal data class NativePlayerLayout(
                 Mode.ARTWORK_AND_LYRICS -> min(400f, (contentWidth - gap) * 0.43f)
             }
             val coverSide = when (mode) {
-                Mode.STACKED -> min(min(contentWidth, 420f), max(148f, availableHeight - playbackHeight))
+                Mode.STACKED -> min(min(contentWidth, 420f), max(148f, availableHeight - (playbackHeight ?: estimatedPlaybackHeight)))
                 Mode.ARTWORK_AND_CONTROLS -> min(leadingWidth, availableHeight)
-                Mode.ARTWORK_AND_LYRICS -> min(leadingWidth, max(144f, availableHeight - playbackHeight + 25f))
+                Mode.ARTWORK_AND_LYRICS -> min(leadingWidth, max(144f, availableHeight - (playbackHeight ?: estimatedPlaybackHeight - 25f)))
             }
             val lyricsHeight = if (mode == Mode.ARTWORK_AND_LYRICS) availableHeight
                 else (height * 0.64f).coerceIn(280f, 520f)

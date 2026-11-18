@@ -113,6 +113,69 @@ class XiaomiPlaybackReducerContinuityTest {
         assertNull(tick.mediaInfo.trackIdSource)
     }
 
+    @Test
+    fun captionRefreshRetainsTrackMetadataAndOnlyPublishesFreshPositions() {
+        val reducer = XiaomiPlaybackReducer(nowMillis = { 10_000 })
+        val cover = "https://example.test/cover.webp"
+        val lyrics = "[ti:Song]\n[00:31]First caption\n[00:37]Second caption"
+        reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+        reducer.reduce(
+            mediaEvent(1, 2, "Song", "stable-id", cover, lyricsText = lyrics, trackIdSource = "explicit",
+                positionMs = 30_000, durationMs = 180_000),
+        )
+
+        val first = reducer.reduce(
+            mediaEvent(1, 3, "First caption", "metadata:caption-1", null, trackIdSource = "metadata"),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(first.replaceTrack)
+        assertEquals("stable-id", first.mediaInfo.trackId)
+        assertEquals("First caption", first.mediaInfo.title)
+        assertEquals(180_000L, first.mediaInfo.durationMs)
+        assertEquals(cover, first.mediaInfo.artworkUrl)
+        assertNull(first.mediaInfo.lyricsText)
+        assertNull(first.mediaInfo.positionMs)
+
+        val second = reducer.reduce(
+            mediaEvent(1, 4, "Second caption", null, null, positionMs = 37_000),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(second.replaceTrack)
+        assertEquals("stable-id", second.mediaInfo.trackId)
+        assertEquals("Second caption", second.mediaInfo.title)
+        assertEquals(37_000L, second.mediaInfo.positionMs)
+        assertNull(second.mediaInfo.lyricsText)
+
+        reducer.beginSeek(55_000)
+        val duringSeek = reducer.reduce(
+            mediaEvent(1, 5, "First caption", "stable-id", null, trackIdSource = "explicit"),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(duringSeek.replaceTrack)
+        assertEquals(55_000L, duringSeek.mediaInfo.positionMs)
+    }
+
+    @Test
+    fun actualTrackChangesDiscardCaptionContinuity() {
+        val lyrics = "[ti:Song]\n[00:01]Shared lyric line"
+        for ((trackId, source, newLyrics) in listOf(
+            Triple("another-id", "explicit", null),
+            Triple("metadata:another-song", "metadata", "[ti:Another Song]\n[00:41]Another lyric"),
+        )) {
+            val reducer = XiaomiPlaybackReducer()
+            reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+            reducer.reduce(
+                mediaEvent(1, 2, "Song", "stable-id", "https://example.test/cover.webp",
+                    lyricsText = lyrics, trackIdSource = "explicit", durationMs = 180_000),
+            )
+            val next = reducer.reduce(
+                mediaEvent(1, 3, "Shared lyric line", trackId, null, lyricsText = newLyrics, trackIdSource = source),
+            ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+            assertTrue(next.replaceTrack)
+            assertEquals(trackId, next.mediaInfo.trackId)
+            assertEquals(newLyrics, next.mediaInfo.lyricsText)
+            assertNull(next.mediaInfo.durationMs)
+            assertNull(next.mediaInfo.artworkUrl)
+        }
+    }
+
     private fun playbackEvent(
         session: Long,
         sequence: Long,
@@ -133,22 +196,26 @@ class XiaomiPlaybackReducerContinuityTest {
         session: Long,
         sequence: Long,
         title: String,
-        trackId: String,
+        trackId: String?,
         artwork: String?,
         metadataChangeType: Int? = null,
         lyricsText: String? = null,
         trackIdSource: String? = null,
+        positionMs: Long? = null,
+        durationMs: Long? = null,
     ): WindowsBridgeXiaomiEvent = WindowsBridgeXiaomiEvent(
         eventName = "media_info",
         payload = buildJsonObject {
             put("title", JsonPrimitive(title))
-            put("track_id", JsonPrimitive(trackId))
+            trackId?.let { put("track_id", JsonPrimitive(it)) }
             artwork?.let { put("artwork_url", JsonPrimitive(it)) }
             metadataChangeType?.let {
                 put("metadata_change_type", JsonPrimitive(it))
             }
             lyricsText?.let { put("lyrics_text", JsonPrimitive(it)) }
             trackIdSource?.let { put("track_id_source", JsonPrimitive(it)) }
+            positionMs?.let { put("position_ms", JsonPrimitive(it)) }
+            durationMs?.let { put("duration_ms", JsonPrimitive(it)) }
         },
         bridgeSequence = sequence,
         sessionSequence = session,

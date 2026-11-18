@@ -3,9 +3,16 @@ package com.fusionplay.android
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.annotation.TargetApi
 import android.content.Context
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
@@ -26,7 +33,11 @@ import com.airplayreceiver.desktop.backend.PlaybackSnapshot
 import kotlin.math.roundToInt
 
 /** A recycled lyric list which follows the current line approximately one third down. */
-internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> Unit) : FrameLayout(context) {
+internal class NativeLyricsView(
+    context: Context,
+    private val onSeek: (Long) -> Unit,
+    private val television: Boolean = false,
+) : FrameLayout(context) {
     private data class Track(val source: String?, val epoch: Long?, val id: String?)
 
     private val accessibility = context.getSystemService(AccessibilityManager::class.java)
@@ -48,18 +59,33 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
     private var userScrolling = false
     private var touchBrowsing = false
     private var touchSession: Pair<Track?, LyricsDocument?>? = null
+    private var remoteBrowsing = false
+    var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)? = null
     private var staggerSpan = 0
     private var staggerAnimator: ValueAnimator? = null
-    private val resumeFollow = Runnable { followCurrent(animate = true) }
+    private val resumeFollow = Runnable { followCurrent() }
+    private val alignCurrentLine = Runnable { followCurrent() }
 
     init {
+        if (television) {
+            id = View.generateViewId()
+            descendantFocusability = FOCUS_BLOCK_DESCENDANTS
+            if (Build.VERSION.SDK_INT >= 26) defaultFocusHighlightEnabled = false
+            foreground = StateListDrawable().apply {
+                addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply {
+                    setColor(Color.TRANSPARENT)
+                    cornerRadius = dp(12).toFloat()
+                    setStroke(dp(2), NativePlayerColors.accent)
+                })
+                addState(intArrayOf(), ColorDrawable(Color.TRANSPARENT))
+            }
+        }
         list.apply {
             divider = null
             dividerHeight = 0
             isVerticalScrollBarEnabled = false
             isNestedScrollingEnabled = true
             overScrollMode = View.OVER_SCROLL_NEVER
-            setFadingEdgeLength(dp(24))
             addHeaderView(topSpace, null, false)
             addFooterView(bottomSpace, null, false)
             adapter = rows
@@ -100,8 +126,11 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
             playback.sourceEpoch,
             playback.trackIdentity ?: playback.mediaUrl ?: playback.title,
         )
-        val nextDocument = playback.lyrics
         val trackChanged = nextTrack != track
+        val receivedDocument = playback.lyrics
+        val nextDocument = if (!trackChanged && document?.lines == receivedDocument?.lines) {
+            document
+        } else receivedDocument
         val rowsChanged = trackChanged || document !== nextDocument
         val seekChanged = seeking != canSeek
         val previousIndex = playingIndex
@@ -114,11 +143,15 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         playingIndex = nextDocument?.activeLineIndex(playback.positionMs)
 
         val hasLines = !nextDocument?.lines.isNullOrEmpty()
+        if (television) {
+            if (isFocusable != hasLines) isFocusable = hasLines
+            if (remoteBrowsing && (trackChanged || !hasLines)) stopRemoteBrowse(returnToPane = hasLines)
+        }
         list.visibility = if (hasLines) View.VISIBLE else View.GONE
         val emptyLabel = if (playback.lyricsLoading) "正在载入歌词…" else "发送设备未提供歌词"
         if (empty.text.toString() != emptyLabel) empty.text = emptyLabel
         empty.visibility = if (hasLines) View.GONE else View.VISIBLE
-        list.isVerticalFadingEdgeEnabled = advancedEffects && accessibility?.isTouchExplorationEnabled != true
+        list.useStrongerEdgeBlur = advancedEffects
 
         if (trackChanged) {
             removeCallbacks(resumeFollow)
@@ -139,9 +172,9 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         }
         if (rowsChanged) {
             if (trackChanged && playingIndex == null) list.setSelection(0)
-            post { followCurrent(animate = false) }
+            scheduleLineAlignment()
         } else if (playingIndex != previousIndex) {
-            followCurrent(animate = true, previousIndex = previousIndex)
+            followCurrent(previousIndex)
         }
     }
 
@@ -150,18 +183,64 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         cancelStagger()
         updateScrollInsets()
         if (width != oldWidth) rows.notifyDataSetChanged()
-        post { followCurrent(animate = false) }
+        scheduleLineAlignment()
     }
 
     override fun onDetachedFromWindow() {
+        stopRemoteBrowse(returnToPane = false)
         removeCallbacks(resumeFollow)
+        removeCallbacks(alignCurrentLine)
         cancelStagger()
         super.onDetachedFromWindow()
     }
 
     override fun onVisibilityAggregated(isVisible: Boolean) {
         super.onVisibilityAggregated(isVisible)
-        if (!isVisible) cancelStagger()
+        if (!isVisible) {
+            stopRemoteBrowse(returnToPane = false)
+            cancelStagger()
+        }
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (television && isFocused && event.keyCode in ENTER_KEYS) {
+            if (event.action == KeyEvent.ACTION_UP && !event.isCanceled) enterRemoteLyrics()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    fun exitRemoteLyrics(): Boolean = stopRemoteBrowse(returnToPane = true)
+
+    private fun enterRemoteLyrics() {
+        val lineCount = document?.lines?.size ?: 0
+        if (lineCount == 0 || remoteBrowsing || !isShown) return
+        remoteBrowsing = true
+        descendantFocusability = FOCUS_AFTER_DESCENDANTS
+        if (!list.requestFocus()) {
+            remoteBrowsing = false
+            descendantFocusability = FOCUS_BLOCK_DESCENDANTS
+            return
+        }
+        val firstVisibleLine = (list.firstVisiblePosition - 1).coerceIn(0, lineCount - 1)
+        val line = playingIndex?.takeIf { it in 0 until lineCount } ?: firstVisibleLine
+        val offset = if (playingIndex == line) (list.height * ANCHOR).roundToInt() else dp(12)
+        list.setSelectionFromTop(line + 1, offset)
+        onRemoteLyricsBrowsingChanged?.invoke(true)
+    }
+
+    private fun stopRemoteBrowse(returnToPane: Boolean): Boolean {
+        if (!remoteBrowsing) return false
+        remoteBrowsing = false
+        descendantFocusability = FOCUS_BLOCK_DESCENDANTS
+        if (!returnToPane || !isShown || !requestFocus()) {
+            if (list.hasFocus()) list.clearFocus()
+        }
+        onRemoteLyricsBrowsingChanged?.invoke(false)
+        browsingUntil = 0L
+        removeCallbacks(resumeFollow)
+        post(resumeFollow)
+        return true
     }
 
     private fun updateScrollInsets() {
@@ -177,18 +256,23 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         postDelayed(resumeFollow, FOLLOW_PAUSE_MS)
     }
 
-    private fun followCurrent(animate: Boolean, previousIndex: Int? = null) {
+    private fun scheduleLineAlignment() {
+        removeCallbacks(alignCurrentLine)
+        post(alignCurrentLine)
+    }
+
+    private fun followCurrent(previousIndex: Int? = null) {
         cancelStagger()
         val index = playingIndex ?: return
         if (!isShown || height == 0 || userScrolling || touchBrowsing || SystemClock.uptimeMillis() < browsingUntil ||
-            accessibility?.isTouchExplorationEnabled == true || list.hasFocus()
+            accessibility?.isTouchExplorationEnabled == true || list.hasFocus() || remoteBrowsing
         ) return
         val target = index + 1 // The timed list has a blank header above its first row.
         val offset = (height * ANCHOR).roundToInt()
-        if (animate && motionEnabled()) {
+        val direction = NativeLyricStagger.direction(previousIndex, index)
+        if (direction != null && motionEnabled()) {
             list.smoothScrollToPositionFromTop(target, offset, NativeLyricStagger.FOLLOW_DURATION_MS)
-            val direction = NativeLyricStagger.direction(previousIndex, index)
-            if (staggerSpan > 0 && direction != null) startStagger(direction)
+            if (staggerSpan > 0) startStagger(direction)
         } else {
             list.setSelectionFromTop(target, offset)
         }
@@ -246,6 +330,53 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
     }
 
     private inner class LyricList : ListView(context) {
+        private val rowBlur = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            RowBlur(resources.displayMetrics.density)
+        } else null
+
+        var useStrongerEdgeBlur = false
+            set(value) {
+                if (field == value) return
+                field = value
+                invalidate()
+            }
+
+        override fun dispatchDraw(canvas: Canvas) {
+            val paneHeight = height.toFloat()
+            val allowEdges = paneHeight > 0 && accessibility?.isTouchExplorationEnabled != true
+            val canBlur = allowEdges && rowBlur != null && canvas.isHardwareAccelerated
+            val firstPosition = firstVisiblePosition
+            val selectedPosition = if (hasFocus()) selectedItemPosition else INVALID_POSITION
+
+            // Draw-time geometry also tracks manual scrolling and recycled rows.
+            for (index in 0 until childCount) {
+                val row = getChildAt(index) as? LyricRow ?: continue
+                val clear = !allowEdges || row.isActivated || firstPosition + index == selectedPosition
+                var alpha = 1f
+                var blur = 0
+                if (!clear) {
+                    val center = ((row.top + row.bottom) * .5f + row.translationY) / paneHeight
+                    alpha = NativeLyricEdge.opacity(center)
+                    if (canBlur) blur = NativeLyricEdge.blurLevel(center, useStrongerEdgeBlur)
+                }
+                if (row.alpha != alpha) row.alpha = alpha
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) rowBlur?.setLevel(row, blur)
+            }
+            super.dispatchDraw(canvas)
+        }
+
+        override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+            if (!remoteBrowsing) return super.dispatchKeyEvent(event)
+            return when (event.keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> true
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    super.dispatchKeyEvent(event)
+                    true // Keep focus in the lyric pane even at the first and last lines.
+                }
+                else -> super.dispatchKeyEvent(event)
+            }
+        }
+
         override fun dispatchTouchEvent(event: MotionEvent): Boolean {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
@@ -275,7 +406,9 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
 
         override fun onFocusChanged(gainFocus: Boolean, direction: Int, oldRect: android.graphics.Rect?) {
             super.onFocusChanged(gainFocus, direction, oldRect)
-            if (gainFocus) cancelStagger() else pauseFollow()
+            if (gainFocus) cancelStagger()
+            else if (remoteBrowsing) stopRemoteBrowse(returnToPane = false)
+            else if (!television) pauseFollow()
         }
     }
 
@@ -284,17 +417,19 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         override fun getItem(position: Int) = document?.lines?.getOrNull(position)
         override fun getItemId(position: Int): Long = position.toLong()
         override fun areAllItemsEnabled(): Boolean = false
-        override fun isEnabled(position: Int): Boolean = seeking && getItem(position)?.startMs != null
+        override fun isEnabled(position: Int): Boolean = remoteBrowsing || (seeking && getItem(position)?.startMs != null)
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
-            val row = (convertView as? TextView) ?: TextView(context).apply {
+            val row = (convertView as? LyricRow) ?: LyricRow(context).apply {
                 typeface = Typeface.create("sans-serif", Typeface.BOLD)
                 setPadding(dp(8), dp(8), dp(8), dp(8))
                 setLineSpacing(dp(3).toFloat(), 1f)
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
             }
             row.translationY = 0f
-            row.textSize = (width / resources.displayMetrics.density * .076f).coerceIn(24f, 36f)
+            val widthDp = width / resources.displayMetrics.density
+            row.textSize = if (television) (widthDp * .065f).coerceIn(21f, 29f)
+            else (widthDp * .076f).coerceIn(24f, 36f)
             row.text = getItem(position)?.text.orEmpty()
             updateHighlight(row, position)
             return row
@@ -311,10 +446,30 @@ internal class NativeLyricsView(context: Context, private val onSeek: (Long) -> 
         }
     }
 
+    private class LyricRow(context: Context) : TextView(context) {
+        var blurLevel = 0
+    }
+
+    @TargetApi(Build.VERSION_CODES.S)
+    private class RowBlur(private val density: Float) {
+        private val effects = arrayOfNulls<RenderEffect>(NativeLyricEdge.MAX_BLUR_LEVEL + 1)
+
+        fun setLevel(row: LyricRow, level: Int) {
+            if (row.blurLevel == level) return
+            row.blurLevel = level
+            val effect = if (level == 0) null else effects[level] ?: run {
+                val radius = level * density
+                RenderEffect.createBlurEffect(radius, radius, Shader.TileMode.DECAL).also { effects[level] = it }
+            }
+            row.setRenderEffect(effect)
+        }
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).roundToInt()
 
     private companion object {
         const val ANCHOR = .32f
         const val FOLLOW_PAUSE_MS = 5_000L
+        val ENTER_KEYS = setOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER)
     }
 }

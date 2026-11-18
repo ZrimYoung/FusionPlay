@@ -73,8 +73,8 @@ internal class NativePlayerView(
     }
     private var lastArtwork: Bitmap? = null
     private var presentedArtwork: Bitmap? = null
-    private val oldArtwork = artworkImage()
-    private val coverArtwork = artworkImage()
+    private val oldArtwork = artworkImage(ImageView.ScaleType.FIT_CENTER)
+    private val coverArtwork = artworkImage(ImageView.ScaleType.FIT_CENTER)
     private val cover = FrameLayout(context).apply {
         clipToOutline = true
         elevation = dp(10f).toFloat()
@@ -89,7 +89,7 @@ internal class NativePlayerView(
     private val header = LinearLayout(context).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
-        minimumHeight = dp(58f)
+        minimumHeight = dp(if (television) 54f else 58f)
     }
     private val brand = vertical()
     private val brandTitle = label(17f, NativePlayerColors.text, semibold = true).apply { text = "FusionPlay" }
@@ -125,6 +125,7 @@ internal class NativePlayerView(
     private val idleBusy = ProgressBar(context).apply { indeterminateTintList = ColorStateList.valueOf(NativePlayerColors.accent) }
 
     private val details = vertical()
+    private val fitPlaybackLayout = Runnable(::updateLayout)
     private val metadata = vertical()
     private val title = label(27f, NativePlayerColors.text, semibold = true)
     private val subtitle = label(16f, NativePlayerColors.secondaryText)
@@ -148,7 +149,10 @@ internal class NativePlayerView(
     private val previous = action(NativePlayerIcon.PREVIOUS, "上一曲", 22f) { onPlayback(PlaybackCommand.PREVIOUS_TRACK) }
     private val playPause = action(NativePlayerIcon.PLAY, "播放", 27f, 36) { onPlayback(PlaybackCommand.PLAY_PAUSE) }
     private val next = action(NativePlayerIcon.NEXT, "下一曲", 22f) { onPlayback(PlaybackCommand.NEXT_TRACK) }
-    private val lyrics = NativeLyricsView(context, onSeek)
+    private val lyrics = NativeLyricsView(context, onSeek, television = television)
+    var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)?
+        get() = lyrics.onRemoteLyricsBrowsingChanged
+        set(value) { lyrics.onRemoteLyricsBrowsingChanged = value }
 
     private data class TimelineKey(val source: String?, val epoch: Long?, val track: String?, val duration: Long)
     private data class PendingSeek(val identity: TimelineKey, val target: Long, val until: Long)
@@ -200,18 +204,32 @@ internal class NativePlayerView(
         playback.addView(details)
         details.addView(metadata, detailsRow())
         metadata.addView(title, detailsRow())
-        metadata.addView(subtitle, detailsRow(5f))
-        details.addView(timeline, detailsRow(12f))
-        timeline.addView(seek, LinearLayout.LayoutParams(MATCH_PARENT, dp(34f)))
+        metadata.addView(subtitle, detailsRow(if (television) 3f else 5f))
+        details.addView(timeline, detailsRow(if (television) 8f else 12f))
+        timeline.addView(seek, LinearLayout.LayoutParams(MATCH_PARENT, dp(if (television) 30f else 34f)))
         val timestamps = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
         timestamps.addView(elapsed, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         timestamps.addView(total)
         timeline.addView(timestamps, detailsRow())
-        details.addView(transport, LinearLayout.LayoutParams(MATCH_PARENT, dp(62f)).apply { topMargin = dp(10f) })
-        transport.addView(previous, LinearLayout.LayoutParams(dp(52f), dp(52f)))
-        transport.addView(playPause, LinearLayout.LayoutParams(dp(62f), dp(62f)).apply { marginStart = dp(24f); marginEnd = dp(24f) })
-        transport.addView(next, LinearLayout.LayoutParams(dp(52f), dp(52f)))
-        details.addView(detailsError, detailsRow(10f))
+        val primaryControlSize = dp(if (television) 54f else 62f)
+        val sideControlSize = dp(if (television) 48f else 52f)
+        val controlSpacing = dp(if (television) 20f else 24f)
+        details.addView(transport, LinearLayout.LayoutParams(MATCH_PARENT, primaryControlSize).apply {
+            topMargin = dp(if (television) 6f else 10f)
+        })
+        transport.addView(previous, LinearLayout.LayoutParams(sideControlSize, sideControlSize))
+        transport.addView(playPause, LinearLayout.LayoutParams(primaryControlSize, primaryControlSize).apply {
+            marginStart = controlSpacing
+            marginEnd = controlSpacing
+        })
+        transport.addView(next, LinearLayout.LayoutParams(sideControlSize, sideControlSize))
+        details.addView(detailsError, detailsRow(if (television) 8f else 10f))
+        if (television) details.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) {
+                removeCallbacks(fitPlaybackLayout)
+                post(fitPlaybackLayout)
+            }
+        }
 
         previous.nextFocusRightId = playPause.id
         playPause.nextFocusLeftId = previous.id
@@ -318,6 +336,8 @@ internal class NativePlayerView(
         applyArtwork()
     }
 
+    fun exitRemoteLyrics(): Boolean = lyrics.exitRemoteLyrics()
+
     fun focusPrimaryControl() {
         if (!television && !inputIsDirectional) return
         revealToolbar()
@@ -357,6 +377,7 @@ internal class NativePlayerView(
     override fun onDetachedFromWindow() {
         removeCallbacks(hideToolbar)
         removeCallbacks(expireSeek)
+        removeCallbacks(fitPlaybackLayout)
         pendingSeek = null
         draggingTimeline = null
         touchTracking = false
@@ -397,7 +418,12 @@ internal class NativePlayerView(
         val density = resources.displayMetrics.density
         val widthDp = viewport.width / density
         val heightDp = viewport.height / density
-        val nextLayout = NativePlayerLayout.fit(widthDp, heightDp, preferences, resources.configuration.fontScale >= 1.35f)
+        // Size the square cover against the visible TV controls and text, including wrapped metadata.
+        val playbackHeight = details.measuredHeight.takeIf { television && hasTrack && it > 0 }
+            ?.let { it / density + TV_DETAILS_GAP }
+        val nextLayout = NativePlayerLayout.fit(
+            widthDp, heightDp, preferences, resources.configuration.fontScale >= 1.35f, playbackHeight,
+        )
         if (layout == nextLayout) return
         val previousMode = layout?.mode
         layout = nextLayout
@@ -423,7 +449,11 @@ internal class NativePlayerView(
         val radius = minOf(25f, nextLayout.coverSide * 0.058f)
         cover.background = card(0xFF20323B.toInt(), radius, 0x22FFFFFF)
         details.layoutParams = LinearLayout.LayoutParams(if (controlsBeside) minOf(dp(420f), contentWidth - leading - gap).coerceAtLeast(1) else MATCH_PARENT, WRAP_CONTENT).apply {
-            if (controlsBeside) marginStart = gap else topMargin = dp(if (lyricsBeside) 22f else 24f)
+            if (controlsBeside) marginStart = gap else topMargin = dp(when {
+                television -> TV_DETAILS_GAP
+                lyricsBeside -> 22f
+                else -> 24f
+            })
         }
         lyrics.layoutParams = LinearLayout.LayoutParams(
             if (lyricsBeside) (contentWidth - leading - gap).coerceAtLeast(1) else MATCH_PARENT,
@@ -481,6 +511,7 @@ internal class NativePlayerView(
         coverArtwork.animate().cancel()
         val outgoing = presentedArtwork
         presentedArtwork = artwork
+        setVisible(coverFallback, artwork == null)
         coverArtwork.setImageBitmap(artwork)
         if (artwork != null && outgoing != null && isAttachedToWindow && animations()) {
             oldArtwork.setImageBitmap(outgoing)
@@ -654,7 +685,7 @@ internal class NativePlayerView(
     }
 
     private fun label(sizeSp: Float, color: Int, semibold: Boolean = false) = TextView(context).apply {
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp * if (television) TV_TEXT_SCALE else 1f)
         setTextColor(color)
         includeFontPadding = false
         if (semibold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -692,8 +723,8 @@ internal class NativePlayerView(
         if (stroke != Color.TRANSPARENT) setStroke(dp(1f), stroke)
     }
 
-    private fun artworkImage() = ImageView(context).apply {
-        scaleType = ImageView.ScaleType.CENTER_CROP
+    private fun artworkImage(scaling: ImageView.ScaleType = ImageView.ScaleType.CENTER_CROP) = ImageView(context).apply {
+        scaleType = scaling
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
@@ -719,6 +750,8 @@ internal class NativePlayerView(
         private const val TOOLBAR_DELAY_MS = 3_000L
         private const val SEEK_CONFIRMATION_MS = 3_000L
         private const val TIMELINE_STEPS = 10_000
+        private const val TV_DETAILS_GAP = 16f
+        private const val TV_TEXT_SCALE = 0.85f
         private val DIRECTIONAL_KEYS = setOf(KeyEvent.KEYCODE_TAB, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)
     }

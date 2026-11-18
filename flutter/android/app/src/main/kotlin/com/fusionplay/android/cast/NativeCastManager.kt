@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.IBinder
 import com.fusionplay.android.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -18,7 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 
@@ -96,6 +97,7 @@ class NativeCastManager(private val context: Context, private val scope: Corouti
         mutableState.value = state.value.copy(message = when {
             !Shizuku.pingBinder() -> "需要先启动 Shizuku 并授权"
             Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED -> "首次使用需要允许 Shizuku 授权"
+            state.value.paused -> "原生投屏已暂时暂停；关闭开关或离开应用后恢复"
             else -> "关闭开关或离开本应用后恢复原生投屏"
         })
     }
@@ -106,32 +108,33 @@ class NativeCastManager(private val context: Context, private val scope: Corouti
         pending = result
         return try {
             Shizuku.bindUserService(args, connection)
-            withTimeout(10_000) { result.await() }
+            withTimeoutOrNull(10_000) { result.await() } ?: error("连接 Shizuku 授权服务超时")
         } finally {
             pending = null
         }
     }
 
     suspend fun setPaused(paused: Boolean) = mutex.withLock {
-        check(supported) { "本机未安装对应的原生投屏组件" }
-        check(!paused || foreground) { "请在应用前台使用暂停开关" }
-        if (!Shizuku.pingBinder()) {
-            refresh()
-            error("请先启动 Shizuku；盒子重启后需要重新启动授权服务")
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            Shizuku.requestPermission(PERMISSION_REQUEST)
-            mutableState.value = state.value.copy(message = "请允许授权后再次操作开关")
-            return@withLock
-        }
         mutableState.value = state.value.copy(busy = true)
         try {
+            check(supported) { "本机未安装对应的原生投屏组件" }
+            check(!paused || foreground) { "请在应用前台使用暂停开关" }
+            if (!Shizuku.pingBinder()) {
+                refresh()
+                return@withLock
+            }
+            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+                mutableState.value = state.value.copy(message = "请允许授权后再次操作开关")
+                Shizuku.requestPermission(PERMISSION_REQUEST)
+                return@withLock
+            }
             val remote = getService()
             val data = withContext(Dispatchers.IO) { remote.setPaused(paused, lifetime) }
             accept(data)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Exception) {
             mutableState.value = state.value.copy(message = "操作未完成：${error.message}")
-            throw error
         } finally {
             mutableState.value = state.value.copy(busy = false)
         }

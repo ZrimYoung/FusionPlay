@@ -222,7 +222,9 @@ class FusionPlayRuntime(
         viewModel.setAdvancedEffectsEnabled(enabled)
     }
 
-    fun setNativeCastPaused(paused: Boolean) = runUiAction { nativeCast.setPaused(paused) }
+    fun setNativeCastPaused(paused: Boolean) {
+        scope.launch { nativeCast.setPaused(paused) }
+    }
 
     fun setMiPlayOutputAdvance(millis: Int) = runUiAction {
         require(millis in 0..500) { "补偿范围为 0 至 500 毫秒" }

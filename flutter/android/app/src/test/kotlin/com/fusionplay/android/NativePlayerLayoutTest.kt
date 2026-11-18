@@ -7,6 +7,20 @@ import org.junit.Test
 
 class NativePlayerLayoutTest {
     @Test
+    fun `tv sizes the cover to the measured controls and metadata height`() {
+        val lyrics = NativePlayerPreferences(showLyrics = true)
+        val compactDetails = 154f
+        val wrappedDetails = 218f
+        val compact = NativePlayerLayout.fit(960f, 482f, lyrics, largeText = false, playbackHeight = compactDetails)
+        val wrapped = NativePlayerLayout.fit(960f, 482f, lyrics, largeText = false, playbackHeight = wrappedDetails)
+        assertEquals(Mode.ARTWORK_AND_LYRICS, compact.mode)
+        assertTrue(compact.coverSide > wrapped.coverSide)
+        assertTrue(compact.coverSide <= compact.leadingWidth)
+        assertEquals(compact.lyricsHeight, compact.coverSide + compactDetails, 0.01f)
+        assertEquals(wrapped.lyricsHeight, wrapped.coverSide + wrappedDetails, 0.01f)
+    }
+
+    @Test
     fun `wide tablet gives artwork and lyrics separate columns`() {
         val lyrics = NativePlayerPreferences(showLyrics = true)
         val layout = NativePlayerLayout.fit(1024f, 680f, lyrics, largeText = false)

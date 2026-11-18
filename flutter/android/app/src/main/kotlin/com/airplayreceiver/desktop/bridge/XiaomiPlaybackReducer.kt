@@ -1,5 +1,8 @@
 package com.airplayreceiver.desktop.bridge
 
+import com.airplayreceiver.desktop.backend.LrcParser
+import com.airplayreceiver.desktop.backend.LyricsDocument
+import com.airplayreceiver.desktop.backend.containsExactTimedCaption
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -23,6 +26,7 @@ class XiaomiPlaybackReducer(
     private var currentMediaInfo: XiaomiMediaInfo? = null
     private var pendingMediaInfo: PendingMediaInfo? = null
     private var pendingSeek: PendingSeek? = null
+    private var captionLyricsCache: Pair<String, LyricsDocument?>? = null
     private var mediaGeneration: Long? = null
     private var mediaClosed = false
     private var mediaCloseDeadline: Long? = null
@@ -145,6 +149,7 @@ class XiaomiPlaybackReducer(
         currentMediaInfo = null
         pendingMediaInfo = null
         pendingSeek = null
+        captionLyricsCache = null
         return XiaomiReduction(
             mutations = oldSession
                 ?.let { listOf(XiaomiPlaybackMutation.Deactivate(it)) }
@@ -194,6 +199,7 @@ class XiaomiPlaybackReducer(
             sessionActive = false
             pendingSeek = null
             currentMediaInfo = currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
+            captionLyricsCache = null
             pendingMediaInfo = pendingMediaInfo
                 ?.takeIf { it.sessionSequence > resolvedSession }
             return XiaomiReduction(
@@ -213,6 +219,8 @@ class XiaomiPlaybackReducer(
             currentSessionSequence = resolvedSession
             sessionActive = true
             pendingSeek = null
+            currentMediaInfo = currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
+            captionLyricsCache = null
         }
 
         val mutations = mutableListOf<XiaomiPlaybackMutation>(
@@ -287,19 +295,16 @@ class XiaomiPlaybackReducer(
                     sessionSequence = resolvedSession,
                 )
             }
-            val previous = pendingMediaInfo
-                ?.takeIf { it.sessionSequence == resolvedSession }
-                ?.mediaInfo
+            val pending = pendingMediaInfo?.takeIf { it.sessionSequence == resolvedSession }
+            val previous = pending?.mediaInfo
                 ?: currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
-            val replaceTrack = isNewTrack(previous, mediaInfo)
-            val merged = mergeMediaInfo(previous, mediaInfo, replaceTrack)
+            val caption = pending?.mediaInfo?.let { retainCaptionTrack(it, mediaInfo) }
+            val replaceTrack = caption == null && isNewTrack(previous, mediaInfo)
+            val merged = mergeMediaInfo(previous, caption ?: mediaInfo, replaceTrack)
             pendingMediaInfo = PendingMediaInfo(
                 sessionSequence = resolvedSession,
                 mediaInfo = merged,
-                replaceTrack = replaceTrack ||
-                    pendingMediaInfo
-                        ?.takeIf { it.sessionSequence == resolvedSession }
-                        ?.replaceTrack == true,
+                replaceTrack = replaceTrack || pending?.replaceTrack == true,
             )
             return XiaomiReduction(
                 mutations = emptyList(),
@@ -318,9 +323,10 @@ class XiaomiPlaybackReducer(
             )
         }
 
-        val replaceTrack = isNewTrack(currentMediaInfo, mediaInfo)
+        val caption = currentMediaInfo?.let { retainCaptionTrack(it, mediaInfo) }
+        val replaceTrack = caption == null && isNewTrack(currentMediaInfo, mediaInfo)
         val reconciledMediaInfo = reconcilePendingSeek(
-            incoming = mediaInfo,
+            incoming = caption ?: mediaInfo,
             replaceTrack = replaceTrack,
             sessionSequence = resolvedSession,
         )
@@ -340,10 +346,12 @@ class XiaomiPlaybackReducer(
                 XiaomiPlaybackMutation.ApplyMediaInfo(
                     sessionSequence = resolvedSession,
                     mediaInfo = mergedMediaInfo.copy(
+                        // Missing position leaves the locally advanced cursor alone.
+                        positionMs = reconciledMediaInfo.positionMs,
                         lyricsText = updatedLyrics,
                         // Missing on progress ticks. Forward only evidence from this packet.
-                        titleIsLyric = reconciledMediaInfo.titleIsLyric,
-                        trackIdSource = reconciledMediaInfo.trackIdSource,
+                        titleIsLyric = mediaInfo.titleIsLyric,
+                        trackIdSource = mediaInfo.trackIdSource,
                     ),
                     replaceTrack = replaceTrack,
                 ),
@@ -367,6 +375,30 @@ class XiaomiPlaybackReducer(
             ?.sessionSequence
             ?.takeIf { it > currentSessionSequence }
             ?: (currentSessionSequence + 1L)
+    }
+
+    private fun retainCaptionTrack(previous: XiaomiMediaInfo, incoming: XiaomiMediaInfo): XiaomiMediaInfo? {
+        val title = incoming.title ?: return null
+        val sameId = incoming.trackId != null && incoming.trackId == previous.trackId
+        val fallbackId = incoming.trackIdSource != "explicit" && (incoming.trackId == null ||
+            (incoming.trackIdSource == "metadata" && incoming.trackId.isSyntheticMetadataIdentity()))
+        if (!sameId && !fallbackId) return null
+
+        val previousLyrics = previous.lyricsText
+        if (incoming.lyricsText != null && incoming.lyricsText != previousLyrics &&
+            (previousLyrics != null || !sameId)
+        ) return null
+
+        if (!(sameId && incoming.titleIsLyric == true)) {
+            if (previousLyrics == null) return null
+            val parsed = captionLyricsCache?.takeIf { it.first == previousLyrics }
+                ?: (previousLyrics to LrcParser.parse(previousLyrics)).also { captionLyricsCache = it }
+            if (!parsed.second.containsExactTimedCaption(title)) return null
+        }
+        return incoming.copy(
+            trackId = previous.trackId ?: incoming.trackId,
+            trackIdSource = previous.trackIdSource ?: incoming.trackIdSource,
+        )
     }
 
     private fun isNewTrack(
