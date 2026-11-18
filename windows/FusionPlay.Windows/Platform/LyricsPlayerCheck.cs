@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text.Json;
 using FusionPlay.Core;
 using Microsoft.UI.Dispatching;
@@ -33,6 +34,8 @@ internal static class LyricsPlayerCheck
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private sealed class CheckFailure(string code) : Exception(code);
     private sealed record Box(double X, double Y, double Width, double Height);
+    private sealed record PixelBox(int X, int Y, int Width, int Height);
+    private static PixelBox Pixels(RectInt32 rectangle) => new(rectangle.X, rectangle.Y, rectangle.Width, rectangle.Height);
 
     public static async Task Run(string directory)
     {
@@ -40,7 +43,7 @@ internal static class LyricsPlayerCheck
         var queue = DispatcherQueue.GetForCurrentThread();
         nint foreground = GetForegroundWindow(), mainHwnd = 0;
         var handles = new List<nint>();
-        var cases = new List<string>(); var layouts = new List<object>(); var captures = new List<object>(); var cleanupErrors = new List<string>();
+        var cases = new List<string>(); var layouts = new List<object>(); var captures = new List<object>(); var animationSamples = new List<object>(); var cleanupErrors = new List<string>();
         Window? anchor = null, componentWindow = null, policyWindow = null;
         MainWindow? main = null; SettingsWindow? settings = null;
         ReceiverController? model = null; LyricsView? component = null; ISquareWindow? policy = null;
@@ -179,21 +182,39 @@ internal static class LyricsPlayerCheck
             if (lyrics)
             {
                 Require(host.Visibility == Visibility.Visible && hostBox.Height >= 128 - 2, "lyrics_host_too_short");
-                if (compact) Require(Math.Abs(coverBox.Width - width) <= 2 && Math.Abs(coverBox.Height - width) <= 2 && hostBox.Y >= coverBox.Y + coverBox.Height, "mini_lyric_cover_not_square_or_overlaps");
+                if (compact)
+                {
+                    Require(Math.Abs(coverBox.Width - width) <= 2 && Math.Abs(coverBox.Height - width) <= 2 && hostBox.Y >= coverBox.Y + coverBox.Height, "mini_lyric_cover_not_square_or_overlaps");
+                    var divider = Bounds(Find<Border>("MiniLyricsDivider")); double tolerance = 1 / Root().XamlRoot!.RasterizationScale;
+                    Require(Math.Abs(divider.Y + divider.Height - coverBox.Y - coverBox.Height) <= tolerance
+                        && divider.Y <= coverBox.Y + coverBox.Height, "mini_lyric_divider_not_at_cover_edge");
+                }
                 else
                 {
                     Require(hostBox.X >= coverBox.X + coverBox.Width, "expanded_lyrics_not_on_right");
                     var details = Bounds(Find<Grid>("ExpandedDetails"));
-                    var layout = Bounds(Find<Grid>("PlayerLayout"));
+                    var playerLayout = Find<Grid>("PlayerLayout"); var layout = Bounds(playerLayout);
+                    double column = playerLayout.ColumnDefinitions[0].ActualWidth;
                     double topSpace = coverBox.Y - layout.Y, bottomSpace = layout.Y + layout.Height - details.Y - details.Height;
                     Require(details.Y >= coverBox.Y + coverBox.Height + 13, "expanded_metadata_has_no_cover_gap");
                     Require(Math.Abs(topSpace - bottomSpace) < 2, "expanded_cover_and_controls_not_centered_as_group");
-                    Require(Math.Abs(details.X - (layout.X + (Math.Min(330, width * .38) - details.Width) / 2)) < 2, "expanded_metadata_not_aligned_to_column");
+                    Require(column > 0 && Math.Abs(details.X + details.Width / 2 - (layout.X + column / 2)) < 2
+                        && Math.Abs(coverBox.X + coverBox.Width / 2 - (layout.X + column / 2)) < 2
+                        && details.X >= layout.X - 2 && details.X + details.Width <= layout.X + column + 2,
+                        "expanded_cover_and_metadata_not_aligned_to_actual_column");
+                    double coverCenterRatio = (coverBox.X + coverBox.Width / 2) / width, lyricsStartRatio = hostBox.X / width;
+                    Require(Math.Abs(coverCenterRatio - .23825) <= .015 && Math.Abs(lyricsStartRatio - .4565) <= .015, "expanded_proportional_columns_changed");
+                    layouts.Add(new { kind = "expanded_column_geometry", width, height, column_width = column, cover_center_ratio = coverCenterRatio, lyrics_start_ratio = lyricsStartRatio, details, layout });
                 }
                 var viewport = Descendants(host).OfType<ScrollViewer>().FirstOrDefault() ?? throw new CheckFailure("lyrics_native_scroll_viewport_missing");
                 var box = Bounds(viewport); double scale = Root().XamlRoot!.RasterizationScale;
-                int left = (int)Math.Floor(Math.Max(box.X, hostBox.X) * scale), top = (int)Math.Floor(Math.Max(box.Y, hostBox.Y) * scale);
-                int right = (int)Math.Ceiling(Math.Min(box.X + box.Width, hostBox.X + hostBox.Width) * scale), bottom = (int)Math.Ceiling(Math.Min(box.Y + box.Height, hostBox.Y + hostBox.Height) * scale);
+                var hostRect = host.TransformToVisual(Root()).TransformBounds(new Rect(0, 0, host.ActualWidth, host.ActualHeight));
+                var scrollRect = viewport.TransformToVisual(Root()).TransformBounds(new Rect(0, 0, viewport.ActualWidth, viewport.ActualHeight));
+                // WinRT Rect edges preserve the native layout rounding. Adding
+                // the separately projected log Box doubles can invent an extra
+                // pixel at a fractional-DIP lower/right edge.
+                int left = (int)Math.Floor(Math.Max(scrollRect.Left, hostRect.Left) * scale), top = (int)Math.Floor(Math.Max(scrollRect.Top, hostRect.Top) * scale);
+                int right = (int)Math.Ceiling(Math.Min(scrollRect.Right, hostRect.Right) * scale), bottom = (int)Math.Ceiling(Math.Min(scrollRect.Bottom, hostRect.Bottom) * scale);
                 viewportRect = new(left, top, Math.Max(0, right - left), Math.Max(0, bottom - top));
                 typeof(MainWindow).GetMethod("UpdateInputRegions", Private)!.Invoke(main, null);
                 var input = InputNonClientPointerSource.GetForWindowId(main.AppWindow.Id);
@@ -208,14 +229,109 @@ internal static class LyricsPlayerCheck
                 int innerBottom = input.GetRegionRects(NonClientRegionKind.BottomBorder).Select(rect => rect.Y).DefaultIfEmpty(client.Bottom).Min();
                 int usableLeft = Math.Max(viewportRect.X, innerLeft), usableTop = Math.Max(viewportRect.Y, innerTop);
                 viewportRect = new(usableLeft, usableTop, Math.Max(0, Math.Min(viewportRect.X + viewportRect.Width, innerRight) - usableLeft), Math.Max(0, Math.Min(viewportRect.Y + viewportRect.Height, innerBottom) - usableTop));
+                int reconstructedRight = (int)Math.Ceiling(Math.Min(box.X + box.Width, hostBox.X + hostBox.Width) * scale);
+                int reconstructedBottom = (int)Math.Ceiling(Math.Min(box.Y + box.Height, hostBox.Y + hostBox.Height) * scale);
+                if (reconstructedRight != right || reconstructedBottom != bottom)
+                    layouts.Add(new
+                    {
+                        kind = "viewport_native_edge_rounding", name, frame, scale,
+                        host_winrt_edges = new { hostRect.Left, hostRect.Top, hostRect.Right, hostRect.Bottom },
+                        viewport_winrt_edges = new { scrollRect.Left, scrollRect.Top, scrollRect.Right, scrollRect.Bottom },
+                        reconstructed_pixel_edges = new { right = (hostBox.X + hostBox.Width) * scale, bottom = (hostBox.Y + hostBox.Height) * scale, reconstructedRight, reconstructedBottom },
+                        native_original = Pixels(originalViewport), usable = Pixels(viewportRect), passthrough = passthrough.Select(Pixels).ToArray(),
+                        exact_contains = passthrough.Any(rect => Contains(rect, viewportRect))
+                    });
                 if (!passthrough.Any(rect => Contains(rect, viewportRect)))
-                    layouts.Add(new { kind = "viewport_input_mismatch", name, frame, original = originalViewport, usable = viewportRect, host = hostBox, passthrough, innerLeft, innerTop, innerRight, innerBottom });
+                {
+                    int hostLeft = (int)Math.Floor(hostRect.Left * scale), hostTop = (int)Math.Floor(hostRect.Top * scale);
+                    layouts.Add(new
+                    {
+                        kind = "viewport_input_mismatch", name, frame, scale,
+                        original = Pixels(originalViewport), usable = Pixels(viewportRect), host = hostBox, viewport = box,
+                        passthrough = passthrough.Select(Pixels).ToArray(), innerLeft, innerTop, innerRight, innerBottom,
+                        host_winrt_edges = new { hostRect.Left, hostRect.Top, hostRect.Right, hostRect.Bottom },
+                        viewport_winrt_edges = new { scrollRect.Left, scrollRect.Top, scrollRect.Right, scrollRect.Bottom },
+                        host_native_rounding = Pixels(new RectInt32(hostLeft, hostTop, (int)Math.Ceiling(hostRect.Right * scale) - hostLeft, (int)Math.Ceiling(hostRect.Bottom * scale) - hostTop)),
+                        reconstructed_pixel_edges = new { left = hostBox.X * scale, top = hostBox.Y * scale, right = (hostBox.X + hostBox.Width) * scale, bottom = (hostBox.Y + hostBox.Height) * scale },
+                        caption = input.GetRegionRects(NonClientRegionKind.Caption).Select(Pixels).ToArray()
+                    });
+                }
                 Require(viewportRect.Width > 0 && viewportRect.Height > 0 && passthrough.Any(rect => Contains(rect, viewportRect)), "lyrics_viewport_not_native_passthrough");
                 Require(!input.GetRegionRects(NonClientRegionKind.Caption).Any(rect => Overlaps(rect, viewportRect)), "lyrics_viewport_overlaps_caption");
             }
             else if (compact) Require(Math.Abs(size.Width - size.Height) <= 2, "cover_only_mini_not_square");
-            layouts.Add(new { name, frame, width = size.Width, height = size.Height, lyrics, compact, cover = coverBox, host = hostBox, native_viewport = viewportRect, passthrough_count = passthroughCount });
+            layouts.Add(new { name, frame, width = size.Width, height = size.Height, lyrics, compact, cover = coverBox, host = hostBox, native_viewport = Pixels(viewportRect), passthrough_count = passthroughCount });
             Background();
+        }
+        void MainTransitionFrame(string label, List<double>? heights = null)
+        {
+            Background(); var size = MainSize(); heights?.Add(size.Height);
+            var content = (PlayerLayoutTransition)Field(main!, "layoutTransition")!;
+            var native = (WindowResizeTransition)Field(main!, "resizeTransition")!;
+            animationSamples.Add(new
+            {
+                stage = "main_" + label, native_width = size.Width, native_height = size.Height,
+                content_width = Root().ActualWidth, content_height = Root().ActualHeight,
+                cover = Bounds(Find<Grid>("MiniCoverPanel")), lyrics_visible = LyricsVisible(),
+                requested_mode = model!.Preferences.Value.LyricsDisplayMode,
+                transitioning = Field(main!, "lyricsLayoutTransitioning"), native_running = native.IsRunning, content_running = content.IsRunning,
+                native_done = Field(main!, "nativeTransitionDone"), content_done = Field(main!, "contentTransitionDone"),
+                native.HeightUpdates, content.AnimationFailures,
+                seek_enabled = Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled,
+                controls_hit_test_visible = Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible,
+                host_hit_test_visible = Find<Grid>("MiniLyricsHost").IsHitTestVisible
+            });
+        }
+        double ShortExpandedSectionFrame(string label)
+        {
+            Background(); Root().UpdateLayout();
+            var coverBox = Bounds(Find<Border>("CoverFrame")); var details = Bounds(Find<Grid>("ExpandedDetails"));
+            var layout = Bounds(Find<Grid>("PlayerLayout")); var size = MainSize();
+            var progress = Find<StackPanel>("ProgressPanel"); var transport = Find<StackPanel>("TransportPanel");
+            layouts.Add(new
+            {
+                kind = "short_expanded_section_frame", label, native_width = size.Width, native_height = size.Height,
+                cover = coverBox, details, layout, show_progress = model!.Preferences.Value.ShowProgress, show_transport = model.Preferences.Value.ShowTransport,
+                progress_height = progress.ActualHeight, progress_visibility = progress.Visibility.ToString(), transport_height = transport.ActualHeight, transport_visibility = transport.Visibility.ToString()
+            });
+            const double rounding = 2.5;
+            Require(Math.Abs(size.Width - 840) <= 2 && Math.Abs(size.Height - 340) <= 2 && LyricsVisible()
+                && Find<Grid>("ExpandedRoot").Visibility == Visibility.Visible, "short_expanded_section_fixture_changed_mode");
+            Require(Math.Abs(coverBox.Width - coverBox.Height) <= rounding && coverBox.Width > 0
+                && coverBox.Y >= layout.Y - rounding && details.Y >= coverBox.Y + coverBox.Height - rounding
+                && details.Y + details.Height <= layout.Y + layout.Height + rounding,
+                "short_expanded_section_animation_overflowed_content_height");
+            return coverBox.Width;
+        }
+        async Task TraceMainTransition(string label, int milliseconds, List<double>? heights = null)
+        {
+            var clock = Stopwatch.StartNew();
+            while (clock.ElapsedMilliseconds < milliseconds)
+            {
+                await Task.Delay(16); await OnUi(queue!, () => MainTransitionFrame(label, heights));
+            }
+        }
+        void RequireMainInteraction()
+        {
+            Require(Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible && Find<Grid>("MiniLyricsHost").IsHitTestVisible
+                && Find<Grid>("ExpandedDetails").IsHitTestVisible && Find<Grid>("ExpandedLyricsHost").IsHitTestVisible
+                && Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled && Find<ProgressSeekButton>("ProgressSeek").IsEnabled,
+                "main_lyrics_transition_left_interaction_disabled");
+        }
+        void RequireMainSettled(bool lyrics, bool completedNormally)
+        {
+            Background(); var content = (PlayerLayoutTransition)Field(main!, "layoutTransition")!;
+            var native = (WindowResizeTransition)Field(main!, "resizeTransition")!;
+            Require(Field(main!, "lyricsLayoutTransitioning") is false && !content.IsRunning && !native.IsRunning
+                && content.AnimationFailures == 0 && LyricsVisible() == lyrics, "main_lyrics_transition_failed_or_did_not_settle");
+            if (completedNormally && Backdrop.AnimationsEnabled)
+                Require(Field(main!, "nativeTransitionDone") is true && Field(main!, "contentTransitionDone") is true, "main_lyrics_transition_missing_completion");
+            RequireMainInteraction();
+            var size = MainSize(); var coverBox = Bounds(Find<Grid>("MiniCoverPanel"));
+            Require(Math.Abs(size.Width - 420) <= 2 && Math.Abs(Root().ActualHeight - size.Height) <= 2
+                && Math.Abs(coverBox.Width - 420) <= 2 && Math.Abs(coverBox.Height - 420) <= 2,
+                "main_lyrics_transition_cover_or_host_not_settled");
+            Require(lyrics ? size.Height >= 556 : Math.Abs(size.Height - 420) <= 2, "main_lyrics_transition_final_native_height_wrong");
         }
 
         try
@@ -293,13 +409,144 @@ internal static class LyricsPlayerCheck
             }));
             await Task.Delay(400);
             step = "real_player_layouts";
-            foreach (var size in new[] { (320, 456), (420, 640), (840, 600), (840, 340), (840, 760) })
+            var playerSizes = new List<(int Width, int Height)> { (320, 456), (420, 640), (840, 600), (840, 340), (840, 760) };
+            await OnUi(queue!, () =>
             {
-                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), $"resize:{size.Item1}x{size.Item2}\n");
-                await OnUi(queue!, () => WindowSizing.ResizeContent(main!, size.Item1, size.Item2)); await Task.Delay(500);
-                for (int frame = 0; frame < 4; frame++) { int sample = frame; await OnUi(queue!, () => Frame("timed", sample, size.Item1, size.Item2, true, size.Item1 < 600)); await Task.Delay(25); }
-                await Capture($"lyrics-{size.Item1}x{size.Item2}");
+                var area = DisplayArea.GetFromWindowId(main!.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+                double scale = Root().XamlRoot?.RasterizationScale ?? GetDpiForWindow(mainHwnd) / 96.0;
+                double availableWidth = area.Width / scale, availableHeight = area.Height / scale;
+                foreach (var candidate in new[] { (Width: 1280, Height: 720), (Width: 1600, Height: 900) })
+                {
+                    bool fits = candidate.Width + 32 <= availableWidth && candidate.Height + 32 <= availableHeight;
+                    layouts.Add(new { kind = "large_native_sample_availability", width = candidate.Width, height = candidate.Height, available_width = availableWidth, available_height = availableHeight, included = fits, reason = fits ? "fits_work_area_with_frame_margin" : "native_work_area_too_small" });
+                    if (fits) playerSizes.Add(candidate);
+                }
+            });
+            foreach (var size in playerSizes)
+            {
+                File.AppendAllText(Path.Combine(directory, "capture-steps.txt"), $"resize:{size.Width}x{size.Height}\n");
+                await OnUi(queue!, () => WindowSizing.ResizeContent(main!, size.Width, size.Height)); await Task.Delay(500);
+                for (int frame = 0; frame < 4; frame++) { int sample = frame; await OnUi(queue!, () => Frame("timed", sample, size.Width, size.Height, true, size.Width < 600)); await Task.Delay(25); }
+                await Capture($"lyrics-{size.Width}x{size.Height}");
             }
+            step = "short_expanded_sections_keep_cover_inside_content";
+            double initialSectionCover = 0, hiddenSectionCover = 0;
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with { ShowProgress = true, ShowTransport = true });
+                WindowSizing.ResizeContent(main!, 840, 340);
+            });
+            await Task.Delay(350);
+            await OnUi(queue!, () =>
+            {
+                initialSectionCover = ShortExpandedSectionFrame("sections_visible_stable");
+                model!.Preferences.Update(model.Preferences.Value with { ShowProgress = false, ShowTransport = false });
+                ShortExpandedSectionFrame("sections_hide_requested");
+            });
+            for (int frame = 0; frame < 12; frame++)
+            {
+                await Task.Delay(20); int sample = frame;
+                await OnUi(queue!, () => ShortExpandedSectionFrame("sections_hiding_" + sample));
+            }
+            await Task.Delay(80);
+            await OnUi(queue!, () =>
+            {
+                hiddenSectionCover = ShortExpandedSectionFrame("sections_hidden_stable");
+                Require(hiddenSectionCover > initialSectionCover + 10
+                    && Find<StackPanel>("ProgressPanel").Visibility == Visibility.Collapsed && Find<StackPanel>("TransportPanel").Visibility == Visibility.Collapsed,
+                    "short_expanded_cover_did_not_use_released_section_height");
+                model!.Preferences.Update(model.Preferences.Value with { ShowProgress = true, ShowTransport = true });
+                ShortExpandedSectionFrame("sections_reverse_show");
+            });
+            await Task.Delay(60);
+            await OnUi(queue!, () =>
+            {
+                ShortExpandedSectionFrame("sections_reverse_before_hide");
+                model!.Preferences.Update(model.Preferences.Value with { ShowProgress = false, ShowTransport = false });
+                ShortExpandedSectionFrame("sections_reverse_hide");
+            });
+            await Task.Delay(50);
+            await OnUi(queue!, () =>
+            {
+                ShortExpandedSectionFrame("sections_reverse_before_show");
+                model!.Preferences.Update(model.Preferences.Value with { ShowProgress = true, ShowTransport = true });
+            });
+            for (int frame = 0; frame < 12; frame++)
+            {
+                await Task.Delay(20); int sample = frame;
+                await OnUi(queue!, () => ShortExpandedSectionFrame("sections_reversing_" + sample));
+            }
+            await Task.Delay(80);
+            await OnUi(queue!, () => Pass("short_expanded_section_collapse_and_rapid_reverse_keep_square_cover_within_content", () =>
+            {
+                double restored = ShortExpandedSectionFrame("sections_restored_stable");
+                Require(Math.Abs(restored - initialSectionCover) <= 2.5 && model!.Preferences.Value.ShowProgress && model.Preferences.Value.ShowTransport,
+                    "short_expanded_section_reverse_did_not_restore_latest_request");
+                animationSamples.Add(new { stage = "short_expanded_section_scope", system_animations_enabled = Backdrop.AnimationsEnabled, initial_cover = initialSectionCover, hidden_cover = hiddenSectionCover, restored_cover = restored, visible_presentation_verified = false });
+            }));
+            step = "actual_hidden_main_lyrics_transition";
+            bool mainMotionEnabled = false; var expansionHeights = new List<double>();
+            await OnUi(queue!, () =>
+            {
+                main!.AnimateHiddenLayoutForCheck = false;
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
+                WindowSizing.ResizeContent(main, 420, 420);
+            });
+            await Task.Delay(300);
+            await OnUi(queue!, () =>
+            {
+                Require(Root().IsLoaded && model!.Lyrics.HasLyrics && !LyricsVisible(), "main_transition_start_fixture_not_ready");
+                main!.AnimateHiddenLayoutForCheck = true; mainMotionEnabled = Backdrop.AnimationsEnabled;
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
+                if (mainMotionEnabled)
+                    Require(Field(main, "lyricsLayoutTransitioning") is true && !Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled
+                        && !Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible, "main_transition_did_not_immediately_suspend_seek");
+                else Require(Field(main, "lyricsLayoutTransitioning") is false, "main_transition_ignored_system_reduced_motion");
+                MainTransitionFrame("expand_requested", expansionHeights);
+            });
+            await TraceMainTransition("expanding", 600, expansionHeights);
+            await OnUi(queue!, () =>
+            {
+                RequireMainSettled(true, completedNormally: true);
+                if (mainMotionEnabled) Require(expansionHeights.Any(height => height > 422 && height < 691), "main_native_lyrics_height_skipped_intermediate_frames");
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
+                MainTransitionFrame("collapse_requested");
+            });
+            await TraceMainTransition("collapsing", 600);
+            await OnUi(queue!, () => Pass("actual_hidden_main_expands_and_collapses_with_native_and_content_completion", () =>
+            {
+                RequireMainSettled(false, completedNormally: true);
+                animationSamples.Add(new { stage = "main_motion_scope", system_animations_enabled = mainMotionEnabled, production_state_machine_exercised = true, native_height_intermediate_frames = expansionHeights.Count(height => height > 422 && height < 691), visible_presentation_verified = false });
+            }));
+            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" }));
+            await Task.Delay(45);
+            await OnUi(queue!, () => { model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" }); MainTransitionFrame("reverse_to_never_at_45ms"); });
+            await Task.Delay(70);
+            await OnUi(queue!, () => { model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" }); MainTransitionFrame("reverse_to_always_after_70ms"); });
+            await TraceMainTransition("rapid_reverse_settling", 700);
+            await OnUi(queue!, () => Pass("actual_hidden_main_rapid_reversal_keeps_latest_lyrics_request", () =>
+            {
+                RequireMainSettled(true, completedNormally: true);
+                Require(model!.Preferences.Value.LyricsDisplayMode == "always", "main_rapid_reverse_lost_latest_mode");
+            }));
+            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" }));
+            await Task.Delay(70);
+            await OnUi(queue!, () => Pass("actual_main_mini_request_cancels_transition_and_restores_interaction_without_poll", () =>
+            {
+                if (mainMotionEnabled) Require(Field(main!, "lyricsLayoutTransitioning") is true, "main_cancel_fixture_was_not_mid_transition");
+                main!.RequestMiniPlayer();
+                Require(Field(main, "lyricsLayoutTransitioning") is false && !LyricsVisible()
+                    && !((PlayerLayoutTransition)Field(main, "layoutTransition")!).IsRunning
+                    && !((WindowResizeTransition)Field(main, "resizeTransition")!).IsRunning, "real_mini_request_did_not_cancel_layout_transition");
+                RequireMainInteraction();
+                MainTransitionFrame("cancelled_by_real_mini_request");
+            }));
+            await TraceMainTransition("cancelled_old_callbacks", 350);
+            await OnUi(queue!, () =>
+            {
+                RequireMainSettled(false, completedNormally: false); main!.AnimateHiddenLayoutForCheck = false;
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
+            });
             await OnUi(queue!, () => WindowSizing.ResizeContent(main!, 420, 640)); await Task.Delay(350);
             await OnUi(queue!, () => Accept(source with { ControlsAvailable = false, Phase = ReceiverPhase.Ready, TrackId = "", Title = "", LyricsText = "", PositionMs = null }));
             await WaitLyrics(); await Task.Delay(400);
@@ -313,7 +560,62 @@ internal static class LyricsPlayerCheck
                 await OnUi(queue!, () => WindowSizing.ResizeContent(main!, side, side)); await Task.Delay(300);
                 for (int frame = 0; frame < 4; frame++) { int sample = frame; await OnUi(queue!, () => Frame("empty", sample, side, side, false, true)); await Task.Delay(25); }
             }
-            cases.Add("twenty_four_real_layout_and_sdk_region_frames");
+            cases.Add("real_layout_and_sdk_region_frames_including_available_large_sizes");
+            step = "controller_new_track_missing_lyrics_grace";
+            LyricsDocument? replacementLyrics = null;
+            var graceSource = source with { TrackId = "lyrics-grace-old", Phase = ReceiverPhase.Playing, ControlsAvailable = true, LyricsText = timed, PositionMs = 2_000 };
+            await OnUi(queue!, () => Accept(graceSource)); await WaitLyrics();
+            await OnUi(queue!, () =>
+            {
+                Require(model!.Lyrics.HasLyrics && LyricsVisible(), "lyrics_grace_previous_track_fixture_not_ready");
+                graceSource = graceSource with { TrackId = "lyrics-grace-replacement", LyricsText = "", PositionMs = null, DurationMs = null, Phase = ReceiverPhase.Connected };
+                Accept(graceSource);
+                var state = (LyricsState)Field(model, "lyrics")!;
+                Require(!model.Lyrics.HasLyrics && model.LyricsLoading && model.LyricsAvailable && model.LyricsPositionMs == null
+                    && state.WaitingForLyrics && state.MissingLyricsWaitToken.HasValue && LyricsVisible(), "new_track_missing_lyrics_kept_old_document_or_collapsed_layout");
+            });
+            await Task.Delay(160);
+            await OnUi(queue!, () =>
+            {
+                Require(model!.LyricsLoading && model.LyricsAvailable && !model.Lyrics.HasLyrics && LyricsVisible(), "new_track_missing_lyrics_did_not_keep_bounded_wait");
+                graceSource = graceSource with { LyricsText = "[00:01.000]A new synthetic lyric arrives\n[00:01.000]新曲合成歌词已到达\n[00:03.000]Another new fixture line", PositionMs = 1_000, DurationMs = 30_000, Phase = ReceiverPhase.Playing };
+                Accept(graceSource);
+            });
+            await WaitLyrics();
+            await OnUi(queue!, () => replacementLyrics = model!.Lyrics);
+            await Task.Delay(LyricsState.MissingLyricsGracePeriod + TimeSpan.FromMilliseconds(150));
+            await OnUi(queue!, () => Pass("new_track_late_lyrics_replace_empty_wait_and_survive_old_timer", () =>
+            {
+                var state = (LyricsState)Field(model!, "lyrics")!;
+                Require(ReferenceEquals(model!.Lyrics, replacementLyrics) && model.Lyrics.HasLyrics
+                    && model.Lyrics.Lines[0].Text == "A new synthetic lyric arrives" && model.LyricsPositionMs == 1_000
+                    && !model.LyricsLoading && model.LyricsAvailable && !state.WaitingForLyrics && state.MissingLyricsWaitToken == null && LyricsVisible(),
+                    "old_missing_lyrics_timer_cleared_new_track_document");
+                graceSource = graceSource with { TrackId = "lyrics-grace-empty", LyricsText = "", PositionMs = null, DurationMs = null, Phase = ReceiverPhase.Connected };
+                Accept(graceSource);
+                Require(model.LyricsLoading && model.LyricsAvailable && !model.Lyrics.HasLyrics && LyricsVisible(), "genuinely_empty_track_skipped_lyrics_wait");
+            }));
+            await Task.Delay(120);
+            await OnUi(queue!, () => Require(model!.LyricsLoading && model.LyricsAvailable && LyricsVisible(), "genuinely_empty_track_collapsed_before_grace"));
+            await Task.Delay(LyricsState.MissingLyricsGracePeriod);
+            await OnUi(queue!, () => Pass("genuinely_empty_new_track_collapses_only_after_bounded_lyrics_wait", () =>
+            {
+                var state = (LyricsState)Field(model!, "lyrics")!;
+                Require(!model!.Lyrics.HasLyrics && !model.LyricsLoading && !model.LyricsAvailable && model.LyricsPositionMs == null
+                    && !state.WaitingForLyrics && state.MissingLyricsWaitToken == null && !LyricsVisible(), "missing_lyrics_grace_did_not_expire_and_collapse");
+                graceSource = source with { TrackId = "lyrics-grace-disconnect-ready", LyricsText = timed, PositionMs = 2_000, Phase = ReceiverPhase.Playing, ControlsAvailable = true };
+                Accept(graceSource);
+            }));
+            await WaitLyrics();
+            await OnUi(queue!, () => Pass("disconnect_immediately_clears_missing_lyrics_wait_and_layout", () =>
+            {
+                Accept(graceSource with { TrackId = "lyrics-grace-disconnect-wait", LyricsText = "", PositionMs = null });
+                Require(model!.LyricsLoading && model.LyricsAvailable && LyricsVisible(), "disconnect_lyrics_wait_fixture_not_ready");
+                Accept(graceSource with { ControlsAvailable = false, Phase = ReceiverPhase.Ready, TrackId = "", Title = "", LyricsText = "", PositionMs = null });
+                var state = (LyricsState)Field(model, "lyrics")!;
+                Require(!model.Lyrics.HasLyrics && !model.LyricsLoading && !model.LyricsAvailable && model.LyricsPositionMs == null
+                    && !state.WaitingForLyrics && state.MissingLyricsWaitToken == null && !LyricsVisible(), "disconnect_retained_missing_lyrics_wait");
+            }));
             step = "native_component_row_and_browsing";
             var requested = new List<ulong>(); LyricsRowPresenter? row = null; object[]? originalItems = null;
             await OnUi(queue!, () =>
@@ -337,14 +639,67 @@ internal static class LyricsPlayerCheck
                 Require(Field(component, "browsing") is true && ((DispatcherQueueTimer)Field(component, "browsingTimer")!).Interval == TimeSpan.FromSeconds(6), "manual_browse_policy_not_six_seconds");
             });
             await Task.Delay(6_150);
-            await OnUi(queue!, () => Pass("manual_browse_expires_and_return_button_uses_native_invoke", () =>
+            await OnUi(queue!, () => Pass("manual_browse_expires_without_return_button_or_seek", () =>
             {
                 Require(Field(component!, "browsing") is false, "manual_browse_did_not_expire");
-                typeof(LyricsView).GetMethod("BeginBrowsing", Private)!.Invoke(component, null);
-                var button = Descendants(component!).OfType<Button>().Single(item => item.Name == "LyricsReturnToCurrent");
-                ((IInvokeProvider)new ButtonAutomationPeer(button).GetPattern(PatternInterface.Invoke)).Invoke();
-                Require(Field(component!, "browsing") is false && requested.Count == 1, "return_to_current_changed_seek_or_did_not_return");
+                Require(!Descendants(component!).OfType<FrameworkElement>().Any(item => item.Name == "LyricsReturnToCurrent")
+                    && requested.Count == 1, "return_button_retained_or_automatic_follow_dispatched_seek");
             }));
+            step = "coalesced_gpu_wrap_and_rapid_reverse";
+            LyricsRowPresenter? wrapRow = null; long transitionsBefore = 0; bool canCheckWrap = false, observedWrap = false;
+            await OnUi(queue!, () =>
+            {
+                var synthetic = LyricsDocument.Parse("[00:00.000]A synthetic line changes its wrapping when this hidden test narrows and widens the lyric column again\n[00:00.000]这是一句仅用于隐藏检查的合成双语歌词，改变列宽以后检查换行和缓存动画，不包含真实歌曲。\n[00:04.000]Another synthetic line");
+                component!.Update(synthetic, 0, false);
+                var content = (Grid)componentWindow!.Content;
+                if (row != null && content.Children.Contains(row)) content.Children.Remove(row);
+                var firstItem = ((Array)Field(component, "items")!).GetValue(0);
+                wrapRow = new LyricsRowPresenter { DataContext = firstItem, Width = 400, VerticalAlignment = VerticalAlignment.Top, Style = (Style)component.Resources["LyricsRowButtonStyle"] };
+                content.Children.Add(wrapRow); Arrange(content, 400, 340);
+            });
+            await Task.Delay(400);
+            await OnUi(queue!, () =>
+            {
+                canCheckWrap = component!.MotionEnabled && wrapRow!.UsesCompositionSurface;
+                transitionsBefore = wrapRow!.WrapTransitionsStarted;
+                animationSamples.Add(new { stage = "wrap_warmup", motion_enabled = component.MotionEnabled, composition = wrapRow.UsesCompositionSurface, wrapRow.GlyphRasterizations, wrapRow.SurfaceCreations, wrapRow.CachedPlaneCount });
+                var list = Descendants(component).OfType<ListView>().Single(view => view.Name == "LyricsLines");
+                Require((list.ItemContainerTransitions?.Count > 0) == component.MotionEnabled, "lyric_reposition_transition_does_not_respect_motion");
+                wrapRow.Width = 260; Arrange((Grid)componentWindow!.Content, 400, 340);
+            });
+            if (canCheckWrap)
+            {
+                for (int attempt = 0; attempt < 25 && !observedWrap; attempt++)
+                {
+                    await Task.Delay(20);
+                    await OnUi(queue!, () =>
+                    {
+                        Background(); observedWrap = wrapRow!.WrapTransitionsStarted > transitionsBefore && wrapRow.WrapTransitionActive;
+                        if (!observedWrap) return;
+                        Require(wrapRow.WrapTransitionDurationMs is >= 160 and <= 220 && wrapRow.CachedPlaneCount == 2, "lyric_wrap_duration_or_plane_bound_changed");
+                        long uploads = wrapRow.GlyphRasterizations, allocations = wrapRow.SurfaceCreations;
+                        wrapRow.Width = 390; Arrange((Grid)componentWindow!.Content, 400, 340);
+                        wrapRow.Width = 400; Arrange((Grid)componentWindow.Content, 400, 340);
+                        Require(!wrapRow.GlyphUploadReady && wrapRow.GlyphRasterizations == uploads && wrapRow.SurfaceCreations == allocations,
+                            "rapid_reverse_overwrote_fading_plane_or_bypassed_coalescing");
+                        animationSamples.Add(new { stage = "wrap_active_and_reverse_deferred", wrapRow.WrapTransitionsStarted, wrapRow.WrapTransitionActive, wrapRow.WrapTransitionDurationMs, wrapRow.CachedPlaneCount, uploads, allocations });
+                    });
+                }
+                Require(observedWrap, "real_glyph_reflow_did_not_start_compositor_crossfade");
+                await Task.Delay(650);
+                await OnUi(queue!, () => Pass("coalesced_gpu_wrap_and_reverse_retain_two_planes_and_settle", () =>
+                {
+                    Require(!wrapRow!.WrapTransitionActive && wrapRow.UsesCompositionSurface && wrapRow.CachedPlaneCount <= 2
+                        && wrapRow.WrapTransitionsStarted >= transitionsBefore + 2 && requested.Count == 1,
+                        "lyric_wrap_reverse_did_not_settle_or_changed_seek");
+                    animationSamples.Add(new { stage = "wrap_settled", wrapRow.WrapTransitionsStarted, wrapRow.WrapTransitionActive, wrapRow.GlyphRasterizations, wrapRow.SurfaceCreations, wrapRow.CachedPlaneCount, native_compositor_animation_created = true, visible_presentation_verified = false });
+                }));
+            }
+            else
+            {
+                cases.Add("wrap_animation_not_exercised_reduced_motion_or_native_fallback");
+                animationSamples.Add(new { stage = "wrap_scope", reason = component!.MotionEnabled ? "composition_unavailable_native_fallback" : "system_motion_disabled", visible_presentation_verified = false });
+            }
             await OnUi(queue!, () => Pass("lyric_viewport_helpers_keep_center_and_reduced_effects_policy", () =>
             {
                 Require(Math.Abs(LyricsViewport.FollowOffset(50, 200, 100, 500, 1_000) - 122) < .001, "lyric_follow_anchor_changed");
@@ -404,7 +759,7 @@ internal static class LyricsPlayerCheck
                 {
                     File.WriteAllText(Path.Combine(directory, "lyrics-player-check.json"), JsonSerializer.Serialize(new
                     {
-                        status, step, failure_code = failure, exception_type = exception, hresult, exception_detail = exceptionDetail, cases, layout_samples = layouts, captures,
+                        status, step, failure_code = failure, exception_type = exception, hresult, exception_detail = exceptionDetail, cases, layout_samples = layouts, captures, animation_samples = animationSamples,
                         window_remained_hidden = hidden, foreground_unchanged = focus, foreground_not_taken = foregroundNotTaken, preferences_restored = preferencesRestored,
                         native_receiver_created = false, receiver_initialized = false, receiver_polling_started = false, shell_media_session_created = false,
                         single_instance_notification_sent = false, initialized_flag_is_fixture = initializedFixture, synthetic_cover_only = true,

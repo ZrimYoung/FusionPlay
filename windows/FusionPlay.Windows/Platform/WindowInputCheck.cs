@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
@@ -12,10 +13,12 @@ namespace FusionPlay.Windows.Platform;
 /// <summary>Validates actual SDK region registration on a window that is never shown.</summary>
 internal static class WindowInputCheck
 {
+    internal static List<string> UnhandledErrors { get; } = [];
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out NativeRect rect);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll")] private static extern nint SendMessage(nint hwnd, uint message, nuint wParam, nint lParam);
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private sealed class CheckFailure(string code, object? details = null) : Exception { public string Code { get; } = code; public object? Details { get; } = details; }
     private sealed record Sample(double RequestedWidthDips, double RequestedHeightDips, string Mode, int WidthPixels, int HeightPixels, Dictionary<string, int> RegionCounts, long CoveredPixels);
@@ -26,19 +29,23 @@ internal static class WindowInputCheck
         nint foreground = GetForegroundWindow(), hwnd = 0;
         Window? window = null;
         ISquareWindow? square = null;
+        WindowResizeTransition? heightTransition = null;
+        PlayerLayoutTransition? contentTransition = null;
         InputNonClientPointerSource? input = null;
         RectInt32 hole = default;
         string step = "create_hidden_window", status = "failed", failureCode = "", exceptionType = "", hresult = "";
         object? failureDetails = null;
-        bool visibilityPreserved = true, foregroundPreserved = true;
+        bool visibilityPreserved = true, foregroundPreserved = true, foregroundNotTaken = true;
         var samples = new List<Sample>();
+        var motionSamples = new List<object>();
         void Require(bool condition, string code) { if (!condition) throw new CheckFailure(code); }
         void RequireBackground()
         {
             visibilityPreserved &= hwnd == 0 || !IsWindowVisible(hwnd);
             foregroundPreserved &= GetForegroundWindow() == foreground;
+            foregroundNotTaken &= hwnd == 0 || GetForegroundWindow() != hwnd;
             Require(visibilityPreserved, "window_became_visible");
-            Require(foregroundPreserved, "foreground_changed");
+            Require(foregroundNotTaken, "test_window_took_foreground");
         }
         try
         {
@@ -88,6 +95,109 @@ internal static class WindowInputCheck
             step = "compact_region_registration";
             await OnUi(queue!, () => samples.Add(Inspect(420, 300, compact: true)));
             Require(samples.Select(sample => sample.WidthPixels).Distinct().Count() >= 2, "insufficient_resize_range");
+            await OnUi(queue!, () =>
+            {
+                WindowSizing.ResizeContent(window!, 420, 420);
+                heightTransition = new WindowResizeTransition(window!, square!);
+                square!.MoveSizeStarted += () => heightTransition.Cancel();
+            });
+            await Drain(queue!);
+            bool motion = Backdrop.AnimationsEnabled;
+            foreach (bool visible in new[] { true, false })
+            {
+                step = visible ? "animated_lyric_expansion" : "animated_lyric_collapse";
+                bool completed = false;
+                await OnUi(queue!, () =>
+                {
+                    RequireBackground();
+                    heightTransition!.AnimateLyrics(visible, motion, () => completed = true);
+                    square!.SetPlayerLayout(visible, false);
+                });
+                var heights = new List<int>();
+                for (int tick = 0; tick < 50; tick++)
+                {
+                    await OnUi(queue!, () => { RequireBackground(); Require(GetClientRect(hwnd, out var client), "animated_client_unavailable"); heights.Add(client.Bottom - client.Top); });
+                    if (completed) break;
+                    await Task.Delay(20);
+                }
+                await Drain(queue!);
+                await OnUi(queue!, () =>
+                {
+                    Require(completed && !heightTransition!.IsRunning, "lyric_height_animation_did_not_finish");
+                    Require(GetClientRect(hwnd, out var client), "animated_client_unavailable");
+                    int width = client.Right - client.Left, height = client.Bottom - client.Top;
+                    Require(visible ? height > width : Math.Abs(height - width) <= 1, "lyric_height_final_shape_wrong");
+                    if (motion) Require(heights.Distinct().Count() >= 3, "lyric_height_animation_had_no_intermediate_sizes");
+                    for (int i = 1; i < heights.Count; i++) Require(visible ? heights[i] >= heights[i - 1] : heights[i] <= heights[i - 1], "lyric_height_animation_reversed");
+                    motionSamples.Add(new { visible, motion, heights, width, height, updates = heightTransition!.HeightUpdates });
+                });
+            }
+            step = "rapid_lyric_height_reversal";
+            bool oldCompleted = false, latestCompleted = false;
+            await OnUi(queue!, () => { heightTransition!.AnimateLyrics(true, true, () => oldCompleted = true); square!.SetPlayerLayout(true, false); });
+            await Task.Delay(45);
+            await OnUi(queue!, () => { heightTransition!.AnimateLyrics(false, true, () => latestCompleted = true); square!.SetPlayerLayout(false, false); });
+            await Task.Delay(420);
+            await OnUi(queue!, () =>
+            {
+                Require(latestCompleted && !heightTransition!.IsRunning, "latest_height_reversal_did_not_finish");
+                Require(!motion || !oldCompleted, "cancelled_height_animation_called_old_completion");
+                Require(GetClientRect(hwnd, out var client) && Math.Abs(client.Right - client.Left - client.Bottom + client.Top) <= 1, "reversed_height_did_not_restore_square");
+                motionSamples.Add(new { name = "rapid_reversal", latestCompleted, oldCompleted });
+            });
+            step = "manual_move_cancels_height_transition";
+            bool gestureCompletion = false;
+            await OnUi(queue!, () => { heightTransition!.AnimateLyrics(true, true, () => gestureCompletion = true); square!.SetPlayerLayout(true, false); });
+            await Task.Delay(45);
+            await OnUi(queue!, () =>
+            {
+                RequireBackground();
+                _ = SendMessage(hwnd, 0x0231, 0, 0);
+                Require(!heightTransition!.IsRunning, "manual_move_did_not_cancel_height_animation");
+                Require(!motion || !gestureCompletion, "manual_move_completed_cancelled_animation");
+                _ = SendMessage(hwnd, 0x0232, 0, 0);
+                motionSamples.Add(new { name = "own_window_move_message_cancels_animation", gestureCompletion });
+            });
+            step = "controlled_compositor_layout_transition";
+            Border? card = null; bool contentComplete = false; int commits = 0;
+            long contentStarted = 0; double firstCommitDelay = 0, latestCommitDelay = 0;
+            await OnUi(queue!, () =>
+            {
+                var root = (Grid)window!.Content;
+                card = new Border { Width = 64, Height = 64, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(20) };
+                root.Children.Add(card);
+                root.Measure(new global::Windows.Foundation.Size(420, 600)); root.Arrange(new global::Windows.Foundation.Rect(0, 0, 420, 600)); root.UpdateLayout();
+                contentTransition = new PlayerLayoutTransition(root, [card], [(card, true)]);
+                contentStarted = Stopwatch.GetTimestamp();
+                contentTransition.Run(() => { firstCommitDelay = Stopwatch.GetElapsedTime(contentStarted).TotalMilliseconds; commits++; card.Width = card.Height = 96; card.Margin = new Thickness(70, 40, 0, 0); }, () => contentComplete = true, animate: true);
+                Require(contentTransition.IsRunning, "compositor_transition_did_not_start");
+            });
+            await Task.Delay(560);
+            await OnUi(queue!, () =>
+            {
+                Require(contentComplete && commits == 1 && !contentTransition!.IsRunning, "compositor_layout_transition_did_not_finish");
+                Require(contentTransition!.AnimationFailures == 0, "compositor_animation_fell_back_after_native_error");
+                Require(firstCommitDelay >= 100, "layout_committed_before_content_faded_out");
+                Require(UnhandledErrors.Count == 0, "compositor_transition_unhandled_exception");
+                motionSamples.Add(new { name = "controlled_compositor_layout_transition", commits, contentComplete, firstCommitDelay });
+                contentComplete = false; oldCompleted = false;
+                contentTransition.Run(() => commits++, () => oldCompleted = true, animate: true);
+            });
+            await Task.Delay(45);
+            await OnUi(queue!, () =>
+            {
+                contentStarted = Stopwatch.GetTimestamp();
+                contentTransition!.Run(() => { latestCommitDelay = Stopwatch.GetElapsedTime(contentStarted).TotalMilliseconds; commits++; card!.Margin = new Thickness(35); }, () => contentComplete = true, animate: true);
+            });
+            await Task.Delay(560);
+            await OnUi(queue!, () =>
+            {
+                Require(contentComplete && !oldCompleted && commits == 2 && !contentTransition!.IsRunning, "compositor_transition_reversal_used_stale_completion");
+                Require(contentTransition!.AnimationFailures == 0, "reversed_compositor_animation_fell_back_after_native_error");
+                Require(latestCommitDelay >= 100, "stale_tick_committed_reversed_layout_before_fade");
+                Require(UnhandledErrors.Count == 0, "compositor_transition_unhandled_exception");
+                motionSamples.Add(new { name = "controlled_compositor_rapid_reversal", commits, contentComplete, oldCompleted, latestCommitDelay });
+            });
             status = "passed";
         }
         catch (Exception error)
@@ -105,7 +215,7 @@ internal static class WindowInputCheck
                     try { RequireBackground(); }
                     finally
                     {
-                        try { square?.Dispose(); }
+                        try { contentTransition?.Dispose(); heightTransition?.Dispose(); square?.Dispose(); }
                         finally { window?.Close(); }
                     }
                     RequireBackground();
@@ -127,9 +237,9 @@ internal static class WindowInputCheck
                 {
                     status, step, failure_code = failureCode, exception_type = exceptionType, hresult,
                     failure_details = failureDetails,
-                    window_remained_hidden = visibilityPreserved, foreground_unchanged = foregroundPreserved,
-                    receiver_created = false, samples,
-                    scope = "hidden_sdk_region_registration_and_responsive_resize; physical_pointer_interaction_not_tested"
+                    window_remained_hidden = visibilityPreserved, foreground_unchanged = foregroundPreserved, foreground_not_taken = foregroundNotTaken,
+                    receiver_created = false, samples, motion_samples = motionSamples, unhandled_errors = UnhandledErrors,
+                    scope = "hidden_sdk_region_registration_height_motion_and_responsive_resize; physical_pointer_interaction_and_visible_DWM_frames_not_tested"
                 }, new JsonSerializerOptions { WriteIndented = true }));
             }
             catch { }

@@ -38,6 +38,8 @@ public partial class App : Application
             StartupRecord("unhandled_exception", args.Exception);
             if (Environment.GetCommandLineArgs().Contains("--lyrics-performance-check"))
             { LyricsPerformanceCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
+            if (Environment.GetCommandLineArgs().Contains("--window-input-check"))
+            { WindowInputCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
             { LyricsPlayerCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--settings-layout-check"))

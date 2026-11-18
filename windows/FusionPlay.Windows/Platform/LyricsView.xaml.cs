@@ -11,6 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
 using Windows.System;
 using Windows.UI.ViewManagement;
@@ -34,8 +35,6 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private readonly ProgressRing loadingRing = new() { Width = 18, Height = 18, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly TextBlock emptyTitle = new() { TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, FontSize = 15, Opacity = .65 };
     private readonly TextBlock emptyHint = new() { TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .45 };
-    private readonly Button returnButton = new() { Name = "LyricsReturnToCurrent", HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Padding = new Thickness(10, 6, 10, 6), CornerRadius = new CornerRadius(18), Visibility = Visibility.Collapsed };
-    private readonly TextBlock returnLabel = new();
     private readonly UISettings settings = new();
     private readonly AccessibilitySettings accessibility = new();
     private readonly DispatcherQueueTimer browsingTimer;
@@ -88,12 +87,9 @@ public sealed partial class LyricsView : UserControl, IDisposable
         ScrollViewer.SetHorizontalScrollMode(list, ScrollMode.Disabled); ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Hidden);
         empty.Children.Add(emptyIcon); empty.Children.Add(loadingRing); empty.Children.Add(emptyTitle); empty.Children.Add(emptyHint);
-        var returnContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        returnContent.Children.Add(new FontIcon { Glyph = "\uE72B", FontFamily = UiTypography.SymbolFamily, FontSize = 11 }); returnContent.Children.Add(returnLabel); returnButton.Content = returnContent;
-        var root = new Grid(); root.Children.Add(list); root.Children.Add(empty); root.Children.Add(returnButton); Content = root;
+        var root = new Grid(); root.Children.Add(list); root.Children.Add(empty); Content = root;
         browsingTimer = DispatcherQueue.CreateTimer(); browsingTimer.IsRepeating = false; browsingTimer.Interval = TimeSpan.FromSeconds(6); browsingTimer.Tick += BrowsingExpired;
         glyphTimer = DispatcherQueue.CreateTimer(); glyphTimer.IsRepeating = false; glyphTimer.Interval = TimeSpan.FromMilliseconds(16); glyphTimer.Tick += DrawQueuedGlyphs;
-        returnButton.Click += ReturnToCurrent;
         list.Loaded += ListLoaded;
         list.ContainerContentChanging += ContainerChanging;
         list.AddHandler(PointerWheelChangedEvent, new PointerEventHandler(WheelChanged), true);
@@ -134,7 +130,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
         }
         if (newDocument || geometryChanged) UpdateGeometry();
         if (newDocument || stateChanged || geometryChanged || typographyChanged || environmentChanged || visibilityChanged) RefreshRows(geometryChanged || typographyChanged || environmentChanged);
-        LocalizeEmpty(); UpdateReturnButton();
+        LocalizeEmpty();
         if (newDocument || geometryChanged || typographyChanged || visibilityChanged && PresentationLoaded) ScheduleFollow(animated: false);
     }
     public void Clear() => Update(LyricsDocument.Empty, null, false, connected: false, compact: compact, preferences: preferences);
@@ -155,13 +151,14 @@ public sealed partial class LyricsView : UserControl, IDisposable
         try { effects = settings.AdvancedEffectsEnabled && !contrast; motion = settings.AnimationsEnabled && !contrast; textScale = settings.TextScaleFactor; }
         catch (COMException) { effects = motion = false; textScale = observedTextScale; }
         bool changed = HighContrast != contrast || EffectsEnabled != effects || MotionEnabled != motion || textScale != observedTextScale;
+        if (MotionEnabled != motion || list.ItemContainerTransitions == null && motion)
+            list.ItemContainerTransitions = motion ? (TransitionCollection)Resources["LyricsReflowTransitions"] : null;
         HighContrast = contrast; EffectsEnabled = effects; MotionEnabled = motion; observedTextScale = textScale; return changed;
     }
     private void Localize()
     {
         if (disposed) return;
         AutomationProperties.SetName(this, L.Text("歌词", "Lyrics")); AutomationProperties.SetName(list, L.Text("歌词", "Lyrics"));
-        returnLabel.Text = L.Text("回到当前歌词", "Return to current lyric"); AutomationProperties.SetName(returnButton, returnLabel.Text);
         LocalizeEmpty(); RefreshRows(style: true);
     }
     private void LocalizeEmpty()
@@ -183,7 +180,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void ViewUnloaded(object sender, RoutedEventArgs args)
     {
-        loaded = false; ++followRevision; browsingTimer.Stop(); CancelGlyphQueue(); browsing = false; pointerDown = false; UpdateReturnButton();
+        loaded = false; ++followRevision; browsingTimer.Stop(); CancelGlyphQueue(); browsing = false; pointerDown = false;
         if (subscribedRoot != null) subscribedRoot.Changed -= RootChanged; subscribedRoot = null; DetachScroller();
         foreach (var row in realized.ToArray()) { row.StopAnimations(); row.ReleaseSurface(); }
     }
@@ -222,7 +219,6 @@ public sealed partial class LyricsView : UserControl, IDisposable
         double height = ViewportHeight;
         topSpace.Height = document.IsTimed ? Math.Max(14, height * .32) : Math.Max(12, height * .30) + 14;
         bottomSpace.Height = document.IsTimed ? Math.Max(14, height * .68) : Math.Max(12, height * .45) + 14;
-        returnButton.Margin = new Thickness(0, 0, 2, 2); returnLabel.FontSize = compact ? 10 : 11;
         QueueEdges();
     }
     private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args) => QueueEdges();
@@ -242,19 +238,15 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private void BeginBrowsing()
     {
         if (disposed || !document.IsTimed) return;
-        browsing = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Start(); UpdateReturnButton();
+        browsing = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Start();
     }
     private void BrowsingExpired(DispatcherQueueTimer sender, object args)
     {
-        if (disposed) return; browsing = false; UpdateReturnButton(); ScheduleFollow(animated: true);
+        if (disposed) return; browsing = false; ScheduleFollow(animated: true);
     }
     private void ReturnToCurrent(object sender, RoutedEventArgs args)
     {
-        browsing = false; browsingTimer.Stop(); UpdateReturnButton(); ScheduleFollow(animated: true, explicitRequest: true);
-    }
-    private void UpdateReturnButton()
-    {
-        returnButton.Visibility = browsing && document.IsTimed ? Visibility.Visible : Visibility.Collapsed; returnButton.IsEnabled = lastPosition.HasValue;
+        browsing = false; browsingTimer.Stop(); ScheduleFollow(animated: true, explicitRequest: true);
     }
     private void ScheduleFollow(bool animated, bool explicitRequest = false)
     {
@@ -287,7 +279,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     internal void RequestSeek(LyricsRowItem item)
     {
         if (disposed || !CanSeek || !ReferenceEquals(item.Owner, this) || item.Line.TimeMs is not ulong time || item.Index >= items.Length || !ReferenceEquals(items[item.Index], item)) return;
-        browsing = false; ++followRevision; browsingTimer.Stop(); UpdateReturnButton(); SeekRequested?.Invoke(time);
+        browsing = false; ++followRevision; browsingTimer.Stop(); SeekRequested?.Invoke(time);
     }
     private void RefreshRows(bool style)
     {

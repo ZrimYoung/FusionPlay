@@ -144,6 +144,7 @@ public sealed record LyricsParseRequest(long Version, string Source);
 /// <summary>Versioned publication and last real position, independent of UI threads.</summary>
 public sealed class LyricsState
 {
+    public static readonly TimeSpan MissingLyricsGracePeriod = TimeSpan.FromSeconds(2);
     private ReceiverSnapshot? identity;
     private string source = "";
     private long version;
@@ -151,19 +152,25 @@ public sealed class LyricsState
     public LyricsDocument Document { get; private set; } = LyricsDocument.Empty;
     public bool Loading { get; private set; }
     public bool Available { get; private set; }
+    public bool WaitingForLyrics => MissingLyricsWaitToken.HasValue;
+    public long? MissingLyricsWaitToken { get; private set; }
 
     public LyricsParseRequest? Observe(ReceiverSnapshot snapshot)
     {
         if (!snapshot.ControlsAvailable) { Clear(); return null; }
+        string incoming = snapshot.LyricsText ?? "";
         if (identity == null || !Seeking.SameTrack(identity, snapshot))
         {
+            // Keep only the previous pane's availability while the next song's
+            // metadata arrives. Never keep its text, row identities or position.
+            bool retainPane = identity != null && Available;
             ++version; source = ""; Document = LyricsDocument.Empty; Loading = false; lastPosition = null;
+            MissingLyricsWaitToken = retainPane && incoming.Length == 0 ? version : null;
         }
         identity = snapshot;
         if (snapshot.PositionMs is { } position) lastPosition = position;
-        string incoming = snapshot.LyricsText ?? "";
         if (string.Equals(source, incoming, StringComparison.Ordinal)) { ResolveAvailability(); return null; }
-        source = incoming; ++version; Loading = source.Length > 0;
+        source = incoming; ++version; MissingLyricsWaitToken = null; Loading = source.Length > 0;
         if (!Loading) Document = LyricsDocument.Empty;
         ResolveAvailability();
         return Loading ? new(version, source) : null;
@@ -173,11 +180,17 @@ public sealed class LyricsState
         if (identity?.ControlsAvailable != true || request.Version != version || !string.Equals(request.Source, source, StringComparison.Ordinal)) return false;
         Document = document; Loading = false; ResolveAvailability(); return true;
     }
+    /// <summary>Expires one track's metadata wait; repeated empty polls never renew it.</summary>
+    public bool ExpireMissingLyrics(long token)
+    {
+        if (MissingLyricsWaitToken != token) return false;
+        MissingLyricsWaitToken = null; ResolveAvailability(); return true;
+    }
     public ulong? Position(ulong? displayPosition, bool connected) => connected ? displayPosition ?? lastPosition : null;
     public void Clear()
     {
         ++version; identity = null; source = ""; Document = LyricsDocument.Empty;
-        Loading = false; Available = false; lastPosition = null;
+        Loading = false; Available = false; lastPosition = null; MissingLyricsWaitToken = null;
     }
-    private void ResolveAvailability() => Available = Document.HasLyrics || Loading && Available;
+    private void ResolveAvailability() => Available = Document.HasLyrics || (Loading || WaitingForLyrics) && Available;
 }

@@ -20,6 +20,7 @@ namespace FusionPlay.Windows.Platform;
 /// <summary>Exercises seek targets and the real player without creating a native receiver or showing a window.</summary>
 internal static class SeekInputCheck
 {
+    private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
@@ -210,7 +211,7 @@ internal static class SeekInputCheck
                 preferencesCaptured = true;
                 controller = new ReceiverController(queue!); controllerCreated = true;
                 originalPreferences = controller.Preferences.Value;
-                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, Pinned = false, ShowPinButton = false, LyricsDisplayMode = "never" });
+                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, ShowTransport = true, Pinned = false, ShowPinButton = false, LyricsDisplayMode = "never" });
                 var initialized = typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized));
                 Require(initialized?.GetSetMethod(nonPublic: true) != null, "initialized_fixture_setter_missing");
                 initialized!.SetValue(controller, true); initializedFlagIsFixture = true;
@@ -344,6 +345,51 @@ internal static class SeekInputCheck
                         mainSamples.Add(new { mode, phase = "source_report_and_stale_rejected", source_revision = mainRevision, source_position_ms = controller.State.PositionMs, display_position_ms = controller.DisplayPositionMs, bar_value = Find<ProgressBar>(mode == "compact" ? "MiniProgress" : "Progress").Value, time_text = Find<PlayerText>(mode == "compact" ? "MiniPosition" : "PositionText").Text });
                     });
                 });
+                step = "real_main_track_transition_keeps_progress_slot_" + mode;
+                var trackTransition = initial with { TrackId = "fixture-transition-" + mode, Phase = ReceiverPhase.Connected, DurationMs = null, PositionMs = null };
+                double progressSlotHeight = 0, transportSlotHeight = 0;
+                await OnUi(queue!, () =>
+                {
+                    ArrangeMain(width, height);
+                    progressSlotHeight = Find<FrameworkElement>(mode == "compact" ? "MiniProgressPanel" : "ProgressPanel").ActualHeight;
+                    transportSlotHeight = Find<FrameworkElement>(mode == "compact" ? "MiniTransport" : "TransportPanel").ActualHeight;
+                    var seek = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
+                    seek.BeginPointer(32, seek.ActualWidth / 2, seek.ActualWidth, true);
+                    Require(PendingRequest(seek) != null, "track_transition_gesture_fixture_missing");
+                    AcceptMain(trackTransition);
+                    Require(!seek.IsEnabled && PendingRequest(seek) == null, "track_transition_did_not_immediately_disable_and_cancel_seek");
+                });
+                foreach (int delay in new[] { 0, 40, 80, 160 })
+                {
+                    if (delay > 0) await Task.Delay(delay);
+                    int sampleDelay = delay;
+                    await OnUi(queue!, () =>
+                    {
+                        VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, false, 0, "--:--", "--:--", controlsEnabled: true);
+                        mainSamples.Add(new { mode, phase = "track_without_timeline", sample_delay_ms = sampleDelay, slot_height = progressSlotHeight, actual_height = Find<FrameworkElement>(mode == "compact" ? "MiniProgressPanel" : "ProgressPanel").ActualHeight, seek_enabled = false, bar_value = 0 });
+                    });
+                }
+                await OnUi(queue!, () => Pass("real_main_track_missing_timeline_preserves_slot_and_clears_previous_song_" + mode, () =>
+                {
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, false, 0, "--:--", "--:--", controlsEnabled: true);
+                    AcceptMain(trackTransition with { ControlsAvailable = false });
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, false, 0, "--:--", "--:--", controlsEnabled: false);
+                }));
+                await Task.Delay(80);
+                await OnUi(queue!, () => Pass("real_main_transitional_control_loss_disables_controls_without_collapsing_" + mode, () =>
+                {
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, false, 0, "--:--", "--:--", controlsEnabled: false);
+                    AcceptMain(trackTransition with { DurationMs = 180_000 });
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, false, 0, "--:--", "3:00", controlsEnabled: true);
+                    AcceptMain(trackTransition with { DurationMs = 180_000, PositionMs = 30_000, Phase = ReceiverPhase.Playing });
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, true, 100.0 / 6, "0:30", "3:00", controlsEnabled: true);
+                }));
+                await Task.Delay(260);
+                await OnUi(queue!, () => Pass("real_main_restored_track_timeline_reuses_progress_slot_" + mode, () =>
+                {
+                    VerifyTrackTransitionSlot(mode, width, height, progressSlotHeight, transportSlotHeight, true, 100.0 / 6, "0:30", "3:00", controlsEnabled: true);
+                    AcceptMain(initial); ArrangeMain(width, height);
+                }));
                 RectInt32 oldProgressRegion = default;
                 step = "hide_real_main_progress_" + mode;
                 await OnUi(queue!, () =>
@@ -376,6 +422,18 @@ internal static class SeekInputCheck
                     // preserve a full-width hole that covered the old seek target.
                     Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_hidden_progress_hole_remains");
                     mainSamples.Add(new { mode, width, height, show_progress = false, old_seek_region = new[] { oldProgressRegion.X, oldProgressRegion.Y, oldProgressRegion.Width, oldProgressRegion.Height }, registered_passthrough_count = holes.Length });
+                }));
+                await OnUi(queue!, () => Pass("real_main_hidden_progress_preference_survives_track_transition_" + mode, () =>
+                {
+                    foreach (var observation in new[] { trackTransition, trackTransition with { DurationMs = 180_000, PositionMs = 30_000, Phase = ReceiverPhase.Playing } })
+                    {
+                        AcceptMain(observation); ArrangeMain(width, height);
+                        Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed,
+                            "track_transition_overrode_hidden_progress_preference");
+                        Require(!Find<ProgressSeekButton>("ProgressSeek").IsEnabled && !Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled,
+                            "hidden_track_transition_enabled_seek");
+                    }
+                    AcceptMain(initial);
                 }));
                 step = "reverse_real_main_progress_animation_" + mode;
                 await OnUi(queue!, () => { controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = true }); ArrangeMain(width, height); });
@@ -428,6 +486,32 @@ internal static class SeekInputCheck
             await WaitForProgress(visible: true);
             await OnUi(queue!, () => Pass("real_main_mode_switch_during_progress_show_snaps_visible", () =>
                 Require(Find<FrameworkElement>("ExpandedRoot").Visibility == Visibility.Visible && Find<ProgressSeekButton>("ProgressSeek").IsEnabled, "real_main_mode_switch_retained_old_show")));
+            await OnUi(queue!, () => Pass("player_caption_button_preferences_keep_shortcuts", () =>
+            {
+                controller!.Preferences.Update(controller.Preferences.Value with { ShowSettingsButton = false, ShowFullScreenButton = false });
+                Require(Find<Button>("SettingsButton").Visibility == Visibility.Collapsed
+                    && Find<Button>("ExpandedFullScreenButton").Visibility == Visibility.Collapsed
+                    && Find<Button>("MiniFullScreenButton").Visibility == Visibility.Collapsed, "hidden_caption_button_preference_ignored");
+                var root = (FrameworkElement)main!.Content;
+                Require(root.FindName("MiniButton") == null, "removed_mini_switch_button_still_exists");
+                Require(root.KeyboardAccelerators.Any(key => key.Key == VirtualKey.F11)
+                    && root.KeyboardAccelerators.Any(key => key.Key == (VirtualKey)0xBC), "hidden_caption_buttons_removed_keyboard_entry");
+                controller.Preferences.Update(controller.Preferences.Value with { ShowSettingsButton = true, ShowFullScreenButton = true });
+                Require(Find<Button>("SettingsButton").Visibility == Visibility.Visible
+                    && Find<Button>("ExpandedFullScreenButton").Visibility == Visibility.Visible
+                    && Find<Button>("MiniFullScreenButton").Visibility == Visibility.Visible, "caption_button_preference_did_not_restore");
+            }));
+            await OnUi(queue!, () => Pass("close_buttons_follow_pointer_only", () =>
+            {
+                typeof(MainWindow).GetField("focusInside", Private)!.SetValue(main, true);
+                var hover = typeof(MainWindow).GetMethod("NativeHoverChanged", Private)!;
+                hover.Invoke(main, [true]);
+                Require(Find<Button>("CloseButton").IsHitTestVisible && Find<Button>("ExpandedCloseButton").IsHitTestVisible, "pointer_did_not_reveal_close_buttons");
+                hover.Invoke(main, [false]);
+                Require(!Find<Button>("CloseButton").IsHitTestVisible && !Find<Button>("ExpandedCloseButton").IsHitTestVisible
+                    && !Find<Button>("CloseButton").IsTabStop && !Find<Button>("ExpandedCloseButton").IsTabStop, "focus_forced_close_button_visible_without_pointer");
+                typeof(MainWindow).GetField("focusInside", Private)!.SetValue(main, false);
+            }));
             await OnUi(queue!, () => Pass("plain_progress_theme_keeps_native_reposition_transition", () =>
             {
                 bar!.ApplyTemplate();
@@ -506,6 +590,30 @@ internal static class SeekInputCheck
                 Require(Math.Abs(progressBar.Value - expectedPercent) < 0.000001, "real_main_bar_ignored_display_position");
             foreach (var text in new[] { Find<PlayerText>("PositionText"), Find<PlayerText>("MiniPosition") })
                 Require(text.Text == expectedTime, "real_main_time_ignored_display_position");
+        }
+        void VerifyTrackTransitionSlot(string mode, double width, double height, double progressHeight, double transportHeight,
+            bool seekEnabled, double percent, string position, string duration, bool controlsEnabled)
+        {
+            ArrangeMain(width, height);
+            foreach (var panel in new[] { Find<FrameworkElement>("ProgressPanel"), Find<FrameworkElement>("MiniProgressPanel") })
+                Require(panel.Visibility == Visibility.Visible && double.IsNaN(panel.Height) && Math.Abs(panel.Opacity - 1) < .001,
+                    "track_transition_restarted_progress_visibility_animation");
+            var activePanel = Find<FrameworkElement>(mode == "compact" ? "MiniProgressPanel" : "ProgressPanel");
+            Require(progressHeight > 0 && Math.Abs(activePanel.ActualHeight - progressHeight) <= 1,
+                "track_transition_changed_progress_slot_height");
+            foreach (var seek in new[] { Find<ProgressSeekButton>("ProgressSeek"), Find<ProgressSeekButton>("MiniProgressSeek") })
+                Require(seek.IsEnabled == seekEnabled && PendingRequest(seek) == null, "track_transition_seek_enablement_or_gesture_wrong");
+            VerifyMainPosition(percent, position);
+            Require(Find<PlayerText>("DurationText").Text == duration && Find<PlayerText>("MiniDuration").Text == duration,
+                "track_transition_duration_retained_previous_song");
+            Require(Find<FrameworkElement>("TransportPanel").Visibility == Visibility.Visible && Find<FrameworkElement>("MiniTransport").Visibility == Visibility.Visible
+                && Math.Abs(Find<FrameworkElement>(mode == "compact" ? "MiniTransport" : "TransportPanel").ActualHeight - transportHeight) <= 1,
+                "track_transition_changed_transport_slot");
+            foreach (string button in new[] { "PreviousButton", "PlayButton", "NextButton", "MiniPreviousButton", "MiniPlayButton", "MiniNextButton" })
+                Require(Find<Button>(button).IsEnabled == controlsEnabled, "track_transition_transport_enablement_wrong");
+            Require(typeof(ReceiverController).GetField("native", Private)!.GetValue(controller) == null
+                && typeof(ReceiverController).GetField("polling", Private)!.GetValue(controller) == null,
+                "track_transition_fixture_created_native_receiver");
         }
         void InspectIndicator(string mode, double width, double height, ulong position, string direction, int sample)
         {

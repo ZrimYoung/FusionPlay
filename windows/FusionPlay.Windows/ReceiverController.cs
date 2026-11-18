@@ -15,6 +15,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private NativeReceiver? native;
     private readonly PlaybackTimeline timeline = new();
     private readonly LyricsState lyrics = new();
+    private long? scheduledLyricsWait;
     private CancellationTokenSource? seekFeedbackExpiry;
     private long generation;
     private Task? polling;
@@ -35,7 +36,7 @@ public sealed class ReceiverController : IAsyncDisposable
     public ReceiverSnapshot State => timeline.Source;
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
     public LyricsDocument Lyrics => lyrics.Document;
-    public bool LyricsLoading => lyrics.Loading;
+    public bool LyricsLoading => lyrics.Loading || lyrics.WaitingForLyrics;
     public bool LyricsAvailable => lyrics.Available;
     public ulong? LyricsPositionMs => lyrics.Position(DisplayPositionMs, State.ControlsAvailable && !sleeping && !disposed);
     public NetworkInterface[] Networks { get; private set; } = [];
@@ -146,7 +147,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         long request = Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
-        lyrics.Clear();
+        lyrics.Clear(); scheduledLyricsWait = null;
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
         Busy = true; Error = ""; ControlMessage = ""; Notify();
@@ -241,8 +242,31 @@ public sealed class ReceiverController : IAsyncDisposable
         volume.Observe(snapshot.Volume);
         if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
         if (lyrics.Observe(snapshot) is { } parse) _ = ParseLyricsAsync(parse);
+        ScheduleMissingLyricsExpiry();
         UpdateArtwork(snapshot); Notify();
         return true;
+    }
+    private void ScheduleMissingLyricsExpiry()
+    {
+        long? token = lyrics.MissingLyricsWaitToken;
+        if (scheduledLyricsWait == token) return;
+        scheduledLyricsWait = token;
+        if (token is long waiting) _ = ExpireMissingLyricsAsync(waiting, Interlocked.Read(ref generation));
+    }
+    private async Task ExpireMissingLyricsAsync(long token, long receiverGeneration)
+    {
+        var cancellation = lifetime.Token;
+        try
+        {
+            await Task.Delay(LyricsState.MissingLyricsGracePeriod, cancellation);
+            await OnUi(() =>
+            {
+                if (disposed || cancellation.IsCancellationRequested || receiverGeneration != Interlocked.Read(ref generation)
+                    || !lyrics.ExpireMissingLyrics(token)) return;
+                scheduledLyricsWait = null; Notify();
+            });
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested || disposed) { }
     }
     private async Task ParseLyricsAsync(LyricsParseRequest request)
     {
@@ -499,7 +523,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
-        lyrics.Clear();
+        lyrics.Clear(); scheduledLyricsWait = null;
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();

@@ -11,6 +11,8 @@ internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
     void SetPlayerLayout(bool lyricsVisible, bool fullScreen);
+    void SetLayoutTransition(bool active);
+    event Action? MoveSizeStarted;
 }
 
 internal static class WindowSizing
@@ -114,7 +116,8 @@ internal static class WindowSizing
         private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
-        private bool lyricsVisible, fullScreen, expandLyrics;
+        private bool lyricsVisible, fullScreen, expandLyrics, layoutTransition;
+        public event Action? MoveSizeStarted;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
@@ -146,7 +149,7 @@ internal static class WindowSizing
             if (!fullScreen && message == 0x0112 && (argument & 0xFFF0) == 0xF030) return 0;
             if (message == 0x0231)
             {
-                inMoveSize = true;
+                BeginMoveSize();
                 if (GetClientRect(handle, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
             }
             if (message == 0x0214 && GetClientRect(handle, out var client))
@@ -209,8 +212,15 @@ internal static class WindowSizing
         }
         private void EnteredMoveSize(InputNonClientPointerSource sender, EnteredMoveSizeEventArgs args)
         {
-            inMoveSize = true;
+            BeginMoveSize();
             if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
+        }
+        private void BeginMoveSize()
+        {
+            if (inMoveSize) return;
+            inMoveSize = true; expandLyrics = false;
+            try { MoveSizeStarted?.Invoke(); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
         }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
         { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
@@ -225,7 +235,7 @@ internal static class WindowSizing
         public void SetPlayerLayout(bool lyrics, bool fullscreen)
         {
             if (disposed || lyricsVisible == lyrics && fullScreen == fullscreen) return;
-            expandLyrics |= !lyricsVisible && lyrics && !fullscreen;
+            expandLyrics |= !inMoveSize && !lyricsVisible && lyrics && !fullscreen;
             lyricsVisible = lyrics; fullScreen = fullscreen;
             if (fullscreen) expandLyrics = false;
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
@@ -237,6 +247,12 @@ internal static class WindowSizing
             }
             RefreshRegions(force: true);
             if (!fullscreen) QueueSettlement(force: true);
+        }
+        public void SetLayoutTransition(bool active)
+        {
+            if (disposed || layoutTransition == active) return;
+            layoutTransition = active;
+            if (!active) QueueSettlement(force: true);
         }
         private void QueueRegionRefresh(bool force = false)
         {
@@ -305,14 +321,14 @@ internal static class WindowSizing
         }
         private void QueueSettlement(bool force = false)
         {
-            if (disposed || fullScreen || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
+            if (disposed || fullScreen || layoutTransition || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
             if (!force && !lyricsVisible && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
                 && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client))) return;
             settlementQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
             {
                 settlementQueued = false;
-                if (disposed || fullScreen || inMoveSize || IsIconic(hwnd) || !GetWindowRect(hwnd, out var outer) || !GetClientRect(hwnd, out var client)) return;
+                if (disposed || fullScreen || layoutTransition || inMoveSize || IsIconic(hwnd) || !GetWindowRect(hwnd, out var outer) || !GetClientRect(hwnd, out var client)) return;
                 var frame = Frame(hwnd); var work = WorkArea(outer);
                 if (window.AppWindow.Presenter is OverlappedPresenter presenter)
                 {
@@ -355,6 +371,7 @@ internal static class WindowSizing
         public void Dispose()
         {
             if (disposed) return; disposed = true;
+            MoveSizeStarted = null;
             try
             {
                 input.PointerEntered -= PointerEntered; input.PointerMoved -= PointerEntered; input.PointerExited -= PointerExited;

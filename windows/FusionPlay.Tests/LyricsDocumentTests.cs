@@ -80,6 +80,50 @@ internal static class LyricsDocumentTests
             Assert(reconnected.Version != first.Version && state.Complete(reconnected, LyricsDocument.Parse(reconnected.Source)), "reconnect reused an invalidated request");
             state.Clear(); Assert(!state.Complete(reconnected, state.Document) && !state.Available, "lifecycle clear allowed stale completion");
         });
+        check("lyrics: a replacement's missing metadata retains only its pane for one bounded wait", () =>
+        {
+            var missing = Initial with { TrackId = "lyrics-b", LyricsText = "", PositionMs = null, DurationMs = null };
+            var firstSong = new LyricsState(); firstSong.Observe(missing);
+            Assert(!firstSong.Available && !firstSong.WaitingForLyrics, "a first song without lyrics opened the automatic pane");
+            var state = new LyricsState(); var original = state.Observe(Initial)!;
+            state.Complete(original, LyricsDocument.Parse(original.Source));
+            state.Observe(missing);
+            long token = state.MissingLyricsWaitToken!.Value;
+            Assert(state.Available && state.WaitingForLyrics && !state.Loading && !state.Document.HasLyrics
+                && state.Position(null, true) == null, "the pane collapsed or old song content survived the metadata gap");
+            for (int poll = 0; poll < 4; poll++)
+            {
+                state.Observe(missing);
+                Assert(state.MissingLyricsWaitToken == token, "an empty same-track poll renewed the wait");
+            }
+            Assert(state.ExpireMissingLyrics(token) && !state.Available && !state.WaitingForLyrics, "missing lyrics did not expire");
+            state.Observe(missing);
+            Assert(!state.Available && !state.WaitingForLyrics && !state.ExpireMissingLyrics(token), "expired empty lyrics restarted the wait");
+        });
+        check("lyrics: arrivals replacements and disconnects reject stale missing-metadata expiry", () =>
+        {
+            var state = new LyricsState(); var original = state.Observe(Initial)!;
+            state.Complete(original, LyricsDocument.Parse(original.Source));
+            var missing = Initial with { TrackId = "lyrics-b", LyricsText = "", PositionMs = null };
+            state.Observe(missing); long firstWait = state.MissingLyricsWaitToken!.Value;
+            var parsed = state.Observe(missing with { LyricsText = "[00:02]Second", PositionMs = 2_000 })!;
+            Assert(!state.WaitingForLyrics && state.Loading && state.Available && !state.ExpireMissingLyrics(firstWait), "arrival kept an old deadline active");
+            Assert(state.Complete(parsed, LyricsDocument.Parse(parsed.Source)) && state.Available, "arriving lyrics did not publish");
+            state.Observe(missing);
+            Assert(!state.Available && !state.WaitingForLyrics, "an explicit same-track lyric removal acquired a grace period");
+            var restored = state.Observe(missing with { LyricsText = "[00:02]Second" })!;
+            state.Complete(restored, LyricsDocument.Parse(restored.Source));
+            state.Observe(missing with { TrackId = "lyrics-c" }); long secondWait = state.MissingLyricsWaitToken!.Value;
+            state.Observe(missing with { TrackId = "lyrics-d" }); long thirdWait = state.MissingLyricsWaitToken!.Value;
+            Assert(secondWait != thirdWait && !state.ExpireMissingLyrics(secondWait) && state.Available && state.WaitingForLyrics, "a previous track's timer expired the current wait");
+            state.Observe(missing with { ControlsAvailable = false });
+            Assert(!state.Available && !state.WaitingForLyrics && !state.Document.HasLyrics
+                && !state.ExpireMissingLyrics(thirdWait) && !state.Complete(parsed, LyricsDocument.Parse(parsed.Source)), "disconnect retained a wait or accepted stale publication");
+            state.Observe(Initial); var reconnect = state.Observe(Initial with { LyricsText = "[00:03]Updated" })!;
+            state.Complete(reconnect, LyricsDocument.Parse(reconnect.Source)); state.Observe(missing);
+            long lifecycleWait = state.MissingLyricsWaitToken!.Value; state.Clear();
+            Assert(!state.Available && !state.WaitingForLyrics && !state.ExpireMissingLyrics(lifecycleWait), "lifecycle clear retained a deadline");
+        });
         check("lyrics: missing positions retain only the last real value while seek previews remain temporary", () =>
         {
             var state = new LyricsState(); state.Observe(Initial);

@@ -59,6 +59,7 @@ internal sealed class SettingsWindow : Window
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
     private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
+        settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
     private readonly ToggleButton pinned = new() { Name = "Pinned", MinWidth = 94, Padding = new Thickness(12, 7, 12, 7) };
     private FontSettingsPanel fontSettings = null!;
@@ -412,6 +413,12 @@ internal sealed class SettingsWindow : Window
         var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
             Text("播放控制与进度设置适用于大小播放器；进度条支持点击跳转。", "Playback controls and progress settings apply to both layouts. Click the progress bar to seek.", true));
         page.Children.Add(display);
+        ConfigureCard(settingsButton, "设置按钮", "Settings button", (p, value) => p with { ShowSettingsButton = value });
+        ConfigureCard(fullScreenButton, "全屏按钮", "Full screen button", (p, value) => p with { ShowFullScreenButton = value });
+        var buttonDescription = Text("设置按钮仅在展开播放器显示；全屏按钮适用于大小播放器。隐藏后仍可用 Ctrl+, 打开设置、F11 切换全屏。", "The settings button appears only in the expanded player; the full screen button appears in both layouts. Ctrl+, still opens Settings and F11 toggles full screen when the buttons are hidden.", true);
+        buttonDescription.Name = "WindowButtonsDescription";
+        var windowButtons = Group("窗口按钮", "Window buttons", Cards(settingsButton, fullScreenButton), buttonDescription); windowButtons.Name = "WindowButtons";
+        page.Children.Add(windowButtons);
         AddSegment(miniVisibility, "hover", "鼠标移入显示", "Show on hover"); AddSegment(miniVisibility, "always", "始终显示", "Always show");
         Label(() => AutomationProperties.SetName(miniVisibility, L.Text("迷你窗口控件显隐", "Mini player controls visibility")));
         miniVisibility.SelectionChanged += (_, _) => { if (!renderingPreferences && SegmentKey(miniVisibility) is string key) UpdatePreferences(p => p with { AlwaysShowControls = key == "always" }); };
@@ -567,6 +574,7 @@ internal sealed class SettingsWindow : Window
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
+            settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");
             taskbar.IsChecked = preferences.ShowTaskbarIcon; tray.IsChecked = preferences.ShowTrayIcon;
             progressColorSurface.Visibility = preferences.ShowProgress ? Visibility.Visible : Visibility.Collapsed;

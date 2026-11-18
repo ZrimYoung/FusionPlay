@@ -230,7 +230,16 @@ internal static class SettingsLayoutCheck
                 "settings_titlebar_caption_clipped");
             Require(titleBar.Padding.Right >= settings.AppWindow.TitleBar.RightInset / scale && titleBar.Padding.Left >= settings.AppWindow.TitleBar.LeftInset / scale,
                 "settings_titlebar_native_buttons_not_reserved");
-            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ShowSettingsButton", "ShowFullScreenButton", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            if (page == "player")
+            {
+                var choices = Find<StackPanel>("WindowButtons").Children.OfType<Grid>().Single();
+                Require(choices.ColumnDefinitions.Count == 2 && choices.Children.Count == 2, "window_button_choices_not_separate_two_column_group");
+                Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowSettingsButton")).GetName() == L.Text("设置按钮", "Settings button")
+                    && new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowFullScreenButton")).GetName() == L.Text("全屏按钮", "Full screen button"), "window_button_choice_names_not_localized");
+                string description = Find<TextBlock>("WindowButtonsDescription").Text;
+                Require(description.Contains("Ctrl+,") && description.Contains("F11") && description.Contains(language == "en" ? "expanded" : "展开"), "window_button_scope_or_shortcut_description_missing");
+            }
             var controls = Descendants(Root()).OfType<FrameworkElement>().Where(element => controlNames.Contains(element.Name) && Visible(element)
                 && (element is ButtonBase or ComboBox or SelectorBar or TextBox or Slider or Expander)).ToArray();
             var boxes = new List<object>();
@@ -367,6 +376,13 @@ internal static class SettingsLayoutCheck
             step = "native_toggle_and_segment_bindings";
             await OnUi(queue!, () => Pass(step, () =>
             {
+                Require(controller!.Preferences.Value.ShowSettingsButton && controller.Preferences.Value.ShowFullScreenButton
+                    && Find<ToggleButton>("ShowSettingsButton").IsChecked == true && Find<ToggleButton>("ShowFullScreenButton").IsChecked == true, "window_button_choices_default_hidden");
+                Toggle("ShowSettingsButton"); Toggle("ShowFullScreenButton");
+                Require(!controller.Preferences.Value.ShowSettingsButton && !controller.Preferences.Value.ShowFullScreenButton, "window_button_choices_not_saved");
+                Require(new UiPreferencesStore(store.Data).Value == controller.Preferences.Value, "window_button_choices_not_persisted");
+                Toggle("ShowFullScreenButton");
+                Require(!controller.Preferences.Value.ShowSettingsButton && controller.Preferences.Value.ShowFullScreenButton, "window_button_choices_not_independent");
                 Toggle("ShowTransport"); Toggle("ShowProgress"); Toggle("ShowPinButton");
                 var value = controller!.Preferences.Value;
                 Require(!value.ShowTransport && !value.ShowProgress && value.ShowPinButton, "choice_tiles_not_saved");
@@ -466,6 +482,8 @@ internal static class SettingsLayoutCheck
                 CreateController(); Require(controller!.Preferences.Value == expectedPreferences, "reopened_preferences_not_preserved"); CreateSettings();
                 Navigate("player");
                 Require(Find<ToggleButton>("ShowTransport").IsChecked == expectedPreferences.ShowTransport && Find<ToggleButton>("ShowProgress").IsChecked == expectedPreferences.ShowProgress && Find<ToggleButton>("ShowPinButton").IsChecked == expectedPreferences.ShowPinButton, "reopened_choice_tiles_not_bound");
+                Require(Find<ToggleButton>("ShowSettingsButton").IsChecked == expectedPreferences.ShowSettingsButton
+                    && Find<ToggleButton>("ShowFullScreenButton").IsChecked == expectedPreferences.ShowFullScreenButton, "reopened_window_button_choices_not_bound");
             }));
             step = "independent_group_apply_intents";
             await OnUi(queue!, () =>
