@@ -89,7 +89,8 @@ internal sealed class SystemMedia : IDisposable
         controls.IsEnabled = true;
         controls.IsPlayEnabled = controls.IsPauseEnabled = controls.IsPreviousEnabled = controls.IsNextEnabled = enabled;
         controls.PlaybackStatus = state.Phase == ReceiverPhase.Playing ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
-        string nextMetadata = state.TrackId + "|" + state.Title + "|" + state.Artist + "|" + state.Album;
+        var presentation = DisplaySnapshot(state, model.DisplayMetadata);
+        string nextMetadata = presentation.TrackId + "|" + presentation.Title + "|" + presentation.Artist + "|" + presentation.Album;
         byte[]? currentArtwork = model.ArtworkLoading ? null : model.ArtworkBytes;
         if (metadata != nextMetadata || !ReferenceEquals(thumbnailBytes, currentArtwork) || !active)
         {
@@ -97,19 +98,24 @@ internal sealed class SystemMedia : IDisposable
             long generation = ++thumbnailGeneration;
             // Clear the preceding track's artwork immediately. A native in-memory
             // thumbnail is published after decoding, only if this request is still current.
-            PublishMetadata(state, null);
+            PublishMetadata(presentation, null);
             thumbnailBytes = currentArtwork;
             metadata = nextMetadata;
             RetireThumbnail(thumbnail); thumbnail = null;
             if (currentArtwork != null)
             {
                 thumbnailRequest = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                _ = PublishThumbnailAsync(state, currentArtwork, generation, thumbnailRequest.Token);
+                _ = PublishThumbnailAsync(presentation, currentArtwork, generation, thumbnailRequest.Token);
             }
         }
         UpdateTimeline(state);
         active = true;
     }
+
+    // The Shell receives corrected labels, while timeline publication and every
+    // playback command continue to use the untouched authoritative observation.
+    internal static ReceiverSnapshot DisplaySnapshot(ReceiverSnapshot state, DisplayMetadata display) =>
+        state with { Title = display.Title, Artist = display.Artist, Album = display.Album };
 
     private sealed class ThumbnailPublication(InMemoryRandomAccessStream stream) : IDisposable
     {

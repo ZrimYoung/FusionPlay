@@ -32,6 +32,7 @@ public sealed class PlayerText : UserControl
     private CanvasRenderTarget? glyphs;
     private XamlRoot? subscribedRoot;
     private double surfaceWidth, surfaceHeight, surfaceDpi;
+    private double rootScale;
     private bool enhanced = true, queued, renderFaulted, attached;
     internal bool Enhanced { get => enhanced; set { if (enhanced == value) return; enhanced = value; Refresh(); } }
     internal bool UsesEnhancedSurface => image.Visibility == Visibility.Visible;
@@ -49,6 +50,7 @@ public sealed class PlayerText : UserControl
         {
             attached = true;
             subscribedRoot = XamlRoot;
+            rootScale = subscribedRoot?.RasterizationScale ?? 1;
             if (subscribedRoot != null) subscribedRoot.Changed += RootChanged;
             ui.TextScaleFactorChanged += TextScaleChanged; ui.ColorValuesChanged += ContrastChanged;
             Refresh();
@@ -66,7 +68,14 @@ public sealed class PlayerText : UserControl
         SyncMeasurement();
     }
     private static void Changed(DependencyObject sender, DependencyPropertyChangedEventArgs args) => ((PlayerText)sender).Refresh();
-    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => QueueDraw();
+    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        // Window height/visibility changes do not alter a cached glyph plane.
+        // Actual text bounds already invalidate it through SizeChanged.
+        double scale = sender.RasterizationScale;
+        if (rootScale == scale) return;
+        rootScale = scale; QueueDraw();
+    }
     private void TextScaleChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(Refresh);
     private void ContrastChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(Refresh);
     private void Refresh()

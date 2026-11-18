@@ -320,9 +320,10 @@ Check("appearance preferences: portable defaults, persistence and invalid-input 
     using var temporary = new TemporaryDirectory();
     var preferences = new UiPreferencesStore(temporary.Path);
     Assert(preferences.Value.ShowTransport && preferences.Value.ShowProgress && preferences.Value.ShowTaskbarIcon && preferences.Value.ShowTrayIcon, "default controls, progress or entry visibility changed");
+    Assert(preferences.Value.ShowSettingsButton && preferences.Value.ShowFullScreenButton, "window button defaults changed");
     Assert(preferences.Value.ProgressColorMode == "system" && preferences.Value.ProgressCustomColor == "#FFFFFF", "progress color defaults changed");
     int changes = 0; preferences.Changed += () => changes++;
-    var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowProgress = false, ShowTaskbarIcon = false, ShowTrayIcon = false };
+    var expected = preferences.Value with { Language = "en", Pinned = true, ShowPinButton = true, AlwaysShowControls = true, ShowProgress = false, ShowSettingsButton = false, ShowFullScreenButton = false, ShowTaskbarIcon = false, ShowTrayIcon = false };
     preferences.Update(expected); preferences.Update(expected);
     Assert(changes == 1, "unchanged preferences notified twice");
     Assert(new UiPreferencesStore(temporary.Path).Value == expected, "portable UI state lost on reopen");
@@ -417,7 +418,12 @@ Check("appearance preferences: malformed originals retained and partial older se
     File.WriteAllText(file, "{\"language\":\"en\"}");
     var legacy = new UiPreferencesStore(temporary.Path).Value;
     Assert(legacy.Language == "en" && legacy.ShowTransport && legacy.ShowProgress && legacy.ShowTrayIcon && legacy.ShowTaskbarIcon, "missing fields lost defaults");
+    Assert(legacy.ShowSettingsButton && legacy.ShowFullScreenButton, "older preferences hid window buttons");
     Assert(legacy.ProgressColorMode == "system" && legacy.ProgressCustomColor == "#FFFFFF", "older preferences did not receive progress defaults");
+    File.WriteAllText(file, "{\"language\":\"en\",\"show_settings_button\":false,\"show_full_screen_button\":false}");
+    var explicitlyHidden = new UiPreferencesStore(temporary.Path).Value;
+    Assert(!explicitlyHidden.ShowSettingsButton && !explicitlyHidden.ShowFullScreenButton && explicitlyHidden.Language == "en" && explicitlyHidden.ShowTransport,
+        "explicit hidden window buttons were replaced by compatibility defaults");
     const string invalidColor = "{\"progress_color_mode\":\"custom\",\"progress_custom_color\":\"#80FF0000\"}";
     File.WriteAllText(file, invalidColor);
     var invalidProgress = new UiPreferencesStore(temporary.Path);
@@ -445,6 +451,7 @@ Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconn
 PlaybackTimelineTests.Register(Check);
 LyricsDocumentTests.Register(Check);
 LyricsPreferenceTests.Register(Check);
+DisplayMetadataTests.Register(Check);
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {
