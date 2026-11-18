@@ -63,6 +63,8 @@ impl Default for Settings {
         Self {
             name: if cfg!(windows) {
                 "FusionPlay-Windows"
+            } else if cfg!(target_os = "ios") {
+                "FusionPlay-iOS"
             } else {
                 "FusionPlay-Mac"
             }
@@ -172,6 +174,9 @@ pub fn network_interfaces() -> Result<Vec<NetworkInterface>> {
         .map_err(receiver_error)?
         .into_iter()
         .filter(|i| i.is_oper_up() && !i.is_loopback() && !i.is_p2p() && !i.is_link_local())
+        // Wi-Fi and USB-C Ethernet use an en* interface. Do not advertise a
+        // cellular or VPN address as the LAN receiver on iPhone and iPad.
+        .filter(|i| !cfg!(target_os = "ios") || i.name.starts_with("en"))
         .filter_map(|i| match i.ip() {
             std::net::IpAddr::V4(ip) => Some(NetworkInterface {
                 name: i.name,
@@ -239,11 +244,11 @@ struct Identity {
     idm: String,
     lyra: String,
     media: String,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     #[serde(default)]
     control_port: u16,
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn new_control_port() -> u16 {
     49152 + (uuid::Uuid::new_v4().as_u128() % 16384) as u16
 }
@@ -251,7 +256,7 @@ fn load_identity(dir: &Path) -> Result<Identity> {
     let path = dir.join("identity.json");
     if path.exists() {
         let mut identity: Identity = serde_json::from_slice(&fs::read(&path).map_err(storage)?).map_err(storage)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         if identity.control_port == 0 || identity.control_port == 8899 {
             identity.control_port = new_control_port();
             save_json(&path, &identity)?;
@@ -259,7 +264,7 @@ fn load_identity(dir: &Path) -> Result<Identity> {
         return Ok(identity);
     }
     let identity = Identity {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         control_port: new_control_port(),
         idm: uuid::Uuid::new_v4().to_string(),
         lyra: uuid::Uuid::new_v4().simple().to_string()[..8].to_uppercase(),
@@ -575,7 +580,7 @@ impl Receiver {
         )
         .with_initial_volume_percent(settings.volume)
         .with_hardware_address(hardware_address);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         let config = config.with_preferred_control_port(Some(identity.control_port));
         #[cfg(windows)]
         let config = config.with_preferred_control_port(
@@ -602,7 +607,7 @@ impl Receiver {
         .map_err(receiver_error)?;
         #[cfg(windows)]
         save_json(&self.data.join("control-port.json"), &core.control_port())?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
             identity.control_port = core.control_port();
             if let Err(error) = save_json(&self.data.join("identity.json"), &identity) {

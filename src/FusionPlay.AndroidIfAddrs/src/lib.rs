@@ -1,3 +1,4 @@
+#[cfg(not(target_os = "ios"))]
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -122,6 +123,12 @@ impl Ifv6Addr {
     }
 }
 
+#[cfg(target_os = "ios")]
+mod ios;
+#[cfg(target_os = "ios")]
+pub use ios::get_if_addrs;
+
+#[cfg(not(target_os = "ios"))]
 pub fn get_if_addrs() -> io::Result<Vec<Interface>> {
     let networks = getifs::interface_addrs()?;
     let mut interfaces = Vec::with_capacity(networks.len());

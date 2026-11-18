@@ -710,6 +710,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "if-addrs",
+ "libc",
  "md-5",
  "oboe",
  "p256",
@@ -898,6 +899,7 @@ name = "if-addrs"
 version = "0.15.0"
 dependencies = [
  "getifs",
+ "libc",
 ]
 
 [[package]]
