@@ -46,7 +46,7 @@ public sealed class ReceiverController : IAsyncDisposable
                 displayMetadata.Reset();
                 return new(state.Title, state.Artist, state.Album);
             }
-            return displayMetadata.Resolve(state.Title, state.Artist, state.Album, state.LyricsText);
+            return displayMetadata.Resolve(state);
         }
     }
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;

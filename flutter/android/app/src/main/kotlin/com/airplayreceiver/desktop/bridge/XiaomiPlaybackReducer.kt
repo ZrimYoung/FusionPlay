@@ -386,9 +386,19 @@ class XiaomiPlaybackReducer(
         ) {
             return true
         }
+        // The SDK can verify that an updated display title is a lyric
+        // caption in the current song. Require a matching ID before trusting it.
+        val confirmedSameTrack =
+            incoming.trackTransition == "same" &&
+                !incoming.trackId.isNullOrBlank() &&
+                incoming.trackId == previous.trackId
+        if (confirmedSameTrack && incoming.titleIsLyric) {
+            return false
+        }
         if (
+            !confirmedSameTrack &&
             incoming.title != null &&
-            !incoming.title.equals(previous.title)
+            incoming.title != previous.title
         ) {
             return true
         }

@@ -13,6 +13,10 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
     @Published var miniPlayerRequest = 0
+    var correctedDisplayMetadata: DisplayMetadata {
+        guard let state = snapshot else { return DisplayMetadata(title: "", artist: "", album: "") }
+        return DisplayMetadata(state, correctLyricTitles: true)
+    }
     @Published var snapshot: Snapshot?
     @Published private(set) var playbackTimeline = PlaybackTimeline()
     @Published private(set) var scrubbing = false
@@ -48,6 +52,12 @@ final class ReceiverModel: ObservableObject {
     @Published var controlBusy = false
     @Published var seekMessage = ""
     @Published var controlMessage = ""
+    @Published private(set) var lyrics = LyricsDocument("")
+    @Published private(set) var lyricsLoading = false
+    @Published private(set) var lyricsAvailable = false
+    private var lyricsTask: Task<Void, Never>?
+    private var lyricsKey = ""
+    private var lyricsSource = ""
     @Published var artwork: NSImage?
     @Published var artworkStatus = "尚未连接"
     @Published var artworkLoading = false
@@ -72,9 +82,15 @@ final class ReceiverModel: ObservableObject {
     static func preview(_ state: Snapshot, artwork: NSImage?, root: URL) -> ReceiverModel {
         ReceiverModel(preview: state, artwork: artwork, root: root)
     }
+    func previewLyricsUpdate(_ state: Snapshot) {
+        snapshot = state
+        updateLyrics(state)
+    }
     private init(preview state: Snapshot, artwork: NSImage?, root: URL) {
         self.root = root; self.snapshot = state; self.artwork = artwork
         self.initialized = true; self.wantsReceiving = true
+        self.lyrics = LyricsDocument(state.lyricsText)
+        self.lyricsAvailable = !self.lyrics.lines.isEmpty
         self.networks = []; self.outputs = []
         self.playbackTimeline.observe(PlaybackObservation(trackID: state.trackId, title: state.title,
             duration: state.durationMs, position: state.positionMs, connected: state.controlsAvailable,
@@ -148,6 +164,7 @@ final class ReceiverModel: ObservableObject {
         if !playbackTimeline.isPending { seekExpiryTask?.cancel() }
         volumeInteraction.observe(Double(state.volume))
         if !state.controlsAvailable { controlMessage = "" }
+        updateLyrics(state)
         updateArtwork(state)
         if busy || sleeping { systemMedia.clear() }
         else { systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork) }
@@ -216,6 +233,60 @@ final class ReceiverModel: ObservableObject {
                     }
                 }
             }
+        }
+    }
+    func refreshDisplayPresentation() {
+        // Preview models have no receiver and must never register a real media
+        // session. A live paused session still needs immediate preference edits.
+        guard receiver != nil, let state = snapshot, !busy, !sleeping else { return }
+        systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, force: true)
+    }
+    private func updateLyricsAvailability() {
+        let available = LyricsAutoVisibility.resolve(hasLyrics: !lyrics.lines.isEmpty, loading: lyricsLoading,
+                                                     previouslyVisible: lyricsAvailable)
+        if lyricsAvailable != available { lyricsAvailable = available }
+    }
+    private func updateLyrics(_ state: Snapshot) {
+        // Publish availability after the whole state update so a new lyric
+        // payload does not briefly collapse the player while it is parsed.
+        defer { updateLyricsAvailability() }
+        // Lyrics are transient media state. Parse only changed text, away from
+        // the main/audio threads, and discard work belonging to an old track.
+        let key = state.controlsAvailable ? (state.trackId.isEmpty ? state.title : state.trackId) : ""
+        let source = state.controlsAvailable ? state.lyricsText : ""
+        let changedTrack = key != lyricsKey
+        let waitingForMetadata = changedTrack && state.controlsAvailable && source.isEmpty && lyricsAvailable
+        if changedTrack || !state.controlsAvailable {
+            lyricsTask?.cancel(); lyricsTask = nil; lyricsKey = key; lyricsSource = ""
+            lyrics = LyricsDocument(""); lyricsLoading = false
+        }
+        if waitingForMetadata {
+            // A track's identity can arrive before its lyric metadata. Clear the
+            // old words immediately, but retain the visible pane for at most two
+            // seconds. Repeated empty updates must not restart that deadline.
+            lyricsLoading = true
+            lyricsTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 2_000_000_000) }
+                catch { return }
+                guard !Task.isCancelled, let self, !self.terminating,
+                      self.lyricsKey == key, self.lyricsSource.isEmpty else { return }
+                self.lyricsTask = nil; self.lyricsLoading = false
+                self.updateLyricsAvailability()
+            }
+            return
+        }
+        // This guard follows the new-track waiting branch: both empty strings
+        // compare equal even when a fresh metadata grace period is needed.
+        guard source != lyricsSource else { return }
+        lyricsSource = source; lyricsTask?.cancel(); lyricsTask = nil
+        guard !source.isEmpty else { lyrics = LyricsDocument(""); lyricsLoading = false; return }
+        lyricsLoading = true
+        lyricsTask = Task { [weak self] in
+            let parsed = await Task.detached(priority: .utility) { LyricsDocument(source) }.value
+            guard !Task.isCancelled, let self, !self.terminating,
+                  self.lyricsKey == key, self.lyricsSource == source else { return }
+            self.lyrics = parsed; self.lyricsLoading = false
+            self.updateLyricsAvailability()
         }
     }
     private func clearArtwork() {
@@ -438,7 +509,7 @@ final class ReceiverModel: ObservableObject {
     }
     func openLogs() { NSWorkspace.shared.open(root.appendingPathComponent("logs")) }
     func terminate(completion: @escaping @MainActor @Sendable () -> Void) {
-        terminating = true; artworkTask?.cancel(); volumeAckTask?.cancel()
+        terminating = true; artworkTask?.cancel(); volumeAckTask?.cancel(); lyricsTask?.cancel()
         seekExpiryTask?.cancel(); playbackTimeline.cancel(); systemMedia.shutdown()
         timer?.invalidate(); timer = nil; wantsReceiving = false
         // AppKit must receive the termination reply after terminateLater returns,

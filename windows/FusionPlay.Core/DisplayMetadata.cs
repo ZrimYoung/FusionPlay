@@ -195,6 +195,19 @@ public sealed class DisplayMetadataCache
 {
     private (string Title, string Artist, string Album, string Lyrics)? previous;
     private DisplayMetadata? result;
+    public DisplayMetadata Resolve(ReceiverSnapshot state)
+    {
+        // A missing projection uses the legacy resolver. An explicit empty
+        // title means the sender supplied a lyric without a verified song name.
+        if (state.DisplayTitle is null && state.DisplayArtist is null && state.DisplayAlbum is null)
+            return Resolve(state.Title, state.Artist, state.Album, state.LyricsText);
+
+        string title = state.DisplayTitle ?? state.Title;
+        string artist = state.DisplayArtist ?? state.Artist;
+        string album = state.DisplayAlbum ?? state.Album;
+        return new(title, artist, album, title != state.Title || artist != state.Artist || album != state.Album);
+    }
+
     public DisplayMetadata Resolve(string title, string artist, string album, string lyricsText)
     {
         var input = (title, artist, album, lyricsText);

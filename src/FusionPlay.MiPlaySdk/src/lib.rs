@@ -380,6 +380,8 @@ pub const fn host_platform() -> &'static str {
         "Windows"
     } else if cfg!(target_os = "macos") {
         "macOS"
+    } else if cfg!(target_os = "ios") {
+        "iOS"
     } else if cfg!(target_os = "android") {
         "Android"
     } else {
@@ -392,6 +394,8 @@ pub const fn default_model() -> &'static str {
         "Windows PC"
     } else if cfg!(target_os = "macos") {
         "Mac"
+    } else if cfg!(target_os = "ios") {
+        "iPhone / iPad"
     } else if cfg!(target_os = "android") {
         "Android TV"
     } else {

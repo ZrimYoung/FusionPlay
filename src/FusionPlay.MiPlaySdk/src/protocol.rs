@@ -23,6 +23,9 @@ use std::time::{Duration, Instant};
 use crate::MiPlayDeviceType;
 use crate::media::{EventEmitter, PlaybackGate, StreamKeys, spawn_rtsp_receiver};
 
+mod track_metadata;
+use track_metadata::TrackMetadata;
+
 const CONTROL_PORT: u16 = 8899;
 const PROTOCOL_VERSION: &str = "2.1.5071614";
 
@@ -83,6 +86,9 @@ const FIRST_ENCRYPTED_NOTIFICATION_SEQUENCE: u32 = 8;
 // Keep a bounded, one-shot attribution window without extending confirmation.
 const SEEK_JUMP_GUARD_WINDOW: Duration = Duration::from_secs(10);
 const MAX_RECENT_SEEK_JUMPS: usize = 16;
+// A companion may finish sending metadata just before OPEN on another socket.
+// Bound how long an inactive source can leave a pending projection behind.
+const PENDING_METADATA_WINDOW: Duration = Duration::from_secs(15);
 
 // Xiaomi encodes the standalone-player command family in the high byte of
 // the 16-bit command id. Keeping the namespace separate is important: for
@@ -199,10 +205,27 @@ struct RemoteEffectState {
     track_revision: u64,
     position_revision: u64,
     track_identity: Option<String>,
-    track_lyrics: String,
+    active_metadata: Option<(u64, SourceMetadata)>,
+    pending_metadata: Option<(Instant, SourceMetadata)>,
     last_position: Option<(u64, u64)>,
     pending: HashMap<u64, PendingRemoteEffect>,
     recent_seek_jumps: Vec<RecentSeekJump>,
+}
+
+struct SourceMetadata {
+    source: IpAddr,
+    track_id: Option<String>,
+    projection: TrackMetadata,
+}
+
+impl SourceMetadata {
+    fn new(source: IpAddr) -> Self {
+        Self {
+            source,
+            track_id: None,
+            projection: TrackMetadata::default(),
+        }
+    }
 }
 
 struct RecentSeekJump {
@@ -341,6 +364,11 @@ impl ControlHub {
         }
         if let Ok(mut routes) = self.control_routes.lock() {
             routes.clear();
+        }
+        if let Ok(mut effects) = self.remote_effects.lock() {
+            effects.active_metadata = None;
+            effects.pending_metadata = None;
+            effects.track_identity = None;
         }
     }
 
@@ -561,10 +589,24 @@ impl ControlHub {
             playback_gate: playback_gate.clone(),
             next_notification_sequence,
         });
-        drop(active);
         if let Ok(mut effects) = self.remote_effects.lock() {
-            effects.track_identity = None;
-            effects.track_lyrics.clear();
+            let pending = match effects.pending_metadata.take() {
+                Some((updated, _)) if updated.elapsed() >= PENDING_METADATA_WINDOW => None,
+                Some((_, metadata)) if metadata.source == remote_ip => Some(metadata),
+                pending => {
+                    effects.pending_metadata = pending;
+                    None
+                }
+            };
+            let previous = effects
+                .active_metadata
+                .take()
+                .and_then(|(_, metadata)| (metadata.source == remote_ip).then_some(metadata));
+            let metadata = pending
+                .or(previous)
+                .unwrap_or_else(|| SourceMetadata::new(remote_ip));
+            effects.track_identity = metadata.track_id.clone();
+            effects.active_metadata = Some((id, metadata));
             effects.last_position = None;
             effects.recent_seek_jumps.clear();
         }
@@ -621,47 +663,61 @@ impl ControlHub {
         true
     }
 
-    fn observe_media_info(&self, id: u64, body: &[u8]) {
-        let Some(value) = media_info_value(body) else {
-            return;
-        };
-        let lyrics = media_lyrics(&value);
+    fn project_media_info(&self, id: u64, source: IpAddr, body: &[u8]) -> Option<Value> {
+        let mut event = media_info_event(body)?;
         let completions = {
             let Ok(mut effects) = self.remote_effects.lock() else {
-                return;
+                return Some(event);
             };
-            // Some music apps publish the active lyric as DISPLAY_TITLE and
-            // HyperOS copies it to mTitle. Caption-only updates are not tracks.
-            let title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
-            let cached_lyrics = lyrics.is_none()
-                && (is_lyric_caption(title, &effects.track_lyrics)
-                    || lyric_header(&effects.track_lyrics, "ti") == Some(title));
-            let omitted_id =
-                json_string_field(&value, &["mAudioId", "audioId", "mId", "id", "mediaId"])
-                    .is_none();
-            let same_lyrics = lyrics
-                .as_ref()
-                .is_some_and(|text| text == &effects.track_lyrics);
-            let identity = if omitted_id && (cached_lyrics || same_lyrics) {
-                effects.track_identity.clone()
+            let active_session =
+                effects
+                    .active_metadata
+                    .as_ref()
+                    .and_then(|(active_id, metadata)| {
+                        (*active_id == id || source == metadata.source).then_some(*active_id)
+                    });
+            let metadata = if let Some((_, active)) = effects.active_metadata.as_mut()
+                && active_session.is_some()
+            {
+                active
             } else {
-                media_track_id(&value, lyrics.as_deref()).0
+                let now = Instant::now();
+                if !effects
+                    .pending_metadata
+                    .as_ref()
+                    .is_some_and(|(updated, metadata)| {
+                        metadata.source == source
+                            && now.duration_since(*updated) < PENDING_METADATA_WINDOW
+                    })
+                {
+                    effects.pending_metadata = Some((now, SourceMetadata::new(source)));
+                }
+                let (updated, pending) = effects.pending_metadata.as_mut().unwrap();
+                *updated = now;
+                pending
             };
-            let changed = identity
-                .as_ref()
-                .is_some_and(|identity| effects.track_identity.as_ref() != Some(identity));
+            metadata.projection.apply(&mut event);
+            if let Some(identity) = event["track_id"].as_str().filter(|id| !id.is_empty()) {
+                metadata.track_id = Some(identity.to_owned());
+            }
+            let Some(active_session) = active_session else {
+                return Some(event);
+            };
+            let identity = metadata.track_id.clone();
+            let changed = identity.is_some()
+                && match event["track_transition"].as_str() {
+                    Some("new") => true,
+                    Some("same") => false,
+                    _ => identity != effects.track_identity,
+                };
+            effects.track_identity = identity;
             if changed {
-                effects.track_identity = identity;
-                effects.track_lyrics.clear();
                 effects.track_revision = effects.track_revision.wrapping_add(1);
                 effects.last_position = None;
                 effects.recent_seek_jumps.clear();
             }
-            if let Some(lyrics) = lyrics {
-                effects.track_lyrics = lyrics;
-            }
             let revision = effects.track_revision;
-            drain_matching_effects(&mut effects, id, |expected| {
+            drain_matching_effects(&mut effects, active_session, |expected| {
                 matches!(
                     expected,
                     ExpectedRemoteEffect::TrackChange { baseline_revision }
@@ -670,6 +726,7 @@ impl ControlHub {
             })
         };
         complete_remote_effects(completions, true);
+        Some(event)
     }
 
     fn observe_position(&self, id: u64, position_ms: u64) -> (bool, bool) {
@@ -677,6 +734,11 @@ impl ControlHub {
             let Ok(mut effects) = self.remote_effects.lock() else {
                 return (false, false);
             };
+            if let Some((active_id, metadata)) = effects.active_metadata.as_mut()
+                && *active_id == id
+            {
+                metadata.projection.observe_position(position_ms);
+            }
             let advancing = effects
                 .last_position
                 .is_some_and(|(session_id, previous_ms)| {
@@ -776,6 +838,20 @@ impl ControlHub {
             .lock()
             .ok()
             .map(|mut effects| {
+                if effects
+                    .active_metadata
+                    .as_ref()
+                    .is_some_and(|(active_id, _)| *active_id == id)
+                {
+                    effects.active_metadata = None;
+                    effects.track_identity = None;
+                }
+                if effects
+                    .last_position
+                    .is_some_and(|(session_id, _)| session_id == id)
+                {
+                    effects.last_position = None;
+                }
                 let matching: Vec<u64> = effects
                     .pending
                     .iter()
@@ -790,13 +866,6 @@ impl ControlHub {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if let Ok(mut effects) = self.remote_effects.lock()
-            && effects
-                .last_position
-                .is_some_and(|(session_id, _)| session_id == id)
-        {
-            effects.last_position = None;
-        }
         complete_remote_effects(completions, false);
     }
 
@@ -1297,16 +1366,10 @@ fn run_session(
                         frame.sequence,
                         Vec::new(),
                     ))?;
-                    if let Some(active_session_id) =
-                        hub.active_source_session_id(session_id, remote.ip())
-                    {
-                        hub.observe_media_info(active_session_id, &frame.body);
+                    // Metadata may arrive on a companion socket before OPEN.
+                    if let Some(event) = hub.project_media_info(session_id, remote.ip(), &frame.body) {
+                        events(event);
                     }
-                    // Track metadata is often sent on a companion socket
-                    // before the replacement media OPEN reaches us. Always
-                    // publish it so the bridge can cache it for the next
-                    // session instead of leaving the previous song visible.
-                    emit_media_info(&frame.body, &events);
                 }
                 _ => {
                     events(json!({
@@ -1735,21 +1798,11 @@ fn run_session(
                     frame.sequence,
                     Vec::new(),
                 ))?;
-                if let Some(active_session_id) =
-                    hub.active_source_session_id(session_id, remote.ip())
-                {
-                    // HyperOS commonly opens one media route and publishes
-                    // metadata on a companion control socket from the same
-                    // phone. Treat both sockets as one source so a track
-                    // change cannot be filtered merely because its SET_MEDIA_INFO
-                    // arrived on the non-OPEN session.
-                    hub.observe_media_info(active_session_id, &frame.body);
+                // Both metadata command families share the same projection.
+                // Publish pre-OPEN metadata so consumers can cache it for the session.
+                if let Some(event) = hub.project_media_info(session_id, remote.ip(), &frame.body) {
+                    events(event);
                 }
-                // Xiaomi may publish the next track before its replacement
-                // OPEN/session state. Forward the metadata independently of
-                // the current media socket; XiaomiPlaybackReducer will bind
-                // it to the active or immediately pending session in order.
-                emit_media_info(&frame.body, &events);
             }
             GET_MEDIA_INFO => {
                 // MiPCAudio does not answer GetMediaInfo with command 0x15.
@@ -2424,12 +2477,12 @@ fn media_track_id(value: &Value, lyrics: Option<&str>) -> (Option<String>, &'sta
     (metadata_identity(title, artist, album), "metadata")
 }
 
-fn emit_media_info(body: &[u8], events: &EventEmitter) {
-    let Some(value) = media_info_value(body) else {
-        return;
-    };
+fn media_info_event(body: &[u8]) -> Option<Value> {
+    let value = media_info_value(body)?;
     let lyrics = media_lyrics(&value);
     let raw_title = json_string_field(&value, &["mTitle", "title"]).unwrap_or("");
+    let raw_artist = json_string_field(&value, &["mArtist", "artist"]).unwrap_or("");
+    let raw_album = json_string_field(&value, &["mAlbum", "album"]).unwrap_or("");
     let caption = lyrics
         .as_deref()
         .is_some_and(|lyrics| is_lyric_caption(raw_title, lyrics));
@@ -2448,8 +2501,7 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
     } else {
         None
     }
-    .or_else(|| json_string_field(&value, &["mArtist", "artist"]))
-    .unwrap_or("");
+    .unwrap_or(raw_artist);
     let album = if caption {
         lyrics
             .as_deref()
@@ -2457,8 +2509,7 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
     } else {
         None
     }
-    .or_else(|| json_string_field(&value, &["mAlbum", "album"]))
-    .unwrap_or("");
+    .unwrap_or(raw_album);
     let duration_ms = json_u64_field(
         &value,
         &["mDuration", "duration", "durationMs", "duration_ms"],
@@ -2478,7 +2529,7 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
     )
     .map(|artwork| Value::String(artwork.to_owned()))
     .unwrap_or(Value::Null);
-    events(json!({
+    Some(json!({
         "event": "media_info",
         "source": "xiaomi",
         "track_id": track_id,
@@ -2487,6 +2538,9 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
         "title": title,
         "artist": artist,
         "album": album,
+        "raw_title": raw_title,
+        "raw_artist": raw_artist,
+        "raw_album": raw_album,
         "duration_ms": duration_ms,
         "position_ms": json_u64_field(
             &value,
@@ -2498,7 +2552,14 @@ fn emit_media_info(body: &[u8], events: &EventEmitter) {
             &value,
             &["mMetaChangeType", "metaChangeType"],
         ),
-    }));
+    }))
+}
+
+#[cfg(test)]
+fn emit_media_info(body: &[u8], events: &EventEmitter) {
+    if let Some(event) = media_info_event(body) {
+        events(event);
+    }
 }
 
 fn decode_playback_state(body: &[u8]) -> Option<bool> {
@@ -2937,7 +2998,11 @@ mod tests {
             sender,
             control_notification_sequence(),
         );
-        hub.observe_media_info(17, br#"{"mAudioId":"track-a","mTitle":"Song A"}"#);
+        hub.project_media_info(
+            17,
+            Ipv4Addr::LOCALHOST.into(),
+            br#"{"mAudioId":"track-a","mTitle":"Song A"}"#,
+        );
         hub.observe_position(17, 1_000);
         (hub, receiver)
     }
@@ -2983,7 +3048,7 @@ mod tests {
         });
         outgoing.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_eq!(hub.remote_effects.lock().unwrap().pending.len(), 1);
-        hub.observe_media_info(17, br#"{"mAudioId":"track-b","mTitle":"Song B"}"#);
+        hub.project_media_info(17, Ipv4Addr::LOCALHOST.into(), br#"{"mAudioId":"track-b","mTitle":"Song B"}"#);
         hub.observe_position(17, 12_345);
         // Before this regression fix, that new track's matching position drained
         // the old seek and falsely reported confirmation immediately.
@@ -3807,8 +3872,9 @@ mod tests {
     fn lyric_caption_refreshes_do_not_confirm_next_or_invalidate_seek_track() {
         let (hub, _) = seek_confirmation_fixture();
         let before = hub.remote_effects.lock().unwrap().track_revision;
-        hub.observe_media_info(
+        hub.project_media_info(
             17,
+            Ipv4Addr::LOCALHOST.into(),
             br#"{"mAudioId":"track-a","mTitle":"A changing caption"}"#,
         );
         assert_eq!(hub.remote_effects.lock().unwrap().track_revision, before);
@@ -3817,21 +3883,70 @@ mod tests {
             Some((17, 1_000))
         );
 
-        hub.observe_media_info(17, br#"{"mTitle":"First caption","lyrics":"[ti:Synthetic]\n[00:01]First caption\n[00:03]Second caption"}"#);
+        hub.project_media_info(17, Ipv4Addr::LOCALHOST.into(), br#"{"mTitle":"First caption","lyrics":"[ti:Synthetic]\n[00:01]First caption\n[00:03]Second caption"}"#);
         let before = hub.remote_effects.lock().unwrap().track_revision;
         let identity = hub.remote_effects.lock().unwrap().track_identity.clone();
-        hub.observe_media_info(17, br#"{"mTitle":"Second caption","mLrc":""}"#);
+        let event = hub
+            .project_media_info(
+                17,
+                Ipv4Addr::LOCALHOST.into(),
+                br#"{"mTitle":"Second caption","mLrc":""}"#,
+            )
+            .unwrap();
+        assert_eq!(event["track_id"].as_str(), identity.as_deref());
         assert_eq!(hub.remote_effects.lock().unwrap().track_revision, before);
         assert_eq!(hub.remote_effects.lock().unwrap().track_identity, identity);
-        assert!(!hub.remote_effects.lock().unwrap().track_lyrics.is_empty());
-        hub.observe_media_info(
+        hub.project_media_info(
             17,
+            Ipv4Addr::LOCALHOST.into(),
             br#"{"mTitle":"Next caption","lyrics":"[ti:Next Synthetic]\n[00:01]Next caption"}"#,
         );
         assert_eq!(
             hub.remote_effects.lock().unwrap().track_revision,
             before + 1
         );
+    }
+
+    #[test]
+    fn pre_open_metadata_follows_its_source_across_companion_and_media_routes() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let other = Ipv4Addr::new(127, 0, 0, 2).into();
+        let initial = hub
+            .project_media_info(
+                41,
+                source,
+                br#"{"mAudioId":"song-a","mTitle":"First caption","mArtist":"Raw Artist","mAlbum":"Raw Album","lyrics":"[ti:Known title]\n[00:01]First caption\n[00:03]Second caption"}"#,
+            )
+            .unwrap();
+        assert_eq!(initial["raw_title"], "First caption");
+        assert_eq!(initial["raw_artist"], "Raw Artist");
+        assert_eq!(initial["raw_album"], "Raw Album");
+        assert_eq!(initial["track_id"], "song-a");
+
+        let (outgoing, _) = mpsc::channel();
+        hub.activate(42, source, outgoing, control_notification_sequence());
+        let revision = hub.remote_effects.lock().unwrap().track_revision;
+        let caption = br#"{"mTitle":"Second caption"}"#;
+        let companion = hub.project_media_info(41, source, caption).unwrap();
+        assert_eq!(companion["track_id"], "song-a");
+        assert_eq!(companion["display_title"], "Known title");
+
+        let foreign = hub.project_media_info(43, other, caption).unwrap();
+        assert_ne!(foreign["track_id"], "song-a");
+        assert_ne!(foreign["display_title"], "Known title");
+        assert_eq!(hub.remote_effects.lock().unwrap().track_revision, revision);
+
+        let (outgoing, _) = mpsc::channel();
+        hub.activate(44, source, outgoing, control_notification_sequence());
+        assert_eq!(
+            hub.project_media_info(41, source, caption).unwrap()["track_id"],
+            "song-a"
+        );
+        hub.deactivate(44);
+        let disconnected = hub.project_media_info(41, source, caption).unwrap();
+        assert_ne!(disconnected["track_id"], "song-a");
+        assert_ne!(disconnected["display_title"], "Known title");
     }
 
     #[test]
