@@ -7,6 +7,9 @@ import UIKit
 struct ReceiverRootView: View {
     @ObservedObject var model: ReceiverModel
     @AppStorage("showLyrics") private var showLyrics = false
+    @AppStorage("narrowPlayerPaging") private var narrowPlayerPaging = false
+    @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
+    @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
     @AppStorage("playerShowsProgress") private var showProgress = true
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
     @AppStorage("playerToolbarAlwaysVisible") private var toolbarAlwaysVisible = false
@@ -19,6 +22,9 @@ struct ReceiverRootView: View {
     @State private var toolbarRevealed = true
     @State private var toolbarHideTask: Task<Void, Never>?
     @State private var playerMode: PlayerPresentationLayout.Mode?
+    @State private var selectedPage = PlayerSection.player
+
+    private var pagingEnabled: Bool { UIDevice.current.userInterfaceIdiom == .pad && narrowPlayerPaging }
 
     private var hasTrack: Bool {
         guard let state = model.snapshot, state.controlsAvailable else { return false }
@@ -45,8 +51,9 @@ struct ReceiverRootView: View {
     var body: some View {
         GeometryReader { proxy in
             let headerGutter = PlayerPresentationLayout.horizontalInset(for: proxy.size.width)
+            let paged = PlayerPresentationLayout.usesNarrowPaging(width: proxy.size.width, enabled: pagingEnabled)
             VStack(spacing: 0) {
-                header.padding(.horizontal, headerGutter)
+                header(paged: paged).padding(.horizontal, headerGutter)
                 GeometryReader { content in
                     if hasTrack {
                         let layout = PlayerPresentationLayout(
@@ -54,10 +61,11 @@ struct ReceiverRootView: View {
                             showsLyrics: showLyrics,
                             accessibilitySize: dynamicTypeSize.isAccessibilitySize,
                             showsProgress: showProgress,
-                            showsPlaybackControls: showPlaybackControls
+                            showsPlaybackControls: showPlaybackControls,
+                            pagingEnabled: pagingEnabled
                         )
                         ZStack {
-                            playerContent(layout, height: content.size.height)
+                            playerContent(layout, size: content.size)
                         }
                         .animation(displayAnimation, value: layout.mode)
                         .animation(displayAnimation, value: showLyrics)
@@ -84,7 +92,10 @@ struct ReceiverRootView: View {
         .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
         .onChange(of: hasTrack) { _, active in
-            if !active { showingVolume = false }
+            if !active {
+                showingVolume = false
+                selectedPage = .player
+            }
         }
         .onDisappear { toolbarHideTask?.cancel() }
     }
@@ -100,60 +111,119 @@ struct ReceiverRootView: View {
         }
     }
 
-    private enum PlayerSection { case player, lyrics }
+    private enum PlayerSection: Hashable {
+        case player, lyrics
 
-    private func playerContent(_ layout: PlayerPresentationLayout, height: CGFloat) -> some View {
+        var label: LocalizedStringKey {
+            switch self {
+            case .player: "播放页"
+            case .lyrics: "歌词页"
+            }
+        }
+    }
+
+    private var pageSelection: Binding<PlayerSection?> {
+        Binding(get: { selectedPage }, set: { if let page = $0 { selectedPage = page } })
+    }
+
+    private func playerContent(_ layout: PlayerPresentationLayout, size: CGSize) -> some View {
+        let paged = layout.mode == .paged
         let lyricsBesidePlayer = layout.mode == .artworkAndLyrics
         let controlsBesideCover = layout.mode == .artworkAndControls
         let playbackWidth = lyricsBesidePlayer ? layout.leadingWidth : layout.contentWidth
-        let viewportHeight = max(0, height - layout.verticalInset * 2)
+        let pageHeight = max(0, size.height)
+        let viewportHeight = max(0, pageHeight - layout.verticalInset * 2)
         let lyricSize = CGSize(
             width: lyricsBesidePlayer ? max(0, layout.contentWidth - layout.leadingWidth - layout.gap) : layout.contentWidth,
-            height: lyricsBesidePlayer ? viewportHeight : layout.lyricsHeight
+            height: paged || lyricsBesidePlayer ? viewportHeight : layout.lyricsHeight
         )
-        let panelLayout = lyricsBesidePlayer
-            ? AnyLayout(HStackLayout(alignment: .center, spacing: layout.gap))
+        let panelLayout = paged || lyricsBesidePlayer
+            ? AnyLayout(HStackLayout(alignment: .center, spacing: paged ? 0 : layout.gap))
             : AnyLayout(VStackLayout(alignment: .center, spacing: 30))
         let controlsLayout = controlsBesideCover
             ? AnyLayout(HStackLayout(alignment: .center, spacing: layout.gap))
             : AnyLayout(VStackLayout(alignment: .center, spacing: lyricsBesidePlayer ? 22 : 24))
+        let playback = controlsLayout {
+            cover(side: layout.coverSide)
+                .frame(width: controlsBesideCover ? layout.leadingWidth : nil)
+            playbackDetails(paged: paged)
+                .frame(maxWidth: controlsBesideCover ? 420 : .infinity)
+                .frame(maxWidth: .infinity)
+        }
+        .frame(width: playbackWidth)
 
         return ScrollViewReader { reader in
-            ScrollView {
+            ScrollView(paged ? .horizontal : .vertical) {
                 panelLayout {
-                    controlsLayout {
-                        cover(side: layout.coverSide)
-                            .frame(width: controlsBesideCover ? layout.leadingWidth : nil)
-                        playbackDetails
-                            .frame(maxWidth: controlsBesideCover ? 420 : .infinity)
-                            .frame(maxWidth: .infinity)
+                    Group {
+                        if paged {
+                            ScrollView {
+                                playback
+                                    .frame(maxWidth: .infinity)
+                                    .frame(minHeight: viewportHeight)
+                                    .padding(.vertical, layout.verticalInset)
+                            }
+                            .scrollBounceBehavior(.basedOnSize)
+                            .frame(width: size.width, height: pageHeight)
+                        } else {
+                            playback
+                        }
                     }
-                    .frame(width: playbackWidth)
                     .id(PlayerSection.player)
 
-                    if showLyrics {
-                        lyricsPane
+                    if paged || showLyrics {
+                        lyricPanel(paged: paged)
                             .frame(width: lyricSize.width, height: lyricSize.height)
+                            .padding(.vertical, paged ? layout.verticalInset : 0)
+                            .frame(width: paged ? size.width : nil, height: paged ? pageHeight : nil)
                             .animation(nil, value: lyricSize)
                             .id(PlayerSection.lyrics)
                             .transition(lyricPanelTransition)
                     }
                 }
-                .frame(width: layout.contentWidth)
+                .scrollTargetLayout(isEnabled: paged)
+                .frame(width: paged ? nil : layout.contentWidth)
                 .frame(maxWidth: .infinity)
-                .frame(minHeight: viewportHeight)
-                .padding(.vertical, layout.verticalInset)
+                .frame(minHeight: paged ? pageHeight : viewportHeight)
+                .padding(.vertical, paged ? 0 : layout.verticalInset)
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .scrollBounceBehavior(.basedOnSize, axes: paged ? [.horizontal, .vertical] : .vertical)
+            .scrollIndicators(paged ? .hidden : .automatic, axes: .horizontal)
+            .modifier(PlayerScrollBehavior(paged: paged))
+            .scrollPosition(id: paged ? pageSelection : .constant(nil), anchor: .leading)
             .onChange(of: layout.mode, initial: true) { previous, current in
                 playerMode = current
-                guard previous == .artworkAndLyrics, current == .stacked, showLyrics else { return }
-                scrollPlayer(reader, towardLyrics: true)
+                guard current == .stacked, showLyrics else { return }
+                if previous == .artworkAndLyrics || (previous == .paged && selectedPage == .lyrics) {
+                    scrollPlayer(reader, towardLyrics: true)
+                }
             }
             .onChange(of: showLyrics) { _, shown in
                 guard layout.mode == .stacked else { return }
                 scrollPlayer(reader, towardLyrics: shown)
             }
+        }
+    }
+
+    private func lyricPanel(paged: Bool) -> some View {
+        let showsHeader = paged && (lyricsPageShowsArtwork || lyricsPageShowsTrackInfo)
+        return VStack(spacing: showsHeader ? 12 : 0) {
+            if showsHeader {
+                CompactLyricsTrackHeader(
+                    artwork: model.artwork,
+                    title: model.displayTitle,
+                    subtitle: model.displaySubtitle,
+                    showsArtwork: lyricsPageShowsArtwork,
+                    showsTrackInfo: lyricsPageShowsTrackInfo
+                )
+            }
+            lyricsPane
+        }
+    }
+
+    private func selectPage(_ page: PlayerSection) {
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.24, extraBounce: 0.02)) {
+            selectedPage = page
         }
     }
 
@@ -167,8 +237,11 @@ struct ReceiverRootView: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 6) {
+    private func header(paged: Bool) -> some View {
+        let lyricsSelected = paged ? selectedPage == .lyrics : showLyrics
+        let lyricAction = paged ? (lyricsSelected ? PlayerSection.player.label : PlayerSection.lyrics.label)
+            : (lyricsSelected ? LocalizedStringKey("隐藏歌词") : LocalizedStringKey("显示歌词"))
+        return HStack(spacing: 6) {
             if !hasTrack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("FusionPlay").font(.headline.weight(.bold))
@@ -178,10 +251,14 @@ struct ReceiverRootView: View {
             Spacer(minLength: 0)
             HStack(spacing: 6) {
                 if hasTrack {
-                    headerButton(showLyrics ? "quote.bubble.fill" : "quote.bubble",
-                                 label: showLyrics ? "隐藏歌词" : "显示歌词", selected: showLyrics) {
+                    headerButton(lyricsSelected ? "quote.bubble.fill" : "quote.bubble",
+                                 label: lyricAction, selected: lyricsSelected) {
                         revealToolbar()
-                        withAnimation(displayAnimation) { showLyrics.toggle() }
+                        if paged {
+                            selectPage(lyricsSelected ? .player : .lyrics)
+                        } else {
+                            withAnimation(displayAnimation) { showLyrics.toggle() }
+                        }
                     }
                     ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
                 }
@@ -304,11 +381,11 @@ struct ReceiverRootView: View {
         .padding(.vertical, 10)
     }
 
-    private var playbackDetails: some View {
+    private func playbackDetails(paged: Bool) -> some View {
         VStack(alignment: .leading, spacing: 13) {
             PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
             if showProgress {
-                ReceiverProgressView(model: model)
+                ReceiverProgressView(model: model, prioritizesScrubbing: paged)
                     .tint(.white)
                     .transition(.opacity)
             }
@@ -361,20 +438,26 @@ struct ReceiverRootView: View {
         .frame(maxWidth: 326)
         .frame(maxWidth: .infinity)
         .disabled(!model.canControl)
-        .opacity(model.canControl ? 1 : 0.45)
+        .opacity(model.snapshot?.controlsAvailable == true ? 1 : 0.45)
     }
 
     private func transportButton(_ image: String, label: LocalizedStringKey, prominent: Bool = false,
                                  action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: image)
-                .font(.system(size: prominent ? 27 : 22, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: prominent ? 62 : 46, height: prominent ? 62 : 46)
-                .background(.white.opacity(prominent ? 0.14 : 0), in: Circle())
-                .contentShape(Rectangle())
+            ZStack {
+                Image(systemName: image)
+                    .font(.system(size: prominent ? 27 : 22, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .id(image)
+                    .transition(.blurReplace(.downUp))
+            }
+            .animation(prominent && !reduceMotion ? .easeInOut(duration: 0.24) : nil, value: image)
+            .frame(width: prominent ? 62 : 46, height: prominent ? 62 : 46)
+            .background(.white.opacity(prominent ? 0.14 : 0), in: Circle())
+            .contentShape(Rectangle())
+            .accessibilityHidden(true)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TransportButtonStyle())
         .frame(maxWidth: .infinity)
         .accessibilityLabel(Text(label))
     }
@@ -386,6 +469,36 @@ struct ReceiverRootView: View {
                 .transition(.opacity)
         }
         .animation(displayAnimation, value: trackKey)
+    }
+}
+
+private struct TransportButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+    }
+}
+
+private struct PlayerScrollBehavior: ViewModifier {
+    let paged: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            let behavior = paged
+                ? AnyScrollTargetBehavior(PagingScrollTargetBehavior())
+                : AnyScrollTargetBehavior(CompatiblePlayerPagingBehavior(enabled: false))
+            content.scrollTargetBehavior(behavior)
+        } else {
+            content.scrollTargetBehavior(CompatiblePlayerPagingBehavior(enabled: paged))
+        }
+    }
+}
+
+private struct CompatiblePlayerPagingBehavior: ScrollTargetBehavior {
+    let enabled: Bool
+
+    func updateTarget(_ target: inout ScrollTarget, context: TargetContext) {
+        guard enabled else { return }
+        PagingScrollTargetBehavior().updateTarget(&target, context: context)
     }
 }
 

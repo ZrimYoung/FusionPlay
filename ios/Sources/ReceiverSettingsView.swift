@@ -8,6 +8,9 @@ struct ReceiverSettingsView: View {
     @AppStorage("playerShowsProgress") private var showProgress = true
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
     @AppStorage("showLyrics") private var showLyrics = false
+    @AppStorage("narrowPlayerPaging") private var narrowPlayerPaging = false
+    @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
+    @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
     @AppStorage("uiCorrectLyricTitles") private var correctLyricTitles = false
     @AppStorage("playerToolbarAlwaysVisible") private var toolbarAlwaysVisible = false
     @AppStorage("staggerLyricMotion") private var staggerLyricMotion = true
@@ -149,11 +152,21 @@ struct ReceiverSettingsView: View {
                 Toggle("始终显示顶部按钮", isOn: $toolbarAlwaysVisible)
             }
             Section("歌词") {
-                Toggle("显示歌词", isOn: $showLyrics)
+                let visibility: LocalizedStringKey = isPad && narrowPlayerPaging ? "非分页时显示歌词" : "显示歌词"
+                Toggle(visibility, isOn: $showLyrics)
                 Toggle("修正歌词标题", isOn: $correctLyricTitles)
                     .onChange(of: correctLyricTitles) { _, _ in model.refreshDisplayPresentation() }
                 Toggle("歌词交错动效", isOn: $staggerLyricMotion)
                 if staggerLyricMotion { lyricStaggerControl }
+            }
+            if isPad {
+                Section("窄窗布局") {
+                    Toggle("窄窗左右分页", isOn: $narrowPlayerPaging)
+                    if narrowPlayerPaging {
+                        Toggle("歌词页显示小封面", isOn: $lyricsPageShowsArtwork)
+                        Toggle("歌词页显示歌曲信息", isOn: $lyricsPageShowsTrackInfo)
+                    }
+                }
             }
         }
     }

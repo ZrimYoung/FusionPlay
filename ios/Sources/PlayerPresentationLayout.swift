@@ -3,9 +3,12 @@ import Foundation
 struct PlayerPresentationLayout {
     enum Mode: Equatable {
         case stacked
+        case paged
         case artworkAndControls
         case artworkAndLyrics
     }
+
+    private static let columnsMinimumWidth: CGFloat = 660
 
     let mode: Mode
     let gutter: CGFloat
@@ -20,12 +23,18 @@ struct PlayerPresentationLayout {
         min(64, max(18, width * 0.052), width / 4)
     }
 
+    static func usesNarrowPaging(width: CGFloat, enabled: Bool) -> Bool {
+        enabled && width > 0 && width < columnsMinimumWidth
+    }
+
     init(size: CGSize, showsLyrics: Bool, accessibilitySize: Bool,
-         showsProgress: Bool = true, showsPlaybackControls: Bool = true) {
+         showsProgress: Bool = true, showsPlaybackControls: Bool = true, pagingEnabled: Bool = false) {
         let width = max(0, size.width)
         let height = max(0, size.height)
-        let canUseColumns = width >= 660 && !accessibilitySize
-        if canUseColumns && showsLyrics && height >= 360 {
+        let canUseColumns = width >= Self.columnsMinimumWidth && !accessibilitySize
+        if Self.usesNarrowPaging(width: width, enabled: pagingEnabled) {
+            mode = .paged
+        } else if canUseColumns && showsLyrics && height >= 360 {
             mode = .artworkAndLyrics
         } else if canUseColumns && !showsLyrics && width >= height * 1.12 {
             mode = .artworkAndControls
@@ -42,7 +51,7 @@ struct PlayerPresentationLayout {
         let playbackHeight: CGFloat = 120 + (showsProgress ? 58 : 0) + (showsPlaybackControls ? 72 : 0)
 
         switch mode {
-        case .stacked:
+        case .stacked, .paged:
             contentWidth = min(availableWidth, 470)
             leadingWidth = contentWidth
             coverSide = min(contentWidth, 420, max(148, availableHeight - playbackHeight))

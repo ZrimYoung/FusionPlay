@@ -3,9 +3,15 @@ import SwiftUI
 @MainActor
 struct ReceiverProgressView: View {
     @ObservedObject var model: ReceiverModel
+    private let prioritizesScrubbing: Bool
     @Environment(\.layoutDirection) private var layoutDirection
     @GestureState private var trackingDrag = false
     @State private var drag: Drag?
+
+    init(model: ReceiverModel, prioritizesScrubbing: Bool = false) {
+        self.model = model
+        self.prioritizesScrubbing = prioritizesScrubbing
+    }
 
     private enum Drag {
         case vertical
@@ -26,7 +32,8 @@ struct ReceiverProgressView: View {
             let liveFraction = duration > 0 ? min(1, Double(current ?? 0) / Double(duration)) : 0
             let preview = drag?.fraction(for: identity)
             let displayedPosition = preview.map { Self.position(for: $0, duration: duration) } ?? current
-            let seekable = duration > 0 && model.canSeek
+            let hasSeekTarget = identity.connected && duration > 0 && current != nil
+            let seekable = hasSeekTarget && model.canSeek
 
             VStack(spacing: 0) {
                 GeometryReader { geometry in
@@ -38,14 +45,14 @@ struct ReceiverProgressView: View {
                         .accessibilityLabel("播放进度")
                         .accessibilityValue(Self.time(displayedPosition))
 
-                    if seekable {
-                        track
-                            .simultaneousGesture(
-                                scrubGesture(width: width, identity: identity)
-                                    .exclusively(before: SpatialTapGesture().onEnded { event in
-                                        seek(to: fraction(at: event.location.x, width: width), for: identity)
-                                    })
-                            )
+                    if hasSeekTarget {
+                        let interaction = scrubGesture(width: width, identity: identity)
+                            .exclusively(before: SpatialTapGesture().onEnded { event in
+                                seek(to: fraction(at: event.location.x, width: width), for: identity)
+                            })
+                        interactiveTrack(track, gesture: interaction)
+                            .allowsHitTesting(seekable)
+                            .disabled(!seekable)
                             .accessibilityAdjustableAction { adjust($0, for: identity) }
                     } else {
                         track
@@ -68,6 +75,15 @@ struct ReceiverProgressView: View {
                 if !tracking { drag = nil }
             }
             .onDisappear { drag = nil }
+        }
+    }
+
+    @ViewBuilder
+    private func interactiveTrack<Track: View, Interaction: Gesture>(_ track: Track, gesture: Interaction) -> some View {
+        if prioritizesScrubbing {
+            track.highPriorityGesture(gesture)
+        } else {
+            track.simultaneousGesture(gesture)
         }
     }
 
