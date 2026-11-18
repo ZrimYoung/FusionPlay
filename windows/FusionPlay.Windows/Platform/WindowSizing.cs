@@ -11,6 +11,10 @@ internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
     void SetPlayerLayout(bool lyricsVisible, bool fullScreen);
+    void SetLayoutTransition(bool active);
+    void RememberLyricsPaneHeight();
+    double PreferredLyricsHeight(double width);
+    event Action? MoveSizeStarted;
 }
 
 internal static class WindowSizing
@@ -114,7 +118,9 @@ internal static class WindowSizing
         private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
-        private bool lyricsVisible, fullScreen, expandLyrics;
+        private bool lyricsVisible, fullScreen, expandLyrics, layoutTransition;
+        private double? preferredLyricsPaneHeight;
+        public event Action? MoveSizeStarted;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
@@ -146,7 +152,7 @@ internal static class WindowSizing
             if (!fullScreen && message == 0x0112 && (argument & 0xFFF0) == 0xF030) return 0;
             if (message == 0x0231)
             {
-                inMoveSize = true;
+                BeginMoveSize();
                 if (GetClientRect(handle, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
             }
             if (message == 0x0214 && GetClientRect(handle, out var client))
@@ -189,7 +195,7 @@ internal static class WindowSizing
                 if (argument is 3 or 4 or 5) next.Top = next.Bottom - side - frame.Height; else next.Bottom = next.Top + side + frame.Height;
                 Marshal.StructureToPtr(next, pointer, false); return 1;
             }
-            if (message == 0x0232) { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
+            if (message == 0x0232) EndMoveSize();
             if (message == 0x0047 && !inMoveSize) QueueSettlement();
             if (message == 0x02E0) QueueSettlement(force: true);
             if (message == 0x0082) Dispose();
@@ -209,11 +215,34 @@ internal static class WindowSizing
         }
         private void EnteredMoveSize(InputNonClientPointerSource sender, EnteredMoveSizeEventArgs args)
         {
-            inMoveSize = true;
+            BeginMoveSize();
             if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
         }
+        private void BeginMoveSize()
+        {
+            if (inMoveSize) return;
+            inMoveSize = true; expandLyrics = false;
+            try { MoveSizeStarted?.Invoke(); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+        }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
-        { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
+            => EndMoveSize();
+        private void EndMoveSize()
+        {
+            inMoveSize = false; resizeStartWidth = resizeStartHeight = 0;
+            RememberLyricsPaneHeight(); QueueSettlement(); SetHover(CursorIsOverWindow());
+        }
+        public void RememberLyricsPaneHeight()
+        {
+            if (disposed || !lyricsVisible || fullScreen || inMoveSize || layoutTransition || settling
+                || window.AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Restored }
+                || !GetClientRect(hwnd, out var client)) return;
+            double scale = Scale(hwnd), width = Width(client) / scale, height = Height(client) / scale;
+            if (width >= 260 && width < 600 && height >= width + 136 - 1 / scale)
+                preferredLyricsPaneHeight = Math.Max(136, height - width);
+        }
+        public double PreferredLyricsHeight(double width)
+            => Math.Max(width + 136, preferredLyricsPaneHeight is { } pane ? width + pane : width * 1.65);
         public void UpdateInputRegions(RectInt32[] rectangles)
         {
             if (disposed) return;
@@ -225,7 +254,8 @@ internal static class WindowSizing
         public void SetPlayerLayout(bool lyrics, bool fullscreen)
         {
             if (disposed || lyricsVisible == lyrics && fullScreen == fullscreen) return;
-            expandLyrics |= !lyricsVisible && lyrics && !fullscreen;
+            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics)) RememberLyricsPaneHeight();
+            expandLyrics |= !inMoveSize && !lyricsVisible && lyrics && !fullscreen;
             lyricsVisible = lyrics; fullScreen = fullscreen;
             if (fullscreen) expandLyrics = false;
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
@@ -237,6 +267,12 @@ internal static class WindowSizing
             }
             RefreshRegions(force: true);
             if (!fullscreen) QueueSettlement(force: true);
+        }
+        public void SetLayoutTransition(bool active)
+        {
+            if (disposed || layoutTransition == active) return;
+            layoutTransition = active;
+            if (!active) QueueSettlement(force: true);
         }
         private void QueueRegionRefresh(bool force = false)
         {
@@ -305,14 +341,14 @@ internal static class WindowSizing
         }
         private void QueueSettlement(bool force = false)
         {
-            if (disposed || fullScreen || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
+            if (disposed || fullScreen || layoutTransition || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
             if (!force && !lyricsVisible && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
                 && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client))) return;
             settlementQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
             {
                 settlementQueued = false;
-                if (disposed || fullScreen || inMoveSize || IsIconic(hwnd) || !GetWindowRect(hwnd, out var outer) || !GetClientRect(hwnd, out var client)) return;
+                if (disposed || fullScreen || layoutTransition || inMoveSize || IsIconic(hwnd) || !GetWindowRect(hwnd, out var outer) || !GetClientRect(hwnd, out var client)) return;
                 var frame = Frame(hwnd); var work = WorkArea(outer);
                 if (window.AppWindow.Presenter is OverlappedPresenter presenter)
                 {
@@ -333,7 +369,7 @@ internal static class WindowSizing
                     int lyricWidth = Math.Min(Width(client), Math.Max((int)Math.Ceiling(260 * Scale(hwnd)), availableHeight - gap));
                     int minimumHeight = Math.Min(availableHeight, lyricWidth + gap);
                     int lyricHeight = Math.Min(availableHeight, Math.Max(Height(client), minimumHeight));
-                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(lyricWidth * 1.65)));
+                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(PreferredLyricsHeight(lyricWidth / Scale(hwnd)) * Scale(hwnd))));
                     expandLyrics = false;
                     if (lyricWidth == Width(client) && lyricHeight == Height(client)) return;
                     settling = true;
@@ -355,6 +391,7 @@ internal static class WindowSizing
         public void Dispose()
         {
             if (disposed) return; disposed = true;
+            MoveSizeStarted = null;
             try
             {
                 input.PointerEntered -= PointerEntered; input.PointerMoved -= PointerEntered; input.PointerExited -= PointerExited;

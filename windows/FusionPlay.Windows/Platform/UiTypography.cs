@@ -14,8 +14,25 @@ internal static class UiTypography
     private static readonly ConditionalWeakTable<FrameworkElement, RootState> Roots = new();
     private static string? resolvedKey;
     private static InstalledFontFamily? resolved;
+    // Invalidate only the subtree traversal cache. Original semantic weights,
+    // icon faces and monospaced roles remain immutable in their weak table.
+    internal static void Invalidate(FrameworkElement root) => Roots.GetOrCreateValue(root).Key = "";
     internal static FontFamily SymbolFamily => Application.Current.Resources.TryGetValue("SymbolThemeFontFamily", out object resource) && resource is FontFamily family
         ? family : new FontFamily("Segoe Fluent Icons");
+    private static bool IsSymbolFamily(FontFamily family)
+    {
+        if (family.Source.Equals(SymbolFamily.Source, StringComparison.OrdinalIgnoreCase)) return true;
+        // Some native templates use TextBlock/Control rather than IconElement
+        // for glyphs (for example InfoBar). Preserve their actual symbol face;
+        // a private-use character alone does not identify an icon.
+        return family.Source.Split(',').Any(source =>
+        {
+            string name = source[(source.LastIndexOf('#') + 1)..].Trim();
+            return name.Equals("Segoe Fluent Icons", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Segoe MDL2 Assets", StringComparison.OrdinalIgnoreCase)
+                || name.Equals("Segoe UI Symbol", StringComparison.OrdinalIgnoreCase);
+        });
+    }
     internal static InstalledFontFamily Resolve(string family)
     {
         if (resolvedKey == family && resolved != null) return resolved;
@@ -51,10 +68,21 @@ internal static class UiTypography
             else if (element is Control control) Originals.Add(element, new(control.FontFamily, control.FontWeight, control.ReadLocalValue(Control.FontWeightProperty) is global::Windows.UI.Text.FontWeight cw && cw.Weight >= 600));
             else if (element is FontIcon icon) Originals.Add(element, new(icon.ReadLocalValue(FontIcon.FontFamilyProperty) is FontFamily explicitFamily ? explicitFamily : SymbolFamily, icon.FontWeight));
         }
+        // Templates created later (including native list/selector containers)
+        // inherit the chosen text face without a per-poll visual-tree walk.
+        // SymbolThemeFontFamily and explicit diagnostic fonts are untouched.
+        if (!root.Resources.TryGetValue("ContentControlThemeFontFamily", out object resource) || resource is not FontFamily current || current.Source != selected.Source)
+            root.Resources["ContentControlThemeFontFamily"] = selected;
         foreach (var element in elements)
         {
             if (!Originals.TryGetValue(element, out var original)) continue;
             if (element is FontIcon icon) { icon.FontFamily = original.Family; icon.FontWeight = original.Weight; continue; }
+            if (IsSymbolFamily(original.Family))
+            {
+                if (element is TextBlock glyph) { glyph.FontFamily = original.Family; glyph.FontWeight = original.Weight; }
+                else if (element is Control glyphControl) { glyphControl.FontFamily = original.Family; glyphControl.FontWeight = original.Weight; }
+                continue;
+            }
             // Keep diagnostic logs monospaced; user-interface text follows the selection.
             if (original.Family.Source == "Cascadia Mono") continue;
             var effective = new global::Windows.UI.Text.FontWeight { Weight = (ushort)(original.Heading ? FontSelection.HeadingWeight(family.Weights, weight) : weight) };

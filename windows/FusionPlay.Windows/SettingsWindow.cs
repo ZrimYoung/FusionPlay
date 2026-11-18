@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using FusionPlay.Core;
 using FusionPlay.Windows.Platform;
 using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -14,6 +16,8 @@ using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.System;
 using Path = System.IO.Path;
+using UISettings = Windows.UI.ViewManagement.UISettings;
+using AccessibilitySettings = Windows.UI.ViewManagement.AccessibilitySettings;
 
 namespace FusionPlay.Windows;
 
@@ -21,6 +25,15 @@ internal sealed class SettingsWindow : Window
 {
     private readonly ReceiverController model;
     private readonly List<Action> labels = [];
+    private readonly Grid titleBar = (Grid)XamlReader.Load("""<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Name="SettingsTitleBar" MinHeight="32" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"/>""");
+    private readonly TextBlock titleBarText = (TextBlock)XamlReader.Load("""<TextBlock xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Name="SettingsWindowTitle" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Foreground="{ThemeResource TextFillColorPrimaryBrush}"/>""");
+    private readonly UISettings captionSettings = new();
+    private readonly AccessibilitySettings accessibility = new();
+    private readonly HashSet<FrameworkElement> pendingTypography = [];
+    private bool captionUpdateQueued;
+    private readonly SettingsNavigationMotion navigationMotion;
+    private readonly Brush clearMaterial = new SolidColorBrush(Colors.Transparent);
+    private Brush? appliedSurface;
     private readonly NavigationView navigation = new()
     {
         Name = "SettingsNavigation", PaneDisplayMode = NavigationViewPaneDisplayMode.Auto,
@@ -50,6 +63,8 @@ internal sealed class SettingsWindow : Window
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
     private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
+        settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
+        correctLyricTitles = new("\uE8D2") { Name = "CorrectLyricTitles", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
     private readonly ToggleButton pinned = new() { Name = "Pinned", MinWidth = 94, Padding = new Thickness(12, 7, 12, 7) };
     private FontSettingsPanel fontSettings = null!;
@@ -77,20 +92,35 @@ internal sealed class SettingsWindow : Window
     public SettingsWindow(ReceiverController controller)
     {
         model = controller;
+        navigationMotion = new SettingsNavigationMotion(navigation);
         progressColorSaveTimer = DispatcherQueue.CreateTimer();
         progressColorSaveTimer.IsRepeating = false; progressColorSaveTimer.Interval = TimeSpan.FromMilliseconds(300);
         progressColorSaveTimer.Tick += ProgressColorSaveTick;
         var root = (Grid)XamlReader.Load("""<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"/>""");
-        root.Children.Add(navigation); Content = root;
-        Label(() => { Title = L.Text("FusionPlay 设置", "FusionPlay Settings"); navigation.PaneTitle = L.Text("设置", "Settings"); });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        titleBar.Children.Add(titleBarText); root.Children.Add(titleBar); Grid.SetRow(navigation, 1); root.Children.Add(navigation); Content = root;
+        ExtendsContentIntoTitleBar = true; SetTitleBar(titleBar);
+        try { SystemBackdrop = new MicaBackdrop(); }
+        catch (Exception error) when (error is COMException or InvalidOperationException or ArgumentException or NotSupportedException) { }
+        AppWindow.Changed += SettingsAppWindowChanged;
+        captionSettings.ColorValuesChanged += CaptionColorChanged;
+        root.ActualThemeChanged += (_, _) => QueueCaptionUpdate();
+        root.SizeChanged += (_, _) => UpdateTitleBarMetrics();
+        Label(() => { Title = titleBarText.Text = L.Text("FusionPlay 设置", "FusionPlay Settings"); navigation.PaneTitle = L.Text("设置", "Settings"); });
         AddPage("receiver", "接收", "Receiver", "\uE839", ReceiverPage());
         AddPage("audio", "音频", "Audio", "\uE767", AudioPage());
-        AddPage("player", "播放器", "Player", "\uE714", PlayerPage());
+        AddPage("player", "播放器", "Player", "\uE768", PlayerPage());
         AddPage("general", "通用", "General", "\uE713", GeneralPage());
         AddPage("about", "关于", "About", "\uE946", AboutPage());
         navigation.SelectionChanged += (_, _) =>
         {
-            if (navigation.SelectedItem is NavigationViewItem { Tag: string key }) navigation.Content = pages[key];
+            if (navigation.SelectedItem is NavigationViewItem { Tag: string key })
+            {
+                // Reuse the same native page and editors; changing navigation
+                // must not replace drafts or reset a font disclosure/scroll view.
+                navigation.Content = pages[key]; QueueTypography(pages[key]);
+                navigationMotion.PageChanged(pages[key], root.IsLoaded);
+            }
         };
         navigation.SelectedItem = navigation.MenuItems[2];
         WindowSizing.Apply(this, 960, 740, 620, 520);
@@ -103,7 +133,7 @@ internal sealed class SettingsWindow : Window
             if (renderingDevices) return;
             ++deferredCommitVersion; outputApplied = false; Render();
         };
-        root.Loaded += (_, _) => UiTypography.Apply(root, model.Preferences.Value, force: true);
+        root.Loaded += (_, _) => { QueueTypography(root); QueueCaptionUpdate(); };
         model.DevicesChanged += DevicesChanged; model.Changed += Render;
         model.Preferences.Changed += PreferencesChanged; L.Changed += Localize;
         AppWindow.Closing += (_, args) =>
@@ -118,15 +148,79 @@ internal sealed class SettingsWindow : Window
             FlushProgressColor();
             closed = true; ++calibrationRefreshVersion; ++deferredCommitVersion;
             progressColorSaveTimer.Stop(); progressColorSaveTimer.Tick -= ProgressColorSaveTick;
-            fontSettings.Dispose();
+            captionSettings.ColorValuesChanged -= CaptionColorChanged; AppWindow.Changed -= SettingsAppWindowChanged; pendingTypography.Clear();
+            navigationMotion.Dispose(); fontSettings.Dispose();
             model.DevicesChanged -= DevicesChanged; model.Changed -= Render;
             model.Preferences.Changed -= PreferencesChanged; L.Changed -= Localize;
         };
         RenderDevices(); RenderPreferences(); Render();
+        QueueCaptionUpdate();
         _ = RefreshCalibrationAsync();
     }
 
     private static InfoBar ErrorBar(string name) => new() { Name = name, Severity = InfoBarSeverity.Error, IsClosable = false, Visibility = Visibility.Collapsed };
+    private void QueueTypography(FrameworkElement subtree)
+    {
+        if (closed) return;
+        UiTypography.Apply(subtree, model.Preferences.Value);
+        if (!pendingTypography.Add(subtree)) return;
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            pendingTypography.Remove(subtree);
+            if (closed) return;
+            UiTypography.Invalidate(subtree); UiTypography.Apply(subtree, model.Preferences.Value);
+        })) pendingTypography.Remove(subtree);
+    }
+    private void UpdateSurfaceMaterial()
+    {
+        Brush surface = SystemBackdrop == null || accessibility.HighContrast
+            ? (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"] : clearMaterial;
+        if (ReferenceEquals(appliedSurface, surface)) return;
+        appliedSurface = surface;
+        titleBar.Background = surface;
+        if (Content is Grid root) root.Background = surface;
+        navigation.Background = clearMaterial;
+        // These are public NavigationView resource overrides. The one window
+        // backdrop continues behind the sidebar and its client title region.
+        navigation.Resources["NavigationViewDefaultPaneBackground"] = surface;
+        navigation.Resources["NavigationViewExpandedPaneBackground"] = surface;
+    }
+    private void CaptionColorChanged(UISettings sender, object args) => QueueCaptionUpdate();
+    private void SettingsAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    { if (args.DidSizeChange || args.DidPositionChange) QueueCaptionUpdate(); }
+    private void QueueCaptionUpdate()
+    {
+        if (closed || captionUpdateQueued) return;
+        captionUpdateQueued = true;
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            captionUpdateQueued = false; if (closed) return;
+            UpdateSurfaceMaterial(); UpdateTitleBarMetrics();
+            if (!AppWindowTitleBar.IsCustomizationSupported()) return;
+            var bar = AppWindow.TitleBar;
+            var foreground = titleBarText.Foreground is SolidColorBrush text ? text.Color : titleBar.ActualTheme == ElementTheme.Dark ? Colors.White : Colors.Black;
+            var background = titleBar.Background is SolidColorBrush fill ? fill.Color : titleBar.ActualTheme == ElementTheme.Dark ? Colors.Black : Colors.White;
+            bool contrast = accessibility.HighContrast;
+            var hoverBackground = contrast && Application.Current.Resources.TryGetValue("SystemColorHighlightColorBrush", out object highlightResource) && highlightResource is SolidColorBrush highlight ? highlight.Color
+                : titleBar.ActualTheme == ElementTheme.Dark ? global::Windows.UI.Color.FromArgb(32, 255, 255, 255) : global::Windows.UI.Color.FromArgb(18, 0, 0, 0);
+            var hoverForeground = contrast && Application.Current.Resources.TryGetValue("SystemColorHighlightTextColorBrush", out object highlightedResource) && highlightedResource is SolidColorBrush highlightedText ? highlightedText.Color : foreground;
+            bar.BackgroundColor = bar.InactiveBackgroundColor = background;
+            bar.ForegroundColor = foreground;
+            bar.ButtonBackgroundColor = bar.ButtonInactiveBackgroundColor = Colors.Transparent;
+            bar.ButtonForegroundColor = foreground;
+            bar.ButtonInactiveForegroundColor = contrast ? foreground : global::Windows.UI.Color.FromArgb(128, foreground.R, foreground.G, foreground.B);
+            bar.ButtonHoverBackgroundColor = bar.ButtonPressedBackgroundColor = hoverBackground;
+            bar.ButtonHoverForegroundColor = bar.ButtonPressedForegroundColor = hoverForeground;
+        })) captionUpdateQueued = false;
+    }
+    private void UpdateTitleBarMetrics()
+    {
+        if (closed) return;
+        double scale = (Content as FrameworkElement)?.XamlRoot?.RasterizationScale ?? 1;
+        var bar = AppWindow.TitleBar;
+        titleBar.Padding = new Thickness(16 + bar.LeftInset / scale, 0, Math.Max(138, bar.RightInset / scale), 0);
+        titleBar.MinHeight = Math.Max(32, bar.Height / scale);
+    }
     private void Label(Action update) { labels.Add(update); update(); }
     private void Localize()
     {
@@ -179,7 +273,13 @@ internal sealed class SettingsWindow : Window
     }
     private void AddPage(string key, string chinese, string english, string glyph, StackPanel content)
     {
-        var item = new NavigationViewItem { Tag = key, Icon = new FontIcon { Glyph = glyph } };
+        content.Name = "SettingsBody_" + key;
+        if (content.Children[0] is StackPanel heading)
+        {
+            if (heading.Children[0] is TextBlock title) title.Name = "SettingsPageTitle_" + key;
+            if (heading.Children[1] is TextBlock description) description.Name = "SettingsPageDescription_" + key;
+        }
+        var item = new NavigationViewItem { Tag = key, Icon = new FontIcon { Glyph = glyph, FontSize = 16, FontWeight = Microsoft.UI.Text.FontWeights.Normal } };
         Label(() => item.Content = L.Text(chinese, english)); navigation.MenuItems.Add(item);
         // Keep MaxWidth on the inner page. A MaxWidth-constrained direct
         // ScrollViewer child can be centered using its smaller desired width
@@ -192,6 +292,7 @@ internal sealed class SettingsWindow : Window
             HorizontalScrollMode = ScrollMode.Disabled, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto
         };
+        pages[key].Loaded += (_, _) => QueueTypography(pages[key]);
     }
     private void AddSegment(SelectorBar bar, string key, string chinese, string english)
     {
@@ -199,9 +300,9 @@ internal sealed class SettingsWindow : Window
     }
     private static string? SegmentKey(SelectorBar bar) => bar.SelectedItem?.Tag as string;
     private static void SelectSegment(SelectorBar bar, string key) => bar.SelectedItem = bar.Items.First(item => (string)item.Tag == key);
-    private void ConfigureCard(SettingsChoiceCard card, string chinese, string english, Func<UiPreferences, bool, UiPreferences> update)
+    private void ConfigureCard(SettingsChoiceCard card, string chinese, string english, Func<UiPreferences, bool, UiPreferences> update, bool activationLabels = false)
     {
-        Label(() => card.SetLabels(L.Text(chinese, english), L.Text("已显示", "Shown"), L.Text("已隐藏", "Hidden")));
+        Label(() => card.SetLabels(L.Text(chinese, english), activationLabels ? L.Text("已开启", "On") : L.Text("已显示", "Shown"), activationLabels ? L.Text("已关闭", "Off") : L.Text("已隐藏", "Hidden")));
         RoutedEventHandler changed = (_, _) =>
         {
             if (renderingPreferences) return;
@@ -284,6 +385,7 @@ internal sealed class SettingsWindow : Window
         diagnosticPanel.Children.Add(ActionButton("允许局域网连接…", "Allow LAN connections…", ConfigureFirewall));
         var disclosure = new Expander { Name = "ConnectionDiagnostics", Content = diagnosticPanel, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
         Label(() => disclosure.Header = L.Text("连接与同步诊断", "Connection & sync diagnostics")); page.Children.Add(disclosure);
+        disclosure.Expanding += (_, _) => QueueTypography(disclosure);
         return page;
     }
     private StackPanel PlayerPage()
@@ -320,6 +422,7 @@ internal sealed class SettingsWindow : Window
         preview.Children.Add(swatch); preview.Children.Add(progressColorValue); progressColorEditor.Children.Add(preview);
         progressColorEditor.Children.Add(Text("选择不透明 RGB 颜色，也可输入 #RRGGBB。大小播放窗口使用同一颜色。", "Choose an opaque RGB color or enter #RRGGBB. Both player layouts use the same color.", true));
         progressColorGroup.Children.Add(progressColorEditor);
+        progressColor.Loaded += (_, _) => QueueTypography(progressColor);
         progressColorSurface = Surface(progressColorGroup); progressColorSurface.Name = "ProgressColorGroup";
         progressColorMode.SelectionChanged += (_, _) =>
         {
@@ -338,6 +441,16 @@ internal sealed class SettingsWindow : Window
         var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
             Text("播放控制与进度设置适用于大小播放器；进度条支持点击跳转。", "Playback controls and progress settings apply to both layouts. Click the progress bar to seek.", true));
         page.Children.Add(display);
+        ConfigureCard(correctLyricTitles, "修正歌词标题", "Correct lyric titles", (p, value) => p with { CorrectLyricTitles = value }, activationLabels: true);
+        var titleCorrectionDescription = Text("仅在手机歌词提供可信歌名信息时修正播放器、托盘和系统媒体中的显示。不会改动原始曲目或播放控制；无法核实时保留原样。", "Corrects the player, tray, and system media display only when the phone's lyrics provide verifiable track information. Original track data and playback controls stay intact; unverified titles are kept.", true);
+        titleCorrectionDescription.Name = "TitleCorrectionDescription";
+        page.Children.Add(Group("曲目信息", "Track information", Cards(correctLyricTitles), titleCorrectionDescription));
+        ConfigureCard(settingsButton, "设置按钮", "Settings button", (p, value) => p with { ShowSettingsButton = value });
+        ConfigureCard(fullScreenButton, "全屏按钮", "Full screen button", (p, value) => p with { ShowFullScreenButton = value });
+        var buttonDescription = Text("设置按钮仅在展开播放器显示；全屏按钮适用于大小播放器。隐藏后仍可用 Ctrl+, 打开设置、F11 切换全屏。", "The settings button appears only in the expanded player; the full screen button appears in both layouts. Ctrl+, still opens Settings and F11 toggles full screen when the buttons are hidden.", true);
+        buttonDescription.Name = "WindowButtonsDescription";
+        var windowButtons = Group("窗口按钮", "Window buttons", Cards(settingsButton, fullScreenButton), buttonDescription); windowButtons.Name = "WindowButtons";
+        page.Children.Add(windowButtons);
         AddSegment(miniVisibility, "hover", "鼠标移入显示", "Show on hover"); AddSegment(miniVisibility, "always", "始终显示", "Always show");
         Label(() => AutomationProperties.SetName(miniVisibility, L.Text("迷你窗口控件显隐", "Mini player controls visibility")));
         miniVisibility.SelectionChanged += (_, _) => { if (!renderingPreferences && SegmentKey(miniVisibility) is string key) UpdatePreferences(p => p with { AlwaysShowControls = key == "always" }); };
@@ -364,6 +477,7 @@ internal sealed class SettingsWindow : Window
         fontSettings = new FontSettingsPanel(model.Preferences, UpdatePreferences); Label(fontSettings.Localize);
         var fontHeading = new StackPanel { Spacing = 4 }; fontHeading.Children.Add(Text("字体设置", "Font settings")); fontHeading.Children.Add(fontSummary);
         var fontDisclosure = new Expander { Name = "FontDisclosure", Header = fontHeading, Content = fontSettings, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
+        fontDisclosure.Expanding += (_, _) => QueueTypography(fontDisclosure);
         page.Children.Add(Group("字体与文字效果", "Fonts & text", fontDisclosure));
         ConfigureCard(taskbar, "任务栏图标", "Taskbar icon", (p, value) => p with { ShowTaskbarIcon = value });
         ConfigureCard(tray, "托盘图标", "Tray icon", (p, value) => p with { ShowTrayIcon = value });
@@ -492,6 +606,8 @@ internal sealed class SettingsWindow : Window
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
+            settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
+            correctLyricTitles.IsChecked = preferences.CorrectLyricTitles;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");
             taskbar.IsChecked = preferences.ShowTaskbarIcon; tray.IsChecked = preferences.ShowTrayIcon;
             progressColorSurface.Visibility = preferences.ShowProgress ? Visibility.Visible : Visibility.Collapsed;

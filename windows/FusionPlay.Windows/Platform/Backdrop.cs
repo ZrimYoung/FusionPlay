@@ -81,7 +81,9 @@ internal sealed class Backdrop : IDisposable
             ElementCompositionPreview.SetElementChildVisual(target, root);
             RetirePrevious(); previous = layer; layer = null;
             pendingStream = new MemoryStream(bytes!, writable: false).AsRandomAccessStream();
-            pendingSurface = LoadedImageSurface.StartLoadFromStream(pendingStream);
+            // Backgrounds are deliberately blurred. Bound each retained decode
+            // instead of caching the full source resolution for every layout.
+            pendingSurface = LoadedImageSurface.StartLoadFromStream(pendingStream, new global::Windows.Foundation.Size(1024, 1024));
             incoming = new Layer { Visual = compositor.CreateContainerVisual(), Surface = pendingSurface, Stream = pendingStream };
             pendingStream = null; pendingSurface = null;
             incoming.Visual.RelativeSizeAdjustment = Vector2.One;
@@ -203,6 +205,7 @@ internal sealed class Backdrop : IDisposable
     private void Refresh() => target.DispatcherQueue.TryEnqueue(() => { if (!disposed) { failedArtwork = null; Changed?.Invoke(); } });
     private void Clear()
     {
+        if (layer == null && previous == null && root == null) return;
         retirement.Stop();
         var outgoing = layer; var retired = previous; var oldRoot = root;
         // Publish the empty state before releasing any WinRT resource. Native

@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using FusionPlay.Core;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
@@ -10,6 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Windows.Foundation;
 using Windows.System;
 using Windows.UI.ViewManagement;
@@ -33,12 +35,16 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private readonly ProgressRing loadingRing = new() { Width = 18, Height = 18, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly TextBlock emptyTitle = new() { TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, FontSize = 15, Opacity = .65 };
     private readonly TextBlock emptyHint = new() { TextAlignment = TextAlignment.Center, TextWrapping = TextWrapping.Wrap, FontSize = 12, Opacity = .45 };
-    private readonly Button returnButton = new() { Name = "LyricsReturnToCurrent", HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Padding = new Thickness(10, 6, 10, 6), CornerRadius = new CornerRadius(18), Visibility = Visibility.Collapsed };
-    private readonly TextBlock returnLabel = new();
     private readonly UISettings settings = new();
     private readonly AccessibilitySettings accessibility = new();
     private readonly DispatcherQueueTimer browsingTimer;
+    private readonly DispatcherQueueTimer glyphTimer;
     private readonly HashSet<LyricsRowPresenter> realized = [];
+    private readonly Queue<LyricsRowPresenter> glyphQueue = new();
+    private readonly HashSet<LyricsRowPresenter> pendingGlyphs = [];
+    private LyricsGraphicsResources? graphicsResources;
+    private bool graphicsUnavailable;
+    private bool rowsNeedStyle, graphicsRecoveryQueued;
     private LyricsDocument document = LyricsDocument.Empty;
     private LyricsRowItem[] items = [];
     private ScrollViewer? scroller;
@@ -49,6 +55,11 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private int activeIndex = -1, followRevision;
     private bool connected, loading, canSeek, compact, browsing, loaded, disposed, edgeQueued;
     private bool pointerDown;
+    private long browsingDeadline;
+    internal static readonly TimeSpan BrowsingResumeDelay = TimeSpan.FromSeconds(5);
+    private bool presentationVisible;
+    private double observedRasterScale, observedTextScale = 1;
+    private string emptyStateKey = "";
     private Point pointerStart;
 
     public event Action<ulong>? SeekRequested;
@@ -60,28 +71,27 @@ public sealed partial class LyricsView : UserControl, IDisposable
     internal FontFamily LyricFont { get; private set; } = new("Segoe UI");
     internal global::Windows.UI.Text.FontWeight BodyWeight { get; private set; } = Microsoft.UI.Text.FontWeights.Bold;
     internal global::Windows.UI.Text.FontWeight TranslationWeight { get; private set; } = Microsoft.UI.Text.FontWeights.SemiBold;
-    internal double TextScale => settings.TextScaleFactor;
+    internal double TextScale => observedTextScale;
     internal double Bleed => compact ? 16 : 24;
     internal double BodySize => compact ? Math.Clamp(ActualWidth * .075, 20, 28) : Math.Clamp(ActualWidth * .075, 25, 34);
     internal bool CanSeek => canSeek && connected && !loading;
     internal int ActiveIndex => activeIndex;
     internal bool Timed => document.IsTimed;
-    internal bool PresentationLoaded => loaded && !disposed;
+    internal bool PresentationLoaded => loaded && !disposed && presentationVisible && ActualWidth > 0 && ActualHeight > 0;
     internal double ViewportHeight => Math.Max(0, ActualHeight);
 
     public LyricsView()
     {
         InitializeComponent(); Name = "LyricsView"; IsTabStop = false;
+        list.ItemsPanel = (ItemsPanelTemplate)Resources["LyricsItemsPanel"];
         list.ItemTemplate = (DataTemplate)Resources["LyricsRowTemplate"]; list.ItemContainerStyle = (Style)Resources["LyricsItemStyle"];
         list.Header = topSpace; list.Footer = bottomSpace;
         ScrollViewer.SetHorizontalScrollMode(list, ScrollMode.Disabled); ScrollViewer.SetHorizontalScrollBarVisibility(list, ScrollBarVisibility.Disabled);
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Hidden);
         empty.Children.Add(emptyIcon); empty.Children.Add(loadingRing); empty.Children.Add(emptyTitle); empty.Children.Add(emptyHint);
-        var returnContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        returnContent.Children.Add(new FontIcon { Glyph = "\uE72B", FontFamily = UiTypography.SymbolFamily, FontSize = 11 }); returnContent.Children.Add(returnLabel); returnButton.Content = returnContent;
-        var root = new Grid(); root.Children.Add(list); root.Children.Add(empty); root.Children.Add(returnButton); Content = root;
-        browsingTimer = DispatcherQueue.CreateTimer(); browsingTimer.IsRepeating = false; browsingTimer.Interval = TimeSpan.FromSeconds(6); browsingTimer.Tick += BrowsingExpired;
-        returnButton.Click += ReturnToCurrent;
+        var root = new Grid(); root.Children.Add(list); root.Children.Add(empty); Content = root;
+        browsingTimer = DispatcherQueue.CreateTimer(); browsingTimer.IsRepeating = false; browsingTimer.Interval = BrowsingResumeDelay; browsingTimer.Tick += BrowsingExpired;
+        glyphTimer = DispatcherQueue.CreateTimer(); glyphTimer.IsRepeating = false; glyphTimer.Interval = TimeSpan.FromMilliseconds(16); glyphTimer.Tick += DrawQueuedGlyphs;
         list.Loaded += ListLoaded;
         list.ContainerContentChanging += ContainerChanging;
         list.AddHandler(PointerWheelChangedEvent, new PointerEventHandler(WheelChanged), true);
@@ -102,6 +112,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
         if (disposed) return;
         next ??= LyricsDocument.Empty;
         bool newDocument = !ReferenceEquals(document, next), geometryChanged = this.compact != compact;
+        bool visibilityChanged = RefreshPresentation();
         bool stateChanged = this.canSeek != canSeek || this.connected != connected || this.loading != loading;
         this.connected = connected; this.loading = loading; this.canSeek = canSeek; this.compact = compact;
         if (!connected || !next.HasLyrics) lastPosition = null;
@@ -120,13 +131,14 @@ public sealed partial class LyricsView : UserControl, IDisposable
             if (active != activeIndex) { activeIndex = active; stateChanged = true; if (!browsing) ScheduleFollow(animated: true); }
         }
         if (newDocument || geometryChanged) UpdateGeometry();
-        if (newDocument || stateChanged || geometryChanged || typographyChanged || environmentChanged) RefreshRows(geometryChanged || typographyChanged || environmentChanged);
-        LocalizeEmpty(); UpdateReturnButton();
-        if (newDocument || geometryChanged) ScheduleFollow(animated: false);
+        if (newDocument || stateChanged || geometryChanged || typographyChanged || environmentChanged || visibilityChanged) RefreshRows(geometryChanged || typographyChanged || environmentChanged);
+        LocalizeEmpty();
+        if (newDocument || geometryChanged || typographyChanged || visibilityChanged && PresentationLoaded) ScheduleFollow(animated: false);
     }
     public void Clear() => Update(LyricsDocument.Empty, null, false, connected: false, compact: compact, preferences: preferences);
     private bool SetTypography(UiPreferences value)
     {
+        if (ReferenceEquals(preferences, value) && typographyKey.Length > 0) return false;
         string key = value.UiFontFamily + ":" + value.UiFontWeight + ":" + value.PlayerTextRendering;
         preferences = value;
         if (key == typographyKey) return false;
@@ -137,21 +149,24 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private bool ReadEnvironment()
     {
-        bool contrast = accessibility.HighContrast, effects, motion;
-        try { effects = settings.AdvancedEffectsEnabled && !contrast; motion = settings.AnimationsEnabled && !contrast; }
-        catch (COMException) { effects = motion = false; }
-        bool changed = HighContrast != contrast || EffectsEnabled != effects || MotionEnabled != motion;
-        HighContrast = contrast; EffectsEnabled = effects; MotionEnabled = motion; return changed;
+        bool contrast = accessibility.HighContrast, effects, motion; double textScale;
+        try { effects = settings.AdvancedEffectsEnabled && !contrast; motion = settings.AnimationsEnabled && !contrast; textScale = settings.TextScaleFactor; }
+        catch (COMException) { effects = motion = false; textScale = observedTextScale; }
+        bool changed = HighContrast != contrast || EffectsEnabled != effects || MotionEnabled != motion || textScale != observedTextScale;
+        if (MotionEnabled != motion || list.ItemContainerTransitions == null && motion)
+            list.ItemContainerTransitions = motion ? (TransitionCollection)Resources["LyricsReflowTransitions"] : null;
+        HighContrast = contrast; EffectsEnabled = effects; MotionEnabled = motion; observedTextScale = textScale; return changed;
     }
     private void Localize()
     {
         if (disposed) return;
         AutomationProperties.SetName(this, L.Text("歌词", "Lyrics")); AutomationProperties.SetName(list, L.Text("歌词", "Lyrics"));
-        returnLabel.Text = L.Text("回到当前歌词", "Return to current lyric"); AutomationProperties.SetName(returnButton, returnLabel.Text);
         LocalizeEmpty(); RefreshRows(style: true);
     }
     private void LocalizeEmpty()
     {
+        string key = $"{document.HasLyrics}:{loading}:{connected}:{compact}:{HighContrast}:{L.Language}";
+        if (key == emptyStateKey) return; emptyStateKey = key;
         empty.Visibility = document.HasLyrics ? Visibility.Collapsed : Visibility.Visible; list.Visibility = document.HasLyrics ? Visibility.Visible : Visibility.Collapsed;
         loadingRing.IsActive = loading && !document.HasLyrics; loadingRing.Visibility = loading ? Visibility.Visible : Visibility.Collapsed; emptyIcon.Visibility = loading ? Visibility.Collapsed : Visibility.Visible;
         emptyIcon.FontSize = compact ? 23 : 28; emptyTitle.FontSize = compact ? 13 : 15;
@@ -162,12 +177,12 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void ViewLoaded(object sender, RoutedEventArgs args)
     {
-        if (disposed) return; loaded = true; subscribedRoot = XamlRoot; if (subscribedRoot != null) subscribedRoot.Changed += RootChanged;
+        if (disposed) return; loaded = true; RefreshPresentation(); subscribedRoot = XamlRoot; observedRasterScale = XamlRoot?.RasterizationScale ?? 1; if (subscribedRoot != null) subscribedRoot.Changed += RootChanged;
         AttachScroller(); UpdateGeometry(); RefreshRows(style: true); ScheduleFollow(animated: false);
     }
     private void ViewUnloaded(object sender, RoutedEventArgs args)
     {
-        loaded = false; ++followRevision; browsingTimer.Stop(); browsing = false; pointerDown = false; UpdateReturnButton();
+        loaded = false; ++followRevision; browsingTimer.Stop(); CancelGlyphQueue(); browsing = false; pointerDown = false;
         if (subscribedRoot != null) subscribedRoot.Changed -= RootChanged; subscribedRoot = null; DetachScroller();
         foreach (var row in realized.ToArray()) { row.StopAnimations(); row.ReleaseSurface(); }
     }
@@ -196,7 +211,9 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void ViewSizeChanged(object sender, SizeChangedEventArgs args)
     {
-        if (disposed) return; UpdateGeometry(); RefreshRows(style: true); if (!browsing) ScheduleFollow(animated: false);
+        if (disposed) return; RefreshPresentation(); UpdateGeometry();
+        if (args.NewSize.Width != args.PreviousSize.Width) RefreshRows(style: true);
+        if (!browsing) ScheduleFollow(animated: false);
     }
     private void UpdateGeometry()
     {
@@ -204,10 +221,15 @@ public sealed partial class LyricsView : UserControl, IDisposable
         double height = ViewportHeight;
         topSpace.Height = document.IsTimed ? Math.Max(14, height * .32) : Math.Max(12, height * .30) + 14;
         bottomSpace.Height = document.IsTimed ? Math.Max(14, height * .68) : Math.Max(12, height * .45) + 14;
-        returnButton.Margin = new Thickness(0, 0, 2, 2); returnLabel.FontSize = compact ? 10 : 11;
         QueueEdges();
     }
-    private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args) => QueueEdges();
+    private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args)
+    {
+        QueueEdges();
+        // Native inertia continues after the last wheel/pointer event. Resume
+        // only after scrolling itself has been quiet for the full interval.
+        if (browsing) RestartBrowsingDeadline();
+    }
     private void DirectManipulation(object? sender, object args) => BeginBrowsing();
     private void WheelChanged(object sender, PointerRoutedEventArgs args) { if (args.GetCurrentPoint(list).Properties.MouseWheelDelta != 0) BeginBrowsing(); }
     private void BrowsePointerPressed(object sender, PointerRoutedEventArgs args) { pointerDown = true; pointerStart = args.GetCurrentPoint(list).Position; }
@@ -216,7 +238,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
         if (!pointerDown) return; Point point = args.GetCurrentPoint(list).Position;
         if (Math.Abs(point.X - pointerStart.X) + Math.Abs(point.Y - pointerStart.Y) >= 6) BeginBrowsing();
     }
-    private void PointerEnded(object sender, PointerRoutedEventArgs args) => pointerDown = false;
+    private void PointerEnded(object sender, PointerRoutedEventArgs args)
+    { pointerDown = false; if (browsing) RestartBrowsingDeadline(); }
     private void BrowseKey(object sender, KeyRoutedEventArgs args)
     {
         if (args.Key is VirtualKey.Up or VirtualKey.Down or VirtualKey.PageUp or VirtualKey.PageDown or VirtualKey.Home or VirtualKey.End) BeginBrowsing();
@@ -224,29 +247,37 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private void BeginBrowsing()
     {
         if (disposed || !document.IsTimed) return;
-        browsing = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Start(); UpdateReturnButton();
+        browsing = true; ++followRevision; RestartBrowsingDeadline();
+    }
+    private void RestartBrowsingDeadline()
+    {
+        browsingDeadline = Stopwatch.GetTimestamp() + (long)(BrowsingResumeDelay.TotalSeconds * Stopwatch.Frequency);
+        browsingTimer.Stop(); browsingTimer.Interval = BrowsingResumeDelay; browsingTimer.Start();
     }
     private void BrowsingExpired(DispatcherQueueTimer sender, object args)
     {
-        if (disposed) return; browsing = false; UpdateReturnButton(); ScheduleFollow(animated: true);
+        if (disposed || !browsing) return;
+        if (pointerDown) { RestartBrowsingDeadline(); return; }
+        long remaining = browsingDeadline - Stopwatch.GetTimestamp();
+        if (remaining > 0)
+        {
+            browsingTimer.Interval = TimeSpan.FromSeconds(Math.Max(.001, remaining / (double)Stopwatch.Frequency)); browsingTimer.Start(); return;
+        }
+        browsing = false; ScheduleFollow(animated: true);
     }
     private void ReturnToCurrent(object sender, RoutedEventArgs args)
     {
-        browsing = false; browsingTimer.Stop(); UpdateReturnButton(); ScheduleFollow(animated: true, explicitRequest: true);
-    }
-    private void UpdateReturnButton()
-    {
-        returnButton.Visibility = browsing && document.IsTimed ? Visibility.Visible : Visibility.Collapsed; returnButton.IsEnabled = lastPosition.HasValue;
+        browsing = false; browsingTimer.Stop(); ScheduleFollow(animated: true, explicitRequest: true);
     }
     private void ScheduleFollow(bool animated, bool explicitRequest = false)
     {
-        if (disposed || !loaded || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
+        if (!PresentationLoaded || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
         int revision = ++followRevision;
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => Follow(revision, animated && MotionEnabled, explicitRequest, realize: true));
     }
     private void Follow(int revision, bool animated, bool explicitRequest, bool realize)
     {
-        if (disposed || !loaded || revision != followRevision || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
+        if (!PresentationLoaded || revision != followRevision || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
         AttachScroller(); if (scroller == null || items.Length == 0 || ViewportHeight <= 0) return;
         int index = Math.Max(0, activeIndex);
         if (list.ContainerFromIndex(index) is not FrameworkElement container)
@@ -265,39 +296,105 @@ public sealed partial class LyricsView : UserControl, IDisposable
         QueueEdges();
     }
     internal void Register(LyricsRowPresenter row) { if (disposed) return; realized.Add(row); row.ApplyState(style: true); QueueEdges(); }
-    internal void Unregister(LyricsRowPresenter row) => realized.Remove(row);
+    internal void Unregister(LyricsRowPresenter row) { realized.Remove(row); pendingGlyphs.Remove(row); row.CancelQueuedDraw(); }
     internal void RequestSeek(LyricsRowItem item)
     {
         if (disposed || !CanSeek || !ReferenceEquals(item.Owner, this) || item.Line.TimeMs is not ulong time || item.Index >= items.Length || !ReferenceEquals(items[item.Index], item)) return;
-        browsing = false; ++followRevision; browsingTimer.Stop(); UpdateReturnButton(); SeekRequested?.Invoke(time);
+        browsing = false; ++followRevision; browsingTimer.Stop(); SeekRequested?.Invoke(time);
     }
     private void RefreshRows(bool style)
     {
-        foreach (var row in realized.ToArray()) row.ApplyState(style); QueueEdges();
+        if (!PresentationLoaded) { rowsNeedStyle |= style; return; }
+        bool applyStyle = style || rowsNeedStyle; rowsNeedStyle = false;
+        foreach (var row in realized.ToArray()) row.ApplyState(applyStyle); QueueEdges();
     }
     private void QueueEdges()
     {
-        if (disposed || !loaded || edgeQueued) return;
+        if (!PresentationLoaded || edgeQueued) return;
         edgeQueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
-            edgeQueued = false; if (disposed || !loaded) return;
+            edgeQueued = false; if (!PresentationLoaded) return;
             foreach (var row in realized.ToArray()) row.UpdateEdge();
         });
     }
-    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => RefreshEnvironment();
+    private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args)
+    {
+        if (disposed) return;
+        bool shown = RefreshPresentation(); double scale = sender.RasterizationScale;
+        if (scale != observedRasterScale)
+        {
+            observedRasterScale = scale;
+            foreach (var row in realized.ToArray()) row.InvalidateGlyphs();
+        }
+        else if (shown && PresentationLoaded) RefreshRows(style: false);
+        // XamlRoot size, host visibility and unrelated XAML changes do not change glyphs.
+    }
     private void ThemeChanged(FrameworkElement sender, object args) => RefreshEnvironment();
     private void EffectsChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(RefreshEnvironment);
     private void TextScaleChanged(UISettings sender, object args) => DispatcherQueue.TryEnqueue(RefreshEnvironment);
     private void RefreshEnvironment()
     {
-        if (disposed) return; ReadEnvironment(); LocalizeEmpty(); RefreshRows(style: true); if (!browsing) ScheduleFollow(animated: false);
+        if (disposed) return; bool changed = ReadEnvironment(); RefreshPresentation(); LocalizeEmpty(); RefreshRows(style: true);
+        if (changed && !browsing) ScheduleFollow(animated: false);
+    }
+    private bool RefreshPresentation()
+    {
+        bool visible = true;
+        for (DependencyObject? current = this; current != null; current = VisualTreeHelper.GetParent(current))
+            if (current is FrameworkElement element && element.Visibility != Visibility.Visible) { visible = false; break; }
+        bool changed = visible != presentationVisible; presentationVisible = visible;
+        if (!visible && (changed || pendingGlyphs.Count > 0)) CancelGlyphQueue(); return changed;
+    }
+    internal LyricsGraphicsResources? GetGraphicsResources()
+    {
+        if (!PresentationLoaded || graphicsUnavailable) return null;
+        if (graphicsResources != null) return graphicsResources;
+        try { return graphicsResources = new LyricsGraphicsResources(ElementCompositionPreview.GetElementVisual(this).Compositor, QueueGraphicsRecovery); }
+        catch (Exception error) when (error is COMException or ArgumentException or NotSupportedException) { graphicsUnavailable = true; return null; }
+    }
+    private void QueueGraphicsRecovery()
+    {
+        if (disposed || graphicsRecoveryQueued) return; graphicsRecoveryQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            graphicsRecoveryQueued = false; if (disposed) return;
+            CancelGlyphQueue(); foreach (var row in realized.ToArray()) row.ReleaseSurface();
+            graphicsResources?.Dispose(); graphicsResources = null; graphicsUnavailable = false;
+            foreach (var row in realized.ToArray()) row.InvalidateGlyphs(); QueueEdges();
+        });
+    }
+    internal void QueueGlyphDraw(LyricsRowPresenter row)
+    {
+        if (!PresentationLoaded || !pendingGlyphs.Add(row)) return;
+        glyphQueue.Enqueue(row); if (!glyphTimer.IsRunning) glyphTimer.Start();
+    }
+    private void DrawQueuedGlyphs(DispatcherQueueTimer sender, object args)
+    {
+        if (!PresentationLoaded) { CancelGlyphQueue(); return; }
+        // Resize can invalidate several rows together. Bound their CPU uploads,
+        // while scroll blur and fading continue immediately on the compositor.
+        long started = Stopwatch.GetTimestamp(); int drawn = 0, remaining = glyphQueue.Count;
+        while (remaining-- > 0 && glyphQueue.TryDequeue(out var row))
+        {
+            if (!pendingGlyphs.Contains(row)) continue;
+            if (!row.GlyphUploadReady) { glyphQueue.Enqueue(row); continue; }
+            pendingGlyphs.Remove(row);
+            row.RenderPendingGlyphs(); drawn++;
+            if (drawn >= 3 || Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 4) break;
+        }
+        if (glyphQueue.Count > 0) glyphTimer.Start();
+    }
+    private void CancelGlyphQueue()
+    {
+        glyphTimer.Stop(); foreach (var row in pendingGlyphs) row.CancelQueuedDraw(); pendingGlyphs.Clear(); glyphQueue.Clear();
     }
     public void Dispose()
     {
-        if (disposed) return; disposed = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Tick -= BrowsingExpired;
+        if (disposed) return; disposed = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Tick -= BrowsingExpired; CancelGlyphQueue(); glyphTimer.Tick -= DrawQueuedGlyphs;
         settings.AdvancedEffectsEnabledChanged -= EffectsChanged; settings.ColorValuesChanged -= EffectsChanged; settings.TextScaleFactorChanged -= TextScaleChanged; L.Changed -= Localize;
         if (subscribedRoot != null) subscribedRoot.Changed -= RootChanged; subscribedRoot = null; DetachScroller();
         foreach (var row in realized.ToArray()) { row.StopAnimations(); row.ReleaseSurface(); } realized.Clear(); list.ItemsSource = null; items = []; document = LyricsDocument.Empty; SeekRequested = null;
+        graphicsResources?.Dispose(); graphicsResources = null;
     }
 }
 
