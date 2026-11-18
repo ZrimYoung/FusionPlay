@@ -1,4 +1,10 @@
+#if os(iOS)
+import UIKit
+typealias NowPlayingArtwork = UIImage
+#else
 import AppKit
+typealias NowPlayingArtwork = NSImage
+#endif
 import MediaPlayer
 
 // Only source-supplied time is published. The system extrapolates while playing;
@@ -18,7 +24,11 @@ struct MediaPresentation: Equatable {
               state.phase == .playing || state.phase == .paused ||
                 (previouslyActive && state.phase == .connected) else { return nil }
         let labels = metadata ?? DisplayMetadata(title: state.title, artist: state.artist, album: state.album)
+#if os(iOS)
+        title = labels.title.isEmpty ? String(localized: "手机投送") : labels.title
+#else
         title = labels.title.isEmpty ? "手机投送" : labels.title
+#endif
         artist = labels.artist; album = labels.album; trackID = state.trackId
         artworkURL = state.artworkUrl
         let durationSeconds = state.durationMs.map { Double($0) / 1000 }
@@ -95,7 +105,7 @@ final class SystemMediaController {
         commands.stopCommand.isEnabled = false
     }
 
-    func update(_ state: Snapshot, busy: Bool, artwork: NSImage?, force: Bool = false) {
+    func update(_ state: Snapshot, busy: Bool, artwork: NowPlayingArtwork?, force: Bool = false) {
         let enabled = state.controlsAvailable && !busy
         gate.update(enabled: enabled, playing: state.phase == .playing)
         for (command, _) in targets { command.isEnabled = enabled }
