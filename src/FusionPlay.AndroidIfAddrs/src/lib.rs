@@ -123,7 +123,8 @@ impl Ifv6Addr {
     }
 }
 
-#[cfg(target_os = "ios")]
+// The Darwin sockaddr layout can also be tested on a macOS development host.
+#[cfg(any(target_os = "ios", all(test, target_os = "macos")))]
 mod ios;
 #[cfg(target_os = "ios")]
 pub use ios::get_if_addrs;
