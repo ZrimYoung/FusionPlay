@@ -33,6 +33,7 @@ public sealed partial class MainWindow : Window
     private readonly Brush transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
     private readonly ISquareWindow squareSizing;
     private readonly PlayerFullScreen fullScreen;
+    private readonly PlayerAcrylic acrylic;
     private readonly WindowResizeTransition resizeTransition;
     private readonly PlayerLayoutTransition layoutTransition;
     private readonly LyricsView miniLyrics, expandedLyrics;
@@ -74,6 +75,7 @@ public sealed partial class MainWindow : Window
     {
         model = controller; settings = openSettings;
         InitializeComponent();
+        acrylic = new PlayerAcrylic(this);
         var coverClip = new RectangleGeometry { Rect = new global::Windows.Foundation.Rect(0, 0, MiniCoverPanel.ActualWidth, MiniCoverPanel.ActualHeight) }; MiniCoverPanel.Clip = coverClip;
         MiniCoverPanel.SizeChanged += (_, args) => coverClip.Rect = new global::Windows.Foundation.Rect(0, 0, args.NewSize.Width, args.NewSize.Height);
         miniLyrics = new LyricsView(); expandedLyrics = new LyricsView();
@@ -133,6 +135,7 @@ public sealed partial class MainWindow : Window
         expandedLyricsBackdrop.Changed += Render; expandedLyricsBackdrop.Failed += LogBackdropFailure;
         sceneBackdrop.Changed += Render; sceneBackdrop.Failed += LogBackdropFailure;
         appearance.ColorValuesChanged += ContrastChanged;
+        appearance.AdvancedEffectsEnabledChanged += ContrastChanged;
         hideTimer = DispatcherQueue.CreateTimer(); hideTimer.IsRepeating = false;
         hideTimer.Interval = TimeSpan.FromMilliseconds(400);
         hideTimer.Tick += (_, _) => { if (compact && !pointerInside && !focusInside) { ShowControls(false); ShowCaption(false); } };
@@ -161,10 +164,10 @@ public sealed partial class MainWindow : Window
             backdrop.Changed -= Render; miniBackdrop.Changed -= Render; loadingBackdrop.Changed -= Render;
             backdrop.Failed -= LogBackdropFailure; miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
             lyricsBackdrop.Changed -= Render; lyricsBackdrop.Failed -= LogBackdropFailure;
-            expandedLyricsBackdrop.Changed -= Render; expandedLyricsBackdrop.Failed -= LogBackdropFailure; appearance.ColorValuesChanged -= ContrastChanged;
+            expandedLyricsBackdrop.Changed -= Render; expandedLyricsBackdrop.Failed -= LogBackdropFailure; appearance.ColorValuesChanged -= ContrastChanged; appearance.AdvancedEffectsEnabledChanged -= ContrastChanged;
             sceneBackdrop.Changed -= Render; sceneBackdrop.Failed -= LogBackdropFailure;
             miniLyrics.SeekRequested -= SeekLyric; expandedLyrics.SeekRequested -= SeekLyric;
-            miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose();
+            miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose(); acrylic.Dispose();
             squareSizing.MoveSizeStarted -= WindowMoveSizeStarted; layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
             AppWindow.Changed -= WindowFrameChanged;
@@ -246,24 +249,37 @@ public sealed partial class MainWindow : Window
         loadingBackdrop.SetArtwork(model.ArtworkLoading ? artwork : null);
         bool miniLyricEffects = lyricsBackdrop.SetArtwork(artwork);
         bool sceneEffects = sceneBackdrop.SetArtwork(artwork);
-        BackdropLayer.Visibility = expandedLyricsMode ? Visibility.Collapsed : Visibility.Visible;
-        ExpandedLyricsBackground.Visibility = expandedLyricsMode ? Visibility.Visible : Visibility.Collapsed;
-        MiniLyricsBackground.Visibility = miniLyricsMode ? Visibility.Visible : Visibility.Collapsed;
-        SceneBacking.Visibility = !idle && lyricsLayoutTransitioning ? Visibility.Visible : Visibility.Collapsed;
         bool highContrast = accessibility.HighContrast;
-        Brush solid = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
+        bool acrylicRequested = !idle && lyricsVisible && preferences.LyricsBackgroundMode == "acrylic";
+        // Both backdrops use Window.SystemBackdrop. Detach the outgoing one
+        // before updating the material for the incoming mode.
+        if (idle) acrylic.Update(false, highContrast);
         bool idleAcrylic = UpdateIdleBackdrop(idle && !highContrast);
+        if (!idle) acrylic.Update(acrylicRequested, highContrast);
+        bool expandedAcrylic = acrylicRequested && expandedLyricsMode;
+        bool miniAcrylic = acrylicRequested && miniLyricsMode;
+        RootGrid.RequestedTheme = acrylicRequested && !highContrast ? ElementTheme.Dark : ElementTheme.Default;
+        BackdropLayer.Visibility = expandedLyricsMode ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedLyricsBackground.Visibility = !idle && expandedLyricsMode && !expandedAcrylic ? Visibility.Visible : Visibility.Collapsed;
+        MiniLyricsBackground.Visibility = !idle && miniLyricsMode ? Visibility.Visible : Visibility.Collapsed;
+        Grid.SetRowSpan(MiniLyricsBackground, miniAcrylic ? 1 : 3);
+        Grid.SetRowSpan(MiniLyricsGlobalShade, miniAcrylic ? 1 : 3);
+        SceneBacking.Visibility = !idle && lyricsLayoutTransitioning ? Visibility.Visible : Visibility.Collapsed;
+        Brush solid = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
         Brush idleBackground = idleAcrylic ? transparent : solid;
-        RootGrid.Background = idle ? idleBackground : solid;
-        SceneBacking.Background = highContrast ? solid : lyricFallback;
+        Brush materialBackground = highContrast ? solid : acrylic.IsActive ? transparent : charcoal;
+        RootGrid.Background = idle ? idleBackground : acrylicRequested ? materialBackground : solid;
+        MiniLyricsBackground.Background = miniAcrylic ? highContrast ? solid : lyricFallback : null;
+        SceneBacking.Background = acrylicRequested ? materialBackground : highContrast ? solid : lyricFallback;
+        SceneBackingLayer.Visibility = acrylicRequested ? Visibility.Collapsed : Visibility.Visible;
         SceneBackingShade.Background = sceneEffects ? lyricArtShade : lyricEmptyShade;
-        SceneBackingShade.Visibility = idle || highContrast ? Visibility.Collapsed : Visibility.Visible;
-        ExpandedRoot.Background = highContrast ? solid : expandedLyricsMode ? lyricFallback : expandedEffects ? charcoal : solid;
+        SceneBackingShade.Visibility = idle || highContrast || acrylicRequested ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedRoot.Background = expandedAcrylic ? materialBackground : highContrast ? solid : expandedLyricsMode ? lyricFallback : expandedEffects ? charcoal : solid;
         ExpandedRoot.RequestedTheme = !highContrast && (expandedLyricsMode || expandedEffects) ? ElementTheme.Dark : ElementTheme.Default;
         BackdropShade.Background = expandedLyricsMode ? expandedLyricEffects ? lyricArtShade : lyricEmptyShade : legacyShade;
-        BackdropShade.Visibility = !idle && !highContrast && (expandedLyricsMode || expandedEffects) ? Visibility.Visible : Visibility.Collapsed;
+        BackdropShade.Visibility = !idle && !highContrast && !expandedAcrylic && (expandedLyricsMode || expandedEffects) ? Visibility.Visible : Visibility.Collapsed;
         MiniControls.Background = highContrast ? solid : effects ? null : charcoal;
-        MiniRoot.Background = highContrast ? solid : miniLyricsMode ? lyricFallback : charcoal;
+        MiniRoot.Background = miniAcrylic ? materialBackground : highContrast ? solid : miniLyricsMode ? lyricFallback : charcoal;
         MiniRoot.RequestedTheme = highContrast ? ElementTheme.Default : ElementTheme.Dark;
         MiniLyricsGlobalShade.Background = miniLyricEffects ? lyricArtShade : lyricEmptyShade;
         MiniLyricsGlobalShade.Visibility = !idle && miniLyricsMode && !highContrast ? Visibility.Visible : Visibility.Collapsed;

@@ -430,6 +430,75 @@ internal static class LyricsPlayerCheck
             }
             return checkedLayers;
         }
+        bool Transparent(Brush? brush) => brush == null || brush.Opacity <= .001 || brush is SolidColorBrush solid && solid.Color.A == 0;
+        async Task CheckLyricsBackground(int width, int height, bool compact)
+        {
+            LyricsDocument? document = null; ulong? position = null; ReceiverSnapshot? seekIdentity = null;
+            (double Width, double Height) before = default; Box? hostBefore = null;
+            object? miniBlurLayer = null;
+            await OnUi(queue!, () =>
+            {
+                Require(!main!.AnimateHiddenLayoutForCheck && model!.Lyrics.HasLyrics && LyricsVisible(), "background_fixture_not_ready");
+                document = model!.Lyrics; position = model.LyricsPositionMs; before = MainSize();
+                seekIdentity = Find<ProgressSeekButton>(compact ? "MiniProgressSeek" : "ProgressSeek").Snapshot!();
+                hostBefore = Bounds(Find<Grid>(compact ? "MiniLyricsHost" : "ExpandedLyricsHost"));
+                miniBlurLayer = Field(Field(main, "miniBackdrop")!, "layer");
+            });
+            foreach (string mode in new[] { "album", "acrylic", "album" })
+            {
+                await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsBackgroundMode = mode }));
+                await Task.Delay(50);
+                await OnUi(queue!, () =>
+                {
+                    Background(); Root().UpdateLayout();
+                    var material = (PlayerAcrylic)Field(main!, "acrylic")!;
+                    var size = MainSize(); var host = Find<Grid>(compact ? "MiniLyricsHost" : "ExpandedLyricsHost"); var hostBox = Bounds(host);
+                    var identity = Find<ProgressSeekButton>(compact ? "MiniProgressSeek" : "ProgressSeek").Snapshot!();
+                    Require(ReferenceEquals(model!.Lyrics, document) && model.LyricsPositionMs == position && LyricsVisible()
+                        && identity.TrackId == seekIdentity!.TrackId && identity.Title == seekIdentity.Title && identity.DurationMs == seekIdentity.DurationMs && identity.PositionMs == seekIdentity.PositionMs,
+                        "background_switch_changed_lyrics_or_seek_identity");
+                    Require(size == before && (Find<Grid>("MiniRoot").Visibility == Visibility.Visible) == compact
+                        && Field(main!, "lyricsLayoutTransitioning") is false && Math.Abs(hostBox.X - hostBefore!.X) <= 1 && Math.Abs(hostBox.Y - hostBefore.Y) <= 1
+                        && Math.Abs(hostBox.Width - hostBefore.Width) <= 1 && Math.Abs(hostBox.Height - hostBefore.Height) <= 1,
+                        "background_switch_changed_native_size_or_player_layout");
+                    if (mode == "acrylic")
+                    {
+                        Require(material.IsRequested && (material.IsActive && main!.SystemBackdrop is DesktopAcrylicBackdrop
+                            || material.UsesSolidFallback && main!.SystemBackdrop == null), "acrylic_did_not_attach_native_material_or_use_solid_fallback");
+                        Require(material.IsActive ? Transparent(Find<Grid>("RootGrid").Background) : Opaque(Find<Grid>("RootGrid").Background), "acrylic_root_obscured_native_material_or_missing_solid_fallback");
+                        Require(Find<Grid>("SceneBackingLayer").Visibility == Visibility.Collapsed && Find<Border>("SceneBackingShade").Visibility == Visibility.Collapsed,
+                            "acrylic_scene_backing_retained_album_layers");
+                        if (compact)
+                        {
+                            var backing = Find<Grid>("MiniLyricsBackground");
+                            Require(Grid.GetRowSpan(backing) == 1 && Opaque(backing.Background) && Grid.GetRowSpan(Find<Border>("MiniLyricsGlobalShade")) == 1
+                                && Transparent(host.Background) && ReferenceEquals(Find<Image>("MiniCover").Source, model.Artwork), "mini_acrylic_changed_opaque_cover_or_obscured_lyric_area");
+                            var coverBox = Bounds(Find<Grid>("MiniCoverPanel"));
+                            Require(Math.Abs(coverBox.Width - width) <= 2 && Math.Abs(coverBox.Height - width) <= 2, "mini_acrylic_cover_not_square");
+                            if (miniBlurLayer != null) Require(ReferenceEquals(Field(Field(main!, "miniBackdrop")!, "layer"), miniBlurLayer), "mini_acrylic_rebuilt_upper_artwork_blur");
+                        }
+                        else
+                            Require(Find<Grid>("BackdropLayer").Visibility == Visibility.Collapsed && Find<Grid>("ExpandedLyricsBackground").Visibility == Visibility.Collapsed
+                                && Find<Border>("BackdropShade").Visibility == Visibility.Collapsed
+                                && (material.IsActive ? Transparent(Find<Grid>("ExpandedRoot").Background) : Opaque(Find<Grid>("ExpandedRoot").Background)),
+                                "expanded_acrylic_obscured_native_material_with_album_layers");
+                        if (compact)
+                        {
+                            material.Update(true, true);
+                            Require(material.IsRequested && !material.IsActive && material.UsesSolidFallback && main!.SystemBackdrop == null, "acrylic_high_contrast_policy_did_not_detach_material");
+                            animationSamples.Add(new { stage = "acrylic_high_contrast_policy", high_contrast_argument_simulated = true, operating_system_setting_changed = false, uses_solid_fallback = material.UsesSolidFallback });
+                            main!.RefreshAppearance();
+                        }
+                    }
+                    else Require(!material.IsRequested && !material.IsActive && main!.SystemBackdrop == null
+                        && Grid.GetRowSpan(Find<Grid>("MiniLyricsBackground")) == 3, "album_background_did_not_restore_default_layers");
+                    layouts.Add(new { kind = "lyrics_background_switch", width, height, compact, mode, native_material = main!.SystemBackdrop?.GetType().Name,
+                        material.IsRequested, material.IsActive, material.UsesSolidFallback, host = hostBox, native_width = size.Width, native_height = size.Height,
+                        document_and_seek_identity_preserved = true, visible_material_pixels_verified = false });
+                });
+            }
+            cases.Add("actual_hidden_background_switch_preserves_cover_lyrics_and_layout_" + (compact ? "compact" : "expanded"));
+        }
 
         try
         {
@@ -525,6 +594,7 @@ internal static class LyricsPlayerCheck
                 await OnUi(queue!, () => WindowSizing.ResizeContent(main!, size.Width, size.Height)); await Task.Delay(500);
                 for (int frame = 0; frame < 4; frame++) { int sample = frame; await OnUi(queue!, () => Frame("timed", sample, size.Width, size.Height, true, size.Width < 600)); await Task.Delay(25); }
                 await Capture($"lyrics-{size.Width}x{size.Height}");
+                if (size is (420, 640) or (840, 600)) await CheckLyricsBackground(size.Width, size.Height, size.Width < 600);
             }
             step = "actual_hidden_main_responsive_overlap";
             var responsiveActiveFrames = new List<bool>(); bool responsiveMotion = false;
@@ -665,6 +735,11 @@ internal static class LyricsPlayerCheck
             await OnUi(queue!, () =>
             {
                 Require(Root().IsLoaded && model!.Lyrics.HasLyrics && !LyricsVisible(), "main_transition_start_fixture_not_ready");
+                model!.Preferences.Update(model.Preferences.Value with { LyricsBackgroundMode = "acrylic" });
+                var material = (PlayerAcrylic)Field(main!, "acrylic")!;
+                Require(!material.IsRequested && !material.IsActive && main!.SystemBackdrop == null, "never_lyrics_mode_enabled_lyric_acrylic");
+                cases.Add("never_lyrics_mode_does_not_enable_lyric_acrylic");
+                model.Preferences.Update(model.Preferences.Value with { LyricsBackgroundMode = "album" });
                 main!.AnimateHiddenLayoutForCheck = true; mainMotionEnabled = Backdrop.AnimationsEnabled;
                 model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
                 if (mainMotionEnabled)

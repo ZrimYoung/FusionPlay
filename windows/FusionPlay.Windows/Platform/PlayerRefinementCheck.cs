@@ -233,6 +233,31 @@ internal static class PlayerRefinementCheck
                 Require(!model!.HasCurrentTrack && !model.LyricsAvailable && !LyricsVisible() && Field(main!, "idle") is true
                     && Visible(Find<FontIcon>("IdlePlaceholder")) && !Visible(Find<PlayerText>("MiniTitle")), "media_end_did_not_clear_presentation");
                 Require(model.Preferences.Value.ShowProgress && model.Preferences.Value.ShowTransport, "media_end_changed_control_preferences");
+            }));
+            step = "idle_and_lyrics_acrylic_handoff";
+            SystemBackdrop? idleMaterial = null;
+            await OnUi(queue!, () =>
+            {
+                var material = (PlayerAcrylic)Field(main!, "acrylic")!;
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always", LyricsBackgroundMode = "acrylic" });
+                Require(!material.IsRequested && !material.IsActive, "lyrics_material_requested_while_idle");
+                idleMaterial = main!.SystemBackdrop;
+                Accept(song);
+            });
+            await Parsed();
+            await OnUi(queue!, () =>
+            {
+                var material = (PlayerAcrylic)Field(main!, "acrylic")!;
+                bool attached = main!.SystemBackdrop is DesktopAcrylicBackdrop && !ReferenceEquals(main.SystemBackdrop, idleMaterial);
+                Require(material.IsRequested && (material.IsActive ? attached : main.SystemBackdrop is null), "lyrics_material_did_not_replace_idle_material");
+                Accept(new ReceiverSnapshot { Phase = ReceiverPhase.Ready });
+            });
+            await Settle();
+            await OnUi(queue!, () => Pass(step, () =>
+            {
+                var material = (PlayerAcrylic)Field(main!, "acrylic")!;
+                Require(!material.IsRequested && !material.IsActive && ReferenceEquals(main!.SystemBackdrop, idleMaterial),
+                    "idle_material_not_restored_at_end_of_playback");
                 Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
             }));
             status = "passed"; step = "complete";
