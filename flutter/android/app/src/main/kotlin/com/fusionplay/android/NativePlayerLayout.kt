@@ -16,6 +16,8 @@ internal data class NativePlayerLayout(
     enum class Mode { STACKED, ARTWORK_AND_CONTROLS, ARTWORK_AND_LYRICS }
 
     companion object {
+        private const val TV_COVER_MAX_DP = 228f
+
         fun horizontalInset(width: Float): Float = min(width / 4, (width * 0.052f).coerceIn(18f, 64f))
 
         fun fit(
@@ -24,6 +26,7 @@ internal data class NativePlayerLayout(
             preferences: NativePlayerPreferences,
             largeText: Boolean,
             playbackHeight: Float? = null,
+            television: Boolean = false,
         ): NativePlayerLayout {
             val canUseColumns = width >= 660f && !largeText
             val mode = when {
@@ -37,11 +40,12 @@ internal data class NativePlayerLayout(
             val availableHeight = max(0f, height - verticalInset * 2)
             val estimatedPlaybackHeight = 120f + (if (preferences.showProgress) 58f else 0f) +
                 (if (preferences.showTransport) 72f else 0f)
-            val contentWidth = min(availableWidth, when (mode) {
+            val maxContentWidth = when (mode) {
                 Mode.STACKED -> 470f
                 Mode.ARTWORK_AND_CONTROLS -> 920f
-                Mode.ARTWORK_AND_LYRICS -> 1_180f
-            })
+                Mode.ARTWORK_AND_LYRICS -> if (television) min(width * 0.84f, 1_080f) else 1_180f
+            }
+            val contentWidth = min(availableWidth, maxContentWidth)
             val leadingWidth = when (mode) {
                 Mode.STACKED -> contentWidth
                 Mode.ARTWORK_AND_CONTROLS -> min(440f, (contentWidth - gap) / 2)
@@ -54,7 +58,14 @@ internal data class NativePlayerLayout(
             }
             val lyricsHeight = if (mode == Mode.ARTWORK_AND_LYRICS) availableHeight
                 else (height * 0.64f).coerceIn(280f, 520f)
-            return NativePlayerLayout(mode, gap, coverSide, leadingWidth, contentWidth, lyricsHeight, verticalInset)
+            if (!television) {
+                return NativePlayerLayout(mode, gap, coverSide, leadingWidth, contentWidth, lyricsHeight, verticalInset)
+            }
+
+            // Give the square cover and the details the same width on a TV.
+            val tvSide = min(coverSide, TV_COVER_MAX_DP)
+            val tvContentWidth = if (mode == Mode.ARTWORK_AND_CONTROLS) tvSide * 2 + gap else contentWidth
+            return NativePlayerLayout(mode, gap, tvSide, tvSide, tvContentWidth, lyricsHeight, verticalInset)
         }
     }
 }

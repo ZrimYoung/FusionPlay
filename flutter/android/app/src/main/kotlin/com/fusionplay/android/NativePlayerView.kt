@@ -32,6 +32,7 @@ import android.widget.PopupWindow
 import android.widget.ProgressBar
 import android.widget.ScrollView
 import android.widget.SeekBar
+import android.widget.Space
 import android.widget.TextView
 import com.airplayreceiver.desktop.backend.AppState
 import com.airplayreceiver.desktop.backend.MediaControlAvailability
@@ -127,11 +128,16 @@ internal class NativePlayerView(
     private val details = vertical()
     private val fitPlaybackLayout = Runnable(::updateLayout)
     private val metadata = vertical()
-    private val title = label(27f, NativePlayerColors.text, semibold = true)
-    private val subtitle = label(16f, NativePlayerColors.secondaryText)
+    private val title = label(if (television) 24f else 27f, NativePlayerColors.text, semibold = true)
+    private val subtitle = label(if (television) 14f else 16f, NativePlayerColors.secondaryText)
     private val detailsError = label(14f, NativePlayerColors.warning)
     private val timeline = vertical()
-    private val seek = slider("播放进度", TIMELINE_STEPS)
+    private val seek = slider("播放进度", TIMELINE_STEPS).apply {
+        if (television) {
+            setPaddingRelative(0, paddingTop, 0, paddingBottom)
+            thumbOffset = 0
+        }
+    }
     private val elapsed = label(12f, NativePlayerColors.secondaryText).apply { setTypeface(Typeface.MONOSPACE) }
     private val total = label(12f, NativePlayerColors.secondaryText).apply { setTypeface(Typeface.MONOSPACE) }
     private var touchTracking = false
@@ -146,9 +152,15 @@ internal class NativePlayerView(
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER
     }
-    private val previous = action(NativePlayerIcon.PREVIOUS, "上一曲", 22f) { onPlayback(PlaybackCommand.PREVIOUS_TRACK) }
-    private val playPause = action(NativePlayerIcon.PLAY, "播放", 27f, 36) { onPlayback(PlaybackCommand.PLAY_PAUSE) }
-    private val next = action(NativePlayerIcon.NEXT, "下一曲", 22f) { onPlayback(PlaybackCommand.NEXT_TRACK) }
+    private val previous = action(NativePlayerIcon.PREVIOUS, "上一曲", if (television) 18f else 22f) {
+        onPlayback(PlaybackCommand.PREVIOUS_TRACK)
+    }
+    private val playPause = action(NativePlayerIcon.PLAY, "播放", if (television) 22f else 27f, 36) {
+        onPlayback(PlaybackCommand.PLAY_PAUSE)
+    }
+    private val next = action(NativePlayerIcon.NEXT, "下一曲", if (television) 18f else 22f) {
+        onPlayback(PlaybackCommand.NEXT_TRACK)
+    }
     private val lyrics = NativeLyricsView(context, onSeek, television = television)
     var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)?
         get() = lyrics.onRemoteLyricsBrowsingChanged
@@ -211,17 +223,20 @@ internal class NativePlayerView(
         timestamps.addView(elapsed, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
         timestamps.addView(total)
         timeline.addView(timestamps, detailsRow())
-        val primaryControlSize = dp(if (television) 54f else 62f)
-        val sideControlSize = dp(if (television) 48f else 52f)
-        val controlSpacing = dp(if (television) 20f else 24f)
+        val primaryControlSize = dp(if (television) 50f else 62f)
+        val sideControlSize = dp(if (television) 44f else 52f)
         details.addView(transport, LinearLayout.LayoutParams(MATCH_PARENT, primaryControlSize).apply {
             topMargin = dp(if (television) 6f else 10f)
         })
         transport.addView(previous, LinearLayout.LayoutParams(sideControlSize, sideControlSize))
+        if (television) transport.addView(Space(context), LinearLayout.LayoutParams(0, 0, 1f))
         transport.addView(playPause, LinearLayout.LayoutParams(primaryControlSize, primaryControlSize).apply {
-            marginStart = controlSpacing
-            marginEnd = controlSpacing
+            if (!television) {
+                marginStart = dp(24f)
+                marginEnd = dp(24f)
+            }
         })
+        if (television) transport.addView(Space(context), LinearLayout.LayoutParams(0, 0, 1f))
         transport.addView(next, LinearLayout.LayoutParams(sideControlSize, sideControlSize))
         details.addView(detailsError, detailsRow(if (television) 8f else 10f))
         if (television) details.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
@@ -422,7 +437,8 @@ internal class NativePlayerView(
         val playbackHeight = details.measuredHeight.takeIf { television && hasTrack && it > 0 }
             ?.let { it / density + TV_DETAILS_GAP }
         val nextLayout = NativePlayerLayout.fit(
-            widthDp, heightDp, preferences, resources.configuration.fontScale >= 1.35f, playbackHeight,
+            widthDp, heightDp, preferences, resources.configuration.fontScale >= 1.35f,
+            playbackHeight = playbackHeight, television = television,
         )
         if (layout == nextLayout) return
         val previousMode = layout?.mode
@@ -443,12 +459,18 @@ internal class NativePlayerView(
         content.layoutParams = LayoutParams(contentWidth, WRAP_CONTENT, Gravity.CENTER)
         playback.orientation = if (controlsBeside) horizontal else vertical
         playback.gravity = Gravity.CENTER
-        playback.layoutParams = LinearLayout.LayoutParams(if (lyricsBeside) leading else MATCH_PARENT, WRAP_CONTENT)
+        val playbackWidth = if (lyricsBeside || (television && !controlsBeside)) leading else MATCH_PARENT
+        playback.layoutParams = LinearLayout.LayoutParams(playbackWidth, WRAP_CONTENT)
         coverSlot.layoutParams = LinearLayout.LayoutParams(if (controlsBeside) leading else side, side)
         cover.layoutParams = LayoutParams(side, side, Gravity.CENTER)
         val radius = minOf(25f, nextLayout.coverSide * 0.058f)
         cover.background = card(0xFF20323B.toInt(), radius, 0x22FFFFFF)
-        details.layoutParams = LinearLayout.LayoutParams(if (controlsBeside) minOf(dp(420f), contentWidth - leading - gap).coerceAtLeast(1) else MATCH_PARENT, WRAP_CONTENT).apply {
+        val detailsWidth = when {
+            controlsBeside && television -> side
+            controlsBeside -> minOf(dp(420f), contentWidth - leading - gap).coerceAtLeast(1)
+            else -> MATCH_PARENT
+        }
+        details.layoutParams = LinearLayout.LayoutParams(detailsWidth, WRAP_CONTENT).apply {
             if (controlsBeside) marginStart = gap else topMargin = dp(when {
                 television -> TV_DETAILS_GAP
                 lyricsBeside -> 22f
@@ -750,7 +772,7 @@ internal class NativePlayerView(
         private const val TOOLBAR_DELAY_MS = 3_000L
         private const val SEEK_CONFIRMATION_MS = 3_000L
         private const val TIMELINE_STEPS = 10_000
-        private const val TV_DETAILS_GAP = 16f
+        private const val TV_DETAILS_GAP = 12f
         private const val TV_TEXT_SCALE = 0.85f
         private val DIRECTIONAL_KEYS = setOf(KeyEvent.KEYCODE_TAB, KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER)

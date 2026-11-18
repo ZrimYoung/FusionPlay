@@ -7,17 +7,40 @@ import org.junit.Test
 
 class NativePlayerLayoutTest {
     @Test
-    fun `tv sizes the cover to the measured controls and metadata height`() {
+    fun `tv lyrics split keeps the cover and playback details in the same compact column`() {
         val lyrics = NativePlayerPreferences(showLyrics = true)
         val compactDetails = 154f
-        val wrappedDetails = 218f
-        val compact = NativePlayerLayout.fit(960f, 482f, lyrics, largeText = false, playbackHeight = compactDetails)
-        val wrapped = NativePlayerLayout.fit(960f, 482f, lyrics, largeText = false, playbackHeight = wrappedDetails)
+        val wrappedDetails = 248f
+        val compact = NativePlayerLayout.fit(
+            960f, 482f, lyrics, largeText = false, playbackHeight = compactDetails, television = true,
+        )
+        val wrapped = NativePlayerLayout.fit(
+            960f, 482f, lyrics, largeText = false, playbackHeight = wrappedDetails, television = true,
+        )
         assertEquals(Mode.ARTWORK_AND_LYRICS, compact.mode)
+        assertEquals(228f, compact.coverSide, 0.01f)
+        assertEquals(compact.coverSide, compact.leadingWidth, 0.01f)
+        assertEquals(wrapped.coverSide, wrapped.leadingWidth, 0.01f)
+        assertEquals(compact.contentWidth, wrapped.contentWidth, 0.01f)
         assertTrue(compact.coverSide > wrapped.coverSide)
-        assertTrue(compact.coverSide <= compact.leadingWidth)
-        assertEquals(compact.lyricsHeight, compact.coverSide + compactDetails, 0.01f)
+        assertTrue(compact.coverSide + compactDetails < compact.lyricsHeight)
+        assertTrue(compact.contentWidth - compact.leadingWidth - compact.gap > compact.leadingWidth)
         assertEquals(wrapped.lyricsHeight, wrapped.coverSide + wrappedDetails, 0.01f)
+    }
+
+    @Test
+    fun `tv without lyrics keeps both sides compact and narrow windows keep the stacked controls aligned`() {
+        val wide = NativePlayerLayout.fit(960f, 482f, NativePlayerPreferences(), largeText = false, television = true)
+        val narrow = NativePlayerLayout.fit(
+            540f, 720f, NativePlayerPreferences(showLyrics = true), largeText = false, television = true,
+        )
+
+        assertEquals(Mode.ARTWORK_AND_CONTROLS, wide.mode)
+        assertEquals(wide.coverSide, wide.leadingWidth, 0.01f)
+        assertEquals(wide.coverSide * 2 + wide.gap, wide.contentWidth, 0.01f)
+        assertEquals(Mode.STACKED, narrow.mode)
+        assertEquals(narrow.coverSide, narrow.leadingWidth, 0.01f)
+        assertTrue(narrow.contentWidth > narrow.leadingWidth)
     }
 
     @Test
