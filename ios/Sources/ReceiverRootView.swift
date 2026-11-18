@@ -485,7 +485,7 @@ struct ReceiverRootView: View {
             .contentShape(Rectangle())
             .accessibilityHidden(true)
         }
-        .buttonStyle(TransportButtonStyle())
+        .buttonStyle(PlaybackButtonStyle())
         .frame(maxWidth: .infinity)
         .accessibilityLabel(Text(label))
     }
@@ -500,7 +500,7 @@ struct ReceiverRootView: View {
     }
 }
 
-private struct TransportButtonStyle: ButtonStyle {
+private struct PlaybackButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
     }
@@ -810,7 +810,8 @@ private struct ReceiverLyricsView: View {
                 following = true
                 model.seek(to: timestamp)
             } label: { label }
-                .buttonStyle(.plain)
+                .buttonStyle(PlaybackButtonStyle())
+                // Waiting for a playback command must not dim every lyric row.
                 .disabled(!model.canSeek)
                 .accessibilityHint("跳到这一句")
         } else {
