@@ -2,6 +2,7 @@ using FusionPlay.Core;
 using FusionPlay.Windows.Platform;
 using System.Globalization;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
@@ -20,7 +21,7 @@ public sealed partial class MainWindow : Window
 {
     private readonly ReceiverController model;
     private readonly Action settings;
-    private readonly Backdrop backdrop, miniBackdrop, loadingBackdrop, lyricsBackdrop, expandedLyricsBackdrop;
+    private readonly Backdrop backdrop, miniBackdrop, loadingBackdrop, lyricsBackdrop, expandedLyricsBackdrop, sceneBackdrop;
     private readonly global::Windows.UI.ViewManagement.AccessibilitySettings accessibility = new();
     private readonly global::Windows.UI.ViewManagement.UISettings appearance = new();
     private readonly Brush lyricFallback = Gradient(global::Windows.UI.Color.FromArgb(255, 43, 54, 77), global::Windows.UI.Color.FromArgb(255, 41, 33, 56), global::Windows.UI.Color.FromArgb(255, 20, 26, 41));
@@ -28,9 +29,11 @@ public sealed partial class MainWindow : Window
     private readonly Brush lyricEmptyShade = Gradient(global::Windows.UI.Color.FromArgb(0, 0, 0, 0), global::Windows.UI.Color.FromArgb(56, 0, 0, 0));
     private readonly Brush legacyShade = new SolidColorBrush(global::Windows.UI.Color.FromArgb(153, 0, 0, 0));
     private readonly Brush charcoal = new SolidColorBrush(global::Windows.UI.Color.FromArgb(255, 12, 12, 12));
+    private readonly Brush transparent = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
     private readonly Brush captionBackdrop = new SolidColorBrush(global::Windows.UI.Color.FromArgb(100, 20, 20, 20));
     private readonly ISquareWindow squareSizing;
     private readonly PlayerFullScreen fullScreen;
+    private readonly PlayerAcrylic acrylic;
     private readonly WindowResizeTransition resizeTransition;
     private readonly PlayerLayoutTransition layoutTransition;
     private readonly LyricsView miniLyrics, expandedLyrics;
@@ -40,7 +43,9 @@ public sealed partial class MainWindow : Window
     private BitmapImage? lastArtwork;
     private string? progressColorKey;
     private (double Width, double Height, bool Lyrics, bool Progress, bool Transport, double ProgressHeight, double TransportHeight)? appliedLayout;
-    private bool? configuredLyricsLayout;
+    private bool? configuredLyricsLayout, configuredMiniLyricsLayout;
+    private bool presenterTransitionPending, geometryCommitQueued;
+    private long geometryQueuedVersion;
     private bool? requestedLyricsLayout;
     private bool lyricsLayoutTransitioning, contentTransitionDone, nativeTransitionDone, holdExpandedLayout, closeShown = true;
     private long layoutTransitionVersion;
@@ -67,6 +72,7 @@ public sealed partial class MainWindow : Window
     {
         model = controller; settings = openSettings;
         InitializeComponent();
+        acrylic = new PlayerAcrylic(this);
         var coverClip = new RectangleGeometry { Rect = new global::Windows.Foundation.Rect(0, 0, MiniCoverPanel.ActualWidth, MiniCoverPanel.ActualHeight) }; MiniCoverPanel.Clip = coverClip;
         MiniCoverPanel.SizeChanged += (_, args) => coverClip.Rect = new global::Windows.Foundation.Rect(0, 0, args.NewSize.Width, args.NewSize.Height);
         miniLyrics = new LyricsView(); expandedLyrics = new LyricsView();
@@ -89,17 +95,21 @@ public sealed partial class MainWindow : Window
         resizeTransition = new WindowResizeTransition(this, squareSizing);
         layoutTransition = new PlayerLayoutTransition(RootGrid,
             [MiniControlsTransitionLayer, ExpandedDetails, MiniLyricsHost, ExpandedLyricsHost],
-            [(MiniCoverPanel, true), (CoverFrame, true), (ExpandedDetails, false), (MiniControlsTransitionLayer, false)]);
+            [(MiniArtworkLayer, true), (CoverFrame, true), (ExpandedDetails, false), (MiniControlsTransitionLayer, false)],
+            [MiniRoot, ExpandedRoot], () => compact ? MiniRoot : ExpandedRoot,
+            [(MiniArtworkLayer, CoverFrame), (MiniControlsTransitionLayer, ExpandedDetails)], ClientFrame);
         squareSizing.MoveSizeStarted += WindowMoveSizeStarted;
         fullScreen = new PlayerFullScreen(this, () => model.Preferences.Value.Pinned, active => squareSizing.SetPlayerLayout(lyricsVisible, active));
         fullScreen.Changed += FullScreenChanged;
+        fullScreen.Changing += FullScreenChanging;
         transportTransition = new TransportTransition(MiniTransport);
         expandedTransportTransition = new TransportTransition(TransportPanel, 52);
         progressTransition = new TransportTransition(MiniProgressPanel, 48, clipToBounds: true);
         expandedProgressTransition = new TransportTransition(ProgressPanel, 48, clipToBounds: true);
         AttachVolume(VolumeSlider, model);
-        RootGrid.Loaded += (_, _) => { UiTypography.Apply(RootGrid, model.Preferences.Value, force: true); UpdateInputRegions(); };
+        RootGrid.Loaded += (_, _) => { UiTypography.Apply(RootGrid, model.Preferences.Value, force: true); UpdateInputRegions(); layoutTransition.Remember(); };
         RootGrid.LayoutUpdated += Root_LayoutUpdated;
+        AppWindow.Changed += WindowFrameChanged;
         WindowSizing.ResizeContent(this, 420, 420);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         AppWindow.Closing += (_, args) =>
@@ -115,11 +125,14 @@ public sealed partial class MainWindow : Window
         loadingBackdrop = new Backdrop(LoadingArtworkLayer, blur: 12);
         lyricsBackdrop = new Backdrop(MiniLyricsBackground, blur: 48);
         expandedLyricsBackdrop = new Backdrop(ExpandedLyricsBackground, blur: 48);
+        sceneBackdrop = new Backdrop(SceneBackingLayer, blur: 48);
         backdrop.Changed += Render; miniBackdrop.Changed += Render; loadingBackdrop.Changed += Render;
         backdrop.Failed += LogBackdropFailure; miniBackdrop.Failed += LogBackdropFailure; loadingBackdrop.Failed += LogBackdropFailure;
         lyricsBackdrop.Changed += Render; lyricsBackdrop.Failed += LogBackdropFailure;
         expandedLyricsBackdrop.Changed += Render; expandedLyricsBackdrop.Failed += LogBackdropFailure;
+        sceneBackdrop.Changed += Render; sceneBackdrop.Failed += LogBackdropFailure;
         appearance.ColorValuesChanged += ContrastChanged;
+        appearance.AdvancedEffectsEnabledChanged += ContrastChanged;
         hideTimer = DispatcherQueue.CreateTimer(); hideTimer.IsRepeating = false;
         hideTimer.Interval = TimeSpan.FromMilliseconds(400);
         hideTimer.Tick += (_, _) => { if (compact && !pointerInside && !focusInside) { ShowControls(false); ShowCaption(false); } };
@@ -148,17 +161,28 @@ public sealed partial class MainWindow : Window
             backdrop.Changed -= Render; miniBackdrop.Changed -= Render; loadingBackdrop.Changed -= Render;
             backdrop.Failed -= LogBackdropFailure; miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
             lyricsBackdrop.Changed -= Render; lyricsBackdrop.Failed -= LogBackdropFailure;
-            expandedLyricsBackdrop.Changed -= Render; expandedLyricsBackdrop.Failed -= LogBackdropFailure; appearance.ColorValuesChanged -= ContrastChanged;
+            expandedLyricsBackdrop.Changed -= Render; expandedLyricsBackdrop.Failed -= LogBackdropFailure; appearance.ColorValuesChanged -= ContrastChanged; appearance.AdvancedEffectsEnabledChanged -= ContrastChanged;
+            sceneBackdrop.Changed -= Render; sceneBackdrop.Failed -= LogBackdropFailure;
             miniLyrics.SeekRequested -= SeekLyric; expandedLyrics.SeekRequested -= SeekLyric;
-            miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Dispose();
+            miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose(); acrylic.Dispose();
             squareSizing.MoveSizeStarted -= WindowMoveSizeStarted; layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
+            AppWindow.Changed -= WindowFrameChanged;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
-            hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); progressTransition.Dispose(); expandedProgressTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose(); lyricsBackdrop.Dispose(); expandedLyricsBackdrop.Dispose();
+            hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); progressTransition.Dispose(); expandedProgressTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose(); lyricsBackdrop.Dispose(); expandedLyricsBackdrop.Dispose(); sceneBackdrop.Dispose();
         };
         Render(); ScheduleHide();
     }
     private void LogBackdropFailure(string code) => model.Store.EventDiagnostic("backdrop:" + code);
+    [StructLayout(LayoutKind.Sequential)] private struct ClientPoint { public int X, Y; }
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ClientToScreen(nint window, ref ClientPoint point);
+    [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    private (global::Windows.Foundation.Point Origin, double Scale) ClientFrame()
+    {
+        nint handle = WinRT.Interop.WindowNative.GetWindowHandle(this); var point = new ClientPoint();
+        ClientToScreen(handle, ref point);
+        return (new(point.X, point.Y), Math.Max(96, GetDpiForWindow(handle)) / 96.0);
+    }
     private void ContrastChanged(global::Windows.UI.ViewManagement.UISettings sender, object args)
         => DispatcherQueue.TryEnqueue(() => { if (!closed) Render(); });
     private static Brush Gradient(params global::Windows.UI.Color[] colors)
@@ -187,7 +211,7 @@ public sealed partial class MainWindow : Window
     }
     private void Render()
     {
-        if (closed || miniBackdrop == null || backdrop == null) return;
+        if (closed || presenterTransitionPending || miniBackdrop == null || backdrop == null || sceneBackdrop == null) return;
         rendering = true;
         var state = model.State; var preferences = model.Preferences.Value;
         ulong? displayPosition = model.DisplayPositionMs;
@@ -205,23 +229,44 @@ public sealed partial class MainWindow : Window
         StatusText.Text = model.Busy ? L.Text("正在处理…") : L.Text(state.PhaseLabel);
         UpdateCover();
         MiniPlaceholder.Visibility = CoverPlaceholder.Visibility = model.Artwork == null ? Visibility.Visible : Visibility.Collapsed;
-        bool legacyExpandedEffects = backdrop.SetArtwork(!compact && !lyricsVisible ? model.ArtworkBytes : null);
-        bool expandedLyricEffects = expandedLyricsBackdrop.SetArtwork(!compact && lyricsVisible ? model.ArtworkBytes : null);
-        bool expandedEffects = lyricsVisible ? expandedLyricEffects : legacyExpandedEffects;
-        bool effects = miniBackdrop.SetArtwork(compact ? model.ArtworkBytes : null);
-        loadingBackdrop.SetArtwork(compact && model.ArtworkLoading ? model.ArtworkBytes : null);
-        bool miniLyricEffects = lyricsBackdrop.SetArtwork(compact && lyricsVisible ? model.ArtworkBytes : null);
+        bool legacyExpandedEffects = backdrop.SetArtwork(model.ArtworkBytes);
+        bool expandedLyricEffects = expandedLyricsBackdrop.SetArtwork(model.ArtworkBytes);
+        bool expandedLyricsMode = !compact ? lyricsVisible : configuredLyricsLayout == true;
+        bool miniLyricsMode = compact ? lyricsVisible : configuredMiniLyricsLayout == true;
+        bool expandedEffects = expandedLyricsMode ? expandedLyricEffects : legacyExpandedEffects;
+        bool effects = miniBackdrop.SetArtwork(model.ArtworkBytes);
+        loadingBackdrop.SetArtwork(model.ArtworkLoading ? model.ArtworkBytes : null);
+        bool miniLyricEffects = lyricsBackdrop.SetArtwork(model.ArtworkBytes);
+        bool sceneEffects = sceneBackdrop.SetArtwork(model.ArtworkBytes);
         bool highContrast = accessibility.HighContrast;
+        bool acrylicRequested = lyricsVisible && preferences.LyricsBackgroundMode == "acrylic";
+        acrylic.Update(acrylicRequested, highContrast);
+        bool expandedAcrylic = acrylicRequested && expandedLyricsMode;
+        bool miniAcrylic = acrylicRequested && miniLyricsMode;
+        RootGrid.RequestedTheme = acrylicRequested && !highContrast ? ElementTheme.Dark : ElementTheme.Default;
+        BackdropLayer.Visibility = expandedLyricsMode || expandedAcrylic ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedLyricsBackground.Visibility = expandedLyricsMode && !expandedAcrylic ? Visibility.Visible : Visibility.Collapsed;
+        MiniLyricsBackground.Visibility = miniLyricsMode ? Visibility.Visible : Visibility.Collapsed;
+        Grid.SetRowSpan(MiniLyricsBackground, miniAcrylic ? 1 : 3);
+        Grid.SetRowSpan(MiniLyricsGlobalShade, miniAcrylic ? 1 : 3);
+        SceneBacking.Visibility = lyricsLayoutTransitioning ? Visibility.Visible : Visibility.Collapsed;
         Brush solid = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
-        ExpandedRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : expandedEffects ? charcoal : solid;
-        ExpandedRoot.RequestedTheme = !highContrast && (lyricsVisible || expandedEffects) ? ElementTheme.Dark : ElementTheme.Default;
-        BackdropShade.Background = lyricsVisible ? expandedLyricEffects ? lyricArtShade : lyricEmptyShade : legacyShade;
-        BackdropShade.Visibility = !highContrast && (lyricsVisible || expandedEffects) ? Visibility.Visible : Visibility.Collapsed;
+        Brush materialBackground = highContrast ? solid : acrylic.IsActive ? transparent : charcoal;
+        RootGrid.Background = acrylicRequested ? materialBackground : solid;
+        MiniLyricsBackground.Background = miniAcrylic ? highContrast ? solid : lyricFallback : null;
+        SceneBacking.Background = acrylicRequested ? materialBackground : highContrast ? solid : lyricFallback;
+        SceneBackingLayer.Visibility = acrylicRequested ? Visibility.Collapsed : Visibility.Visible;
+        SceneBackingShade.Background = sceneEffects ? lyricArtShade : lyricEmptyShade;
+        SceneBackingShade.Visibility = highContrast || acrylicRequested ? Visibility.Collapsed : Visibility.Visible;
+        ExpandedRoot.Background = expandedAcrylic ? materialBackground : highContrast ? solid : expandedLyricsMode ? lyricFallback : expandedEffects ? charcoal : solid;
+        ExpandedRoot.RequestedTheme = !highContrast && (expandedLyricsMode || expandedEffects) ? ElementTheme.Dark : ElementTheme.Default;
+        BackdropShade.Background = expandedLyricsMode ? expandedLyricEffects ? lyricArtShade : lyricEmptyShade : legacyShade;
+        BackdropShade.Visibility = !highContrast && !expandedAcrylic && (expandedLyricsMode || expandedEffects) ? Visibility.Visible : Visibility.Collapsed;
         MiniControls.Background = highContrast ? solid : effects ? null : charcoal;
-        MiniRoot.Background = highContrast ? solid : lyricsVisible ? lyricFallback : charcoal;
+        MiniRoot.Background = miniAcrylic ? materialBackground : highContrast ? solid : miniLyricsMode ? lyricFallback : charcoal;
         MiniRoot.RequestedTheme = highContrast ? ElementTheme.Default : ElementTheme.Dark;
         MiniLyricsGlobalShade.Background = miniLyricEffects ? lyricArtShade : lyricEmptyShade;
-        MiniLyricsGlobalShade.Visibility = lyricsVisible && !highContrast ? Visibility.Visible : Visibility.Collapsed;
+        MiniLyricsGlobalShade.Visibility = miniLyricsMode && !highContrast ? Visibility.Visible : Visibility.Collapsed;
         foreach (var button in new[] { CloseButton, PinButton, MiniFullScreenButton })
             button.Background = effects ? captionBackdrop : solid;
         MiniShade.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
@@ -333,7 +378,7 @@ public sealed partial class MainWindow : Window
     }
     private void RequestLyricsLayout(bool visible)
     {
-        bool animate = RootGrid.IsLoaded && (AppWindow.IsVisible || AnimateHiddenLayoutForCheck) && Backdrop.AnimationsEnabled;
+        bool animate = CanAnimateLayout;
         if (requestedLyricsLayout == visible)
         {
             if (lyricsLayoutTransitioning && !animate) CancelLyricsTransition(snapResize: true);
@@ -354,6 +399,7 @@ public sealed partial class MainWindow : Window
         long request = ++layoutTransitionVersion;
         lyricsLayoutTransitioning = true; contentTransitionDone = nativeTransitionDone = false;
         holdExpandedLayout = RootGrid.ActualWidth >= 600 && !compact;
+        layoutTransition.Capture(); SceneBacking.Visibility = Visibility.Visible;
         ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer();
         ProgressSeek.IsEnabled = MiniProgressSeek.IsEnabled = false;
         ExpandedDetails.IsHitTestVisible = MiniControlsTransitionLayer.IsHitTestVisible = MiniLyricsHost.IsHitTestVisible = ExpandedLyricsHost.IsHitTestVisible = false;
@@ -375,7 +421,36 @@ public sealed partial class MainWindow : Window
         {
             if (closed || request != layoutTransitionVersion) return;
             contentTransitionDone = true; CompleteLyricsTransition(request);
-        }, true);
+        }, true, visible ? null : compact ? MiniLyricsHost : ExpandedLyricsHost);
+    }
+    private bool CanAnimateLayout => RootGrid.IsLoaded && (AppWindow.IsVisible || AnimateHiddenLayoutForCheck) && Backdrop.AnimationsEnabled;
+    private long BeginSceneTransition(bool useRemembered)
+    {
+        long request = ++layoutTransitionVersion;
+        bool cached = useRemembered && !layoutTransition.IsRunning;
+        lyricsLayoutTransitioning = true; holdExpandedLayout = false; contentTransitionDone = false; nativeTransitionDone = true;
+        layoutTransition.Capture(cached); SceneBacking.Visibility = Visibility.Visible;
+        ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); ProgressSeek.IsEnabled = MiniProgressSeek.IsEnabled = false;
+        ExpandedDetails.IsHitTestVisible = MiniControlsTransitionLayer.IsHitTestVisible = MiniLyricsHost.IsHitTestVisible = ExpandedLyricsHost.IsHitTestVisible = false;
+        UpdateInputRegions(); return request;
+    }
+    private void CommitSceneTransition(long request)
+    {
+        if (closed || request != layoutTransitionVersion) return;
+        layoutTransition.Run(() =>
+        {
+            if (closed || request != layoutTransitionVersion) return;
+            appliedLayout = null; Render();
+        }, () =>
+        {
+            if (closed || request != layoutTransitionVersion) return;
+            contentTransitionDone = true; CompleteLyricsTransition(request);
+        }, CanAnimateLayout);
+    }
+    private void WindowFrameChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (closed || lyricsLayoutTransitioning || presenterTransitionPending || !args.DidPositionChange) return;
+        layoutTransition.Remember();
     }
     private void CompleteLyricsTransition(long request)
     {
@@ -387,6 +462,7 @@ public sealed partial class MainWindow : Window
     {
         if (!lyricsLayoutTransitioning) return;
         ++layoutTransitionVersion;
+        presenterTransitionPending = geometryCommitQueued = false;
         layoutTransition.Cancel(); resizeTransition.Cancel(snapResize);
         lyricsLayoutTransitioning = holdExpandedLayout = false;
         lyricsVisible = requestedLyricsLayout ?? lyricsVisible; appliedLayout = null;
@@ -400,6 +476,13 @@ public sealed partial class MainWindow : Window
     { if (!closed && lyricsLayoutTransitioning) CancelLyricsTransition(snapResize: false); }
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
     {
+        if (presenterTransitionPending) { QueueGeometryCommit(); return; }
+        bool nextCompact = !holdExpandedLayout && WindowSizing.IsCompactContent(e.NewSize.Width, e.NewSize.Height, lyricsVisible);
+        if (compact != nextCompact && CanAnimateLayout)
+        {
+            long request = BeginSceneTransition(useRemembered: true);
+            CommitSceneTransition(request); return;
+        }
         bool wasCompact = compact;
         ApplyPlayerLayout(e.NewSize.Width, e.NewSize.Height);
         bool changed = wasCompact != compact;
@@ -429,13 +512,14 @@ public sealed partial class MainWindow : Window
         var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight);
         if (appliedLayout is { } previousLayout && previousLayout == layout) return;
         appliedLayout = layout;
-        bool configure = configuredLyricsLayout != lyricsVisible;
-        configuredLyricsLayout = lyricsVisible;
         bool nextCompact = !holdExpandedLayout && WindowSizing.IsCompactContent(width, height, lyricsVisible);
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
         compact = nextCompact;
-        ExpandedRoot.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-        MiniRoot.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
+        ExpandedRoot.Visibility = !compact || ReferenceEquals(layoutTransition?.RetainedScene, ExpandedRoot) ? Visibility.Visible : Visibility.Collapsed;
+        MiniRoot.Visibility = compact || ReferenceEquals(layoutTransition?.RetainedScene, MiniRoot) ? Visibility.Visible : Visibility.Collapsed;
+        if (compact)
+        {
+        configuredMiniLyricsLayout = lyricsVisible;
         bool squareCover = lyricsVisible || lyricsLayoutTransitioning;
         MiniCoverRow.Height = squareCover ? new GridLength(width) : new GridLength(1, GridUnitType.Star);
         MiniCoverPanel.Height = squareCover ? width : double.NaN;
@@ -444,10 +528,15 @@ public sealed partial class MainWindow : Window
         MiniLyricsRow.Height = lyricsVisible ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
         MiniLyricsHost.Visibility = MiniLyricsDivider.Visibility = lyricsVisible ? Visibility.Visible : Visibility.Collapsed;
         MiniLyricsHost.Padding = new Thickness(width < 320 ? 16 : 22, 0, width < 320 ? 16 : 22, 12);
-        ExpandedLyricsHost.Visibility = lyricsVisible ? Visibility.Visible : Visibility.Collapsed;
         MiniTitle.FontSize = width < 320 ? 17 : 20; MiniArtist.FontSize = 14;
         MiniTitle.MaxLines = lyricsVisible ? 1 : 2;
+        }
 
+        if (!compact)
+        {
+        bool configure = configuredLyricsLayout != lyricsVisible;
+        configuredLyricsLayout = lyricsVisible;
+        ExpandedLyricsHost.Visibility = lyricsVisible ? Visibility.Visible : Visibility.Collapsed;
         double side;
         if (lyricsVisible)
         {
@@ -505,13 +594,15 @@ public sealed partial class MainWindow : Window
             }
         }
         CoverFrame.Width = CoverFrame.Height = side; CoverFrame.HorizontalAlignment = HorizontalAlignment.Center; CoverFrame.VerticalAlignment = VerticalAlignment.Top;
+        }
     }
     private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); QueueInputRegions(); }
     private void Root_LayoutUpdated(object? sender, object e)
     {
         // This is a cached comparison, not a forced layout pass. Natural
         // section-height ticks also release the corresponding cover budget.
-        if (!closed && lyricsVisible && !compact) ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
+        if (!closed && !presenterTransitionPending && lyricsVisible && !compact) ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
+        if (!closed && !lyricsLayoutTransitioning && !presenterTransitionPending) layoutTransition?.Remember();
         QueueInputRegions();
     }
     private void QueueInputRegions()
@@ -704,13 +795,46 @@ public sealed partial class MainWindow : Window
     }
     public void ToggleFullScreen()
     {
-        try { CancelLyricsTransition(snapResize: true); fullScreen.Toggle(); }
-        catch (Exception) { preferenceError = L.Text("无法切换全屏，请重试。", "Could not change full screen. Try again."); model.Store.EventDiagnostic("fullscreen_failed"); Render(); }
+        try { if (resizeTransition.IsRunning) CancelLyricsTransition(snapResize: true); fullScreen.Toggle(); }
+        catch (Exception) { CancelLyricsTransition(snapResize: false); preferenceError = L.Text("无法切换全屏，请重试。", "Could not change full screen. Try again."); model.Store.EventDiagnostic("fullscreen_failed"); Render(); }
     }
     private void FullScreen_Click(object sender, RoutedEventArgs e) => ToggleFullScreen();
+    private void FullScreenChanging(bool nextFullScreen)
+    {
+        if (closed) return;
+        if (!CanAnimateLayout) { CancelLyricsTransition(snapResize: true); return; }
+        BeginSceneTransition(useRemembered: false);
+        presenterTransitionPending = true;
+    }
+    private void QueueGeometryCommit()
+    {
+        if (closed || !presenterTransitionPending || geometryCommitQueued) return;
+        long request = layoutTransitionVersion;
+        geometryQueuedVersion = request;
+        geometryCommitQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (geometryQueuedVersion != request) return;
+            geometryCommitQueued = false;
+            if (closed || !presenterTransitionPending) return;
+            if (request != layoutTransitionVersion) { QueueGeometryCommit(); return; }
+            geometryCommitQueued = true;
+            try { RootGrid.UpdateLayout(); }
+            catch (Exception error) when (error is COMException or InvalidOperationException or ObjectDisposedException or ArgumentException)
+            {
+                geometryCommitQueued = false; CancelLyricsTransition(snapResize: false);
+                model.Store.EventDiagnostic("layout_transition_failed:" + error.GetType().Name); return;
+            }
+            geometryCommitQueued = false;
+            if (closed || !presenterTransitionPending || request != layoutTransitionVersion) { QueueGeometryCommit(); return; }
+            presenterTransitionPending = false;
+            CommitSceneTransition(request);
+        });
+        if (!geometryCommitQueued) CancelLyricsTransition(snapResize: false);
+    }
     private void FullScreenChanged()
     {
         if (closed) return;
+        if (presenterTransitionPending) { QueueGeometryCommit(); return; }
         CancelLyricsTransition(snapResize: false);
         ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer();
         Render(); UpdateInputRegions();

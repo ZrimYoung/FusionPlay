@@ -8,6 +8,7 @@ public sealed record UiPreferences
     public bool ShowTransport { get; init; } = true;
     public bool ShowProgress { get; init; } = true;
     public string LyricsDisplayMode { get; init; } = "automatic";
+    public string LyricsBackgroundMode { get; init; } = "album";
     public bool AlwaysShowControls { get; init; }
     public bool Pinned { get; init; }
     public bool ShowPinButton { get; init; }
@@ -85,6 +86,8 @@ public sealed class UiPreferencesStore
             throw new ArgumentException("Unsupported player text rendering.", nameof(preferences));
         if (preferences.LyricsDisplayMode is not ("automatic" or "always" or "never"))
             throw new ArgumentException("Unsupported lyrics display mode.", nameof(preferences));
+        if (preferences.LyricsBackgroundMode is not ("album" or "acrylic"))
+            throw new ArgumentException("Unsupported lyrics background mode.", nameof(preferences));
         if (preferences.ProgressColorMode is not ("system" or "white" or "custom"))
             throw new ArgumentException("Unsupported progress color mode.", nameof(preferences));
         string? color = preferences.ProgressCustomColor;

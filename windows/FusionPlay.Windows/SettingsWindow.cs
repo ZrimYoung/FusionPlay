@@ -57,7 +57,7 @@ internal sealed class SettingsWindow : Window
         later = new() { Name = "CalibrationLater", Content = "+", Width = 34, Height = 34, Padding = new Thickness(0), FontSize = 22 },
         reset = new() { Name = "CalibrationReset", HorizontalAlignment = HorizontalAlignment.Right };
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
-    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" };
+    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" }, lyricsBackgroundMode = new() { Name = "LyricsBackgroundMode" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
         settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
@@ -378,7 +378,21 @@ internal sealed class SettingsWindow : Window
         var lyricsLabel = new StackPanel { Spacing = 4 };
         lyricsLabel.Children.Add(Text("显示歌词", "Show lyrics"));
         lyricsLabel.Children.Add(Text("自动模式在收到有效歌词后显示。", "Automatic shows lyrics when they are available.", true));
-        var lyricsSurface = Surface(Row(lyricsLabel, lyricsDisplayMode));
+        AddSegment(lyricsBackgroundMode, "album", "专辑模糊", "Album blur");
+        AddSegment(lyricsBackgroundMode, "acrylic", "亚克力", "Acrylic");
+        Label(() => AutomationProperties.SetName(lyricsBackgroundMode, L.Text("歌词背景", "Lyrics background")));
+        lyricsBackgroundMode.SelectionChanged += (_, _) =>
+        {
+            if (!renderingPreferences && SegmentKey(lyricsBackgroundMode) is string key)
+                UpdatePreferences(p => p with { LyricsBackgroundMode = key });
+        };
+        var backgroundLabel = new StackPanel { Spacing = 4 };
+        backgroundLabel.Children.Add(Text("歌词背景", "Lyrics background"));
+        backgroundLabel.Children.Add(Text("仅更改歌词区域背景。", "Changes only the background behind lyrics.", true));
+        var lyricsRows = new StackPanel { Spacing = 16 };
+        lyricsRows.Children.Add(Row(lyricsLabel, lyricsDisplayMode));
+        lyricsRows.Children.Add(Row(backgroundLabel, lyricsBackgroundMode));
+        var lyricsSurface = Surface(lyricsRows);
         AddSegment(progressColorMode, "system", "跟随系统", "System"); AddSegment(progressColorMode, "white", "始终白色", "Always white"); AddSegment(progressColorMode, "custom", "自定义", "Custom");
         Label(() =>
         {
@@ -573,6 +587,7 @@ internal sealed class SettingsWindow : Window
             fontSettings.Refresh(); if (Content is FrameworkElement root) UiTypography.Apply(root, preferences);
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
+            SelectSegment(lyricsBackgroundMode, preferences.LyricsBackgroundMode);
             transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
             settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");

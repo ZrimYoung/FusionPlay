@@ -102,7 +102,10 @@ public sealed class LyricsRowPresenter : Button
         StopAnimations(); ReleaseSurface(); item = next; faulted = false; typography = null;
         if (next == null) { original.Text = translation.Text = ""; return; }
         Name = "LyricLine_" + next.Line.Id;
-        original.Text = next.Line.Text.Length == 0 ? "•••" : next.Line.Text; original.CharacterSpacing = next.Line.Text.Length == 0 ? 180 : 0;
+        bool interval = next.Line.Text.Length == 0;
+        // One compact glyph cannot split into a second row in a narrow pane.
+        original.Text = interval ? "…" : next.Line.Text; original.CharacterSpacing = 0;
+        original.TextWrapping = interval ? TextWrapping.NoWrap : TextWrapping.Wrap; original.MaxLines = interval ? 1 : 0;
         translation.Text = next.Line.Translation ?? ""; translation.Visibility = translation.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         if (attached) next.Owner.Register(this); else ApplyState(style: true);
     }
@@ -123,8 +126,9 @@ public sealed class LyricsRowPresenter : Button
             {
                 bool widthOnly = typography != null && next.Size != typography.Size && next == (typography with { Size = next.Size });
                 typography = next;
-                original.FontSize = next.Size; translation.FontSize = owner.Compact ? Math.Max(12, next.Size * .56) : next.Size * .6;
-                original.FontFamily = translation.FontFamily = owner.LyricFont; original.FontWeight = owner.BodyWeight; translation.FontWeight = owner.TranslationWeight;
+                bool interval = current.Line.Text.Length == 0;
+                original.FontSize = interval ? Math.Clamp(next.Size * .65, 14, 20) : next.Size; translation.FontSize = owner.Compact ? Math.Max(12, next.Size * .56) : next.Size * .6;
+                original.FontFamily = translation.FontFamily = owner.LyricFont; original.FontWeight = interval ? Microsoft.UI.Text.FontWeights.Normal : owner.BodyWeight; translation.FontWeight = owner.TranslationWeight;
                 original.Language = translation.Language = L.Language == "en" ? "en-US" : "zh-CN";
                 content.Padding = new Thickness(owner.Bleed + 3, owner.Compact ? 3 : 5, owner.Bleed + 3, owner.Compact ? 3 : 5);
                 measurement.Spacing = owner.Compact ? 5 : 7; Margin = new Thickness(0, 0, 0, owner.Compact ? 12 : 20);
@@ -332,7 +336,7 @@ public sealed class LyricsRowPresenter : Button
     }
     private static CanvasTextLayout CreateTextLayout(CanvasDevice device, TextBlock text, double scale)
     {
-        using var format = PlayerText.CreateFormat(text.FontFamily.Source, (float)(text.FontSize * scale), text.FontWeight, text.FontStyle, TextWrapping.Wrap, TextTrimming.None);
+        using var format = PlayerText.CreateFormat(text.FontFamily.Source, (float)(text.FontSize * scale), text.FontWeight, text.FontStyle, text.TextWrapping, text.TextTrimming);
         var layout = new CanvasTextLayout(device, text.Text, format, (float)Math.Max(1, text.ActualWidth), (float)Math.Max(1, text.ActualHeight));
         if (text.CharacterSpacing != 0) layout.SetCharacterSpacing(0, text.Text.Length, (float)(text.CharacterSpacing * text.FontSize / 1000), 0, 0);
         return layout;
