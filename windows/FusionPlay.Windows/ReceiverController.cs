@@ -15,6 +15,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private NativeReceiver? native;
     private readonly PlaybackTimeline timeline = new();
     private readonly LyricsState lyrics = new();
+    private readonly DisplayMetadataCache displayMetadata = new();
     private long? scheduledLyricsWait;
     private CancellationTokenSource? seekFeedbackExpiry;
     private long generation;
@@ -34,6 +35,20 @@ public sealed class ReceiverController : IAsyncDisposable
     public UiPreferencesStore Preferences { get; }
     public ReceiverSettings Settings { get; private set; } = new();
     public ReceiverSnapshot State => timeline.Source;
+    public bool HasCurrentTrack => DisplayMetadataResolver.HasCurrentTrack(State);
+    public DisplayMetadata DisplayMetadata
+    {
+        get
+        {
+            var state = State;
+            if (!Preferences.Value.CorrectLyricTitles || !HasCurrentTrack || sleeping || disposed)
+            {
+                displayMetadata.Reset();
+                return new(state.Title, state.Artist, state.Album);
+            }
+            return displayMetadata.Resolve(state.Title, state.Artist, state.Album, state.LyricsText);
+        }
+    }
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
     public LyricsDocument Lyrics => lyrics.Document;
     public bool LyricsLoading => lyrics.Loading || lyrics.WaitingForLyrics;
@@ -66,7 +81,7 @@ public sealed class ReceiverController : IAsyncDisposable
         L.Language = Preferences.Value.Language;
         Preferences.Changed += PreferencesChanged;
     }
-    private void PreferencesChanged() { L.Language = Preferences.Value.Language; Notify(); }
+    private void PreferencesChanged() { displayMetadata.Reset(); L.Language = Preferences.Value.Language; Notify(); }
     private void Notify()
     {
         // One view failing to refresh must not interrupt cover loading, polling,
@@ -147,7 +162,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         long request = Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
-        lyrics.Clear(); scheduledLyricsWait = null;
+        lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
         Busy = true; Error = ""; ControlMessage = ""; Notify();
@@ -238,6 +253,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (!timeline.Apply(observation)) return false;
         var snapshot = State;
         bool changedTrack = !Seeking.SameTrack(previous, snapshot);
+        if (changedTrack || !snapshot.ControlsAvailable || !HasCurrentTrack) displayMetadata.Reset();
         if (!timeline.IsPending) StopSeekFeedbackTimer();
         volume.Observe(snapshot.Volume);
         if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
@@ -523,7 +539,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
-        lyrics.Clear(); scheduledLyricsWait = null;
+        lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();

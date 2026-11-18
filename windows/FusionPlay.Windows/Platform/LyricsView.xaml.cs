@@ -55,6 +55,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private int activeIndex = -1, followRevision;
     private bool connected, loading, canSeek, compact, browsing, loaded, disposed, edgeQueued;
     private bool pointerDown;
+    private long browsingDeadline;
+    internal static readonly TimeSpan BrowsingResumeDelay = TimeSpan.FromSeconds(5);
     private bool presentationVisible;
     private double observedRasterScale, observedTextScale = 1;
     private string emptyStateKey = "";
@@ -88,7 +90,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
         ScrollViewer.SetVerticalScrollBarVisibility(list, ScrollBarVisibility.Hidden);
         empty.Children.Add(emptyIcon); empty.Children.Add(loadingRing); empty.Children.Add(emptyTitle); empty.Children.Add(emptyHint);
         var root = new Grid(); root.Children.Add(list); root.Children.Add(empty); Content = root;
-        browsingTimer = DispatcherQueue.CreateTimer(); browsingTimer.IsRepeating = false; browsingTimer.Interval = TimeSpan.FromSeconds(6); browsingTimer.Tick += BrowsingExpired;
+        browsingTimer = DispatcherQueue.CreateTimer(); browsingTimer.IsRepeating = false; browsingTimer.Interval = BrowsingResumeDelay; browsingTimer.Tick += BrowsingExpired;
         glyphTimer = DispatcherQueue.CreateTimer(); glyphTimer.IsRepeating = false; glyphTimer.Interval = TimeSpan.FromMilliseconds(16); glyphTimer.Tick += DrawQueuedGlyphs;
         list.Loaded += ListLoaded;
         list.ContainerContentChanging += ContainerChanging;
@@ -221,7 +223,13 @@ public sealed partial class LyricsView : UserControl, IDisposable
         bottomSpace.Height = document.IsTimed ? Math.Max(14, height * .68) : Math.Max(12, height * .45) + 14;
         QueueEdges();
     }
-    private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args) => QueueEdges();
+    private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args)
+    {
+        QueueEdges();
+        // Native inertia continues after the last wheel/pointer event. Resume
+        // only after scrolling itself has been quiet for the full interval.
+        if (browsing) RestartBrowsingDeadline();
+    }
     private void DirectManipulation(object? sender, object args) => BeginBrowsing();
     private void WheelChanged(object sender, PointerRoutedEventArgs args) { if (args.GetCurrentPoint(list).Properties.MouseWheelDelta != 0) BeginBrowsing(); }
     private void BrowsePointerPressed(object sender, PointerRoutedEventArgs args) { pointerDown = true; pointerStart = args.GetCurrentPoint(list).Position; }
@@ -230,7 +238,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
         if (!pointerDown) return; Point point = args.GetCurrentPoint(list).Position;
         if (Math.Abs(point.X - pointerStart.X) + Math.Abs(point.Y - pointerStart.Y) >= 6) BeginBrowsing();
     }
-    private void PointerEnded(object sender, PointerRoutedEventArgs args) => pointerDown = false;
+    private void PointerEnded(object sender, PointerRoutedEventArgs args)
+    { pointerDown = false; if (browsing) RestartBrowsingDeadline(); }
     private void BrowseKey(object sender, KeyRoutedEventArgs args)
     {
         if (args.Key is VirtualKey.Up or VirtualKey.Down or VirtualKey.PageUp or VirtualKey.PageDown or VirtualKey.Home or VirtualKey.End) BeginBrowsing();
@@ -238,11 +247,23 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private void BeginBrowsing()
     {
         if (disposed || !document.IsTimed) return;
-        browsing = true; ++followRevision; browsingTimer.Stop(); browsingTimer.Start();
+        browsing = true; ++followRevision; RestartBrowsingDeadline();
+    }
+    private void RestartBrowsingDeadline()
+    {
+        browsingDeadline = Stopwatch.GetTimestamp() + (long)(BrowsingResumeDelay.TotalSeconds * Stopwatch.Frequency);
+        browsingTimer.Stop(); browsingTimer.Interval = BrowsingResumeDelay; browsingTimer.Start();
     }
     private void BrowsingExpired(DispatcherQueueTimer sender, object args)
     {
-        if (disposed) return; browsing = false; ScheduleFollow(animated: true);
+        if (disposed || !browsing) return;
+        if (pointerDown) { RestartBrowsingDeadline(); return; }
+        long remaining = browsingDeadline - Stopwatch.GetTimestamp();
+        if (remaining > 0)
+        {
+            browsingTimer.Interval = TimeSpan.FromSeconds(Math.Max(.001, remaining / (double)Stopwatch.Frequency)); browsingTimer.Start(); return;
+        }
+        browsing = false; ScheduleFollow(animated: true);
     }
     private void ReturnToCurrent(object sender, RoutedEventArgs args)
     {

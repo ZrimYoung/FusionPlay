@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
@@ -40,6 +41,7 @@ internal static class SettingsLayoutCheck
         var typography = new List<object>();
         var symbolFonts = new List<object>();
         var captures = new List<object>();
+        var navigationSamples = new List<object>();
         var cleanupErrors = new List<string>();
         nint foreground = GetForegroundWindow();
         Window? anchor = null;
@@ -230,7 +232,7 @@ internal static class SettingsLayoutCheck
                 "settings_titlebar_caption_clipped");
             Require(titleBar.Padding.Right >= settings.AppWindow.TitleBar.RightInset / scale && titleBar.Padding.Left >= settings.AppWindow.TitleBar.LeftInset / scale,
                 "settings_titlebar_native_buttons_not_reserved");
-            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ShowSettingsButton", "ShowFullScreenButton", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ShowSettingsButton", "ShowFullScreenButton", "CorrectLyricTitles", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "MiniControlsVisibility", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
             if (page == "player")
             {
                 var choices = Find<StackPanel>("WindowButtons").Children.OfType<Grid>().Single();
@@ -239,6 +241,8 @@ internal static class SettingsLayoutCheck
                     && new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowFullScreenButton")).GetName() == L.Text("全屏按钮", "Full screen button"), "window_button_choice_names_not_localized");
                 string description = Find<TextBlock>("WindowButtonsDescription").Text;
                 Require(description.Contains("Ctrl+,") && description.Contains("F11") && description.Contains(language == "en" ? "expanded" : "展开"), "window_button_scope_or_shortcut_description_missing");
+                Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("CorrectLyricTitles")).GetName() == L.Text("修正歌词标题", "Correct lyric titles"), "title_correction_choice_name_not_localized");
+                Require(Find<TextBlock>("TitleCorrectionDescription").Text.Contains(language == "en" ? "verifiable" : "可信"), "title_correction_evidence_requirement_missing");
             }
             var controls = Descendants(Root()).OfType<FrameworkElement>().Where(element => controlNames.Contains(element.Name) && Visible(element)
                 && (element is ButtonBase or ComboBox or SelectorBar or TextBox or Slider or Expander)).ToArray();
@@ -376,6 +380,9 @@ internal static class SettingsLayoutCheck
             step = "native_toggle_and_segment_bindings";
             await OnUi(queue!, () => Pass(step, () =>
             {
+                Require(!controller!.Preferences.Value.CorrectLyricTitles && Find<ToggleButton>("CorrectLyricTitles").IsChecked == false, "title_correction_default_not_off");
+                Toggle("CorrectLyricTitles");
+                Require(controller.Preferences.Value.CorrectLyricTitles && new UiPreferencesStore(store.Data).Value.CorrectLyricTitles, "title_correction_choice_not_persisted");
                 Require(controller!.Preferences.Value.ShowSettingsButton && controller.Preferences.Value.ShowFullScreenButton
                     && Find<ToggleButton>("ShowSettingsButton").IsChecked == true && Find<ToggleButton>("ShowFullScreenButton").IsChecked == true, "window_button_choices_default_hidden");
                 Toggle("ShowSettingsButton"); Toggle("ShowFullScreenButton");
@@ -484,6 +491,61 @@ internal static class SettingsLayoutCheck
                 Require(Find<ToggleButton>("ShowTransport").IsChecked == expectedPreferences.ShowTransport && Find<ToggleButton>("ShowProgress").IsChecked == expectedPreferences.ShowProgress && Find<ToggleButton>("ShowPinButton").IsChecked == expectedPreferences.ShowPinButton, "reopened_choice_tiles_not_bound");
                 Require(Find<ToggleButton>("ShowSettingsButton").IsChecked == expectedPreferences.ShowSettingsButton
                     && Find<ToggleButton>("ShowFullScreenButton").IsChecked == expectedPreferences.ShowFullScreenButton, "reopened_window_button_choices_not_bound");
+                Require(Find<ToggleButton>("CorrectLyricTitles").IsChecked == expectedPreferences.CorrectLyricTitles, "reopened_title_correction_choice_not_bound");
+            }));
+            step = "native_navigation_reversal_preserves_page_and_draft";
+            string navigationDraft = "", originalDraft = "";
+            FrameworkElement? receiverPage = null, generalPage = null;
+            long beforeNavigationTransitions = 0;
+            bool expectedMotion = false;
+            SettingsNavigationMotion Motion() => (SettingsNavigationMotion)typeof(SettingsWindow).GetField("navigationMotion", PrivateInstance)!.GetValue(settings)!;
+            void NavigationFrame(string stage)
+            {
+                Background();
+                var nav = Find<NavigationView>("SettingsNavigation"); var motion = Motion();
+                navigationSamples.Add(new { stage, nav.IsPaneOpen, selected = (nav.SelectedItem as NavigationViewItem)?.Tag,
+                    motion.IsTransitioning, motion.TransitionCount, motion.AnimationFailures,
+                    content = (nav.Content as FrameworkElement)?.Name, content_identity_preserved = ReferenceEquals(nav.Content, generalPage),
+                    native_width = settings!.AppWindow.Size.Width, native_height = settings.AppWindow.Size.Height,
+                    visible_presentation_verified = false });
+            }
+            await OnUi(queue!, () =>
+            {
+                Arrange(960, 740); Navigate("receiver");
+                receiverPage = Find<NavigationView>("SettingsNavigation").Content as FrameworkElement;
+                originalDraft = Find<TextBox>("ReceiverName").Text; navigationDraft = "Unapplied Navigation Fixture";
+                Find<TextBox>("ReceiverName").Text = navigationDraft;
+                Navigate("general"); generalPage = Find<NavigationView>("SettingsNavigation").Content as FrameworkElement;
+                Find<Expander>("FontDisclosure").IsExpanded = true;
+                beforeNavigationTransitions = Motion().TransitionCount;
+                expectedMotion = Backdrop.AnimationsEnabled && Find<NavigationView>("SettingsNavigation").IsLoaded;
+                Find<NavigationView>("SettingsNavigation").IsPaneOpen = false;
+                NavigationFrame("close_requested");
+            });
+            await Task.Delay(45);
+            await OnUi(queue!, () => { Find<NavigationView>("SettingsNavigation").IsPaneOpen = true; Navigate("player"); NavigationFrame("open_and_page_reverse"); });
+            await Task.Delay(70);
+            await OnUi(queue!, () => { Find<NavigationView>("SettingsNavigation").IsPaneOpen = false; Navigate("general"); NavigationFrame("latest_close_and_general"); });
+            await Task.Delay(450);
+            await OnUi(queue!, () => Pass(step, () =>
+            {
+                var nav = Find<NavigationView>("SettingsNavigation"); var motion = Motion();
+                NavigationFrame("settled");
+                Require(!motion.IsTransitioning && motion.AnimationFailures == 0, "settings_navigation_motion_did_not_settle_cleanly");
+                if (expectedMotion) Require(motion.TransitionCount > beforeNavigationTransitions, "settings_navigation_motion_did_not_start");
+                Require(!nav.IsPaneOpen && ((nav.SelectedItem as NavigationViewItem)?.Tag as string) == "general"
+                    && ReferenceEquals(nav.Content, generalPage), "settings_navigation_latest_target_or_page_identity_lost");
+                Require(nav.IsHitTestVisible && generalPage!.IsHitTestVisible && Math.Abs(ElementCompositionPreview.GetElementVisual(generalPage!).Opacity - 1) < .001,
+                    "settings_navigation_left_content_faded_or_disabled");
+                Require(Find<Expander>("FontDisclosure").IsExpanded, "settings_navigation_reset_font_disclosure");
+                Inspect("general", 960, 740, L.Language);
+                Find<Expander>("FontDisclosure").IsExpanded = false;
+                Navigate("receiver");
+                Require(ReferenceEquals(nav.Content, receiverPage) && Find<TextBox>("ReceiverName").Text == navigationDraft, "settings_navigation_lost_receiver_draft");
+                Find<TextBox>("ReceiverName").Text = originalDraft;
+                var titleBar = Find<Grid>("SettingsTitleBar");
+                Require(ReferenceEquals(titleBar.Background, nav.Resources["NavigationViewDefaultPaneBackground"]), "settings_sidebar_and_title_surface_not_continuous");
+                nav.IsPaneOpen = true;
             }));
             step = "independent_group_apply_intents";
             await OnUi(queue!, () =>
@@ -566,7 +628,7 @@ internal static class SettingsLayoutCheck
                 {
                     File.WriteAllText(Path.Combine(directory, "settings-layout-check.json"), JsonSerializer.Serialize(new
                     {
-                        status, step, failure_code = failure, exception_type = exception, hresult, cases, layout_samples = layouts, typography_samples = typography, symbol_font_samples = symbolFonts, captures,
+                        status, step, failure_code = failure, exception_type = exception, hresult, cases, layout_samples = layouts, typography_samples = typography, symbol_font_samples = symbolFonts, captures, navigation_samples = navigationSamples,
                         window_remained_hidden = hidden, foreground_unchanged = focus, foreground_not_taken = foregroundNotTaken, preferences_restored = preferencesRestored,
                         controller_created = controllerCreated, initialized_flag_is_fixture = initializedFixture,
                         receiver_initialize_method_called = false, native_receiver_created = false, receiver_polling_started = false,

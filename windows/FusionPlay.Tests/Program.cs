@@ -451,6 +451,7 @@ Check("artwork: disconnect and metadata gaps can cancel repeatedly before reconn
 PlaybackTimelineTests.Register(Check);
 LyricsDocumentTests.Register(Check);
 LyricsPreferenceTests.Register(Check);
+DisplayMetadataTests.Register(Check);
 int passed = 0, failed = 0;
 foreach (var (name, run) in tests)
 {

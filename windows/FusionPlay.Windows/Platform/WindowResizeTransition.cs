@@ -44,7 +44,7 @@ internal sealed class WindowResizeTransition : IDisposable
         double maximumHeight = Math.Max(1, area.Height - frameHeight) / scale;
         // A short wide lyric window remains wide when lyrics disappear. Grow the
         // missing few DIPs rather than abruptly becoming a small square.
-        targetHeight = Math.Min(maximumHeight, width < 600 ? visible ? Math.Max(startHeight, width * 1.65) : width
+        targetHeight = Math.Min(maximumHeight, width < 600 ? visible ? Math.Max(startHeight, constraint.PreferredLyricsHeight(width)) : width
             : !visible && startHeight < 360 ? 360 : startHeight);
         lastHeightPixels = client.Bottom - client.Top;
         if (Math.Abs(targetHeight - startHeight) * scale < 1) { Finish(); return; }

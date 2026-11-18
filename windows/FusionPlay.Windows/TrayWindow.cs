@@ -163,8 +163,9 @@ internal sealed class TrayWindow : Window
         rendering = true; var state = model.State; Title = "FusionPlay · " + L.Text("接收面板");
         cover.Source = model.Artwork;
         string oldTitle = title.Text, oldArtist = artist.Text;
-        title.Text = state.Title.Length > 0 ? state.Title : L.Text("等待音乐");
-        artist.Text = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => x.Length > 0));
+        var display = model.DisplayMetadata;
+        title.Text = display.Title.Length > 0 ? display.Title : L.Text("等待音乐");
+        artist.Text = string.Join(" · ", new[] { display.Artist, display.Album }.Where(x => x.Length > 0));
         if (artist.Text.Length == 0) artist.Text = model.Settings.Name;
         previous.IsEnabled = play.IsEnabled = next.IsEnabled = model.CanControl;
         PlaybackIcons.Update((PathIcon)play.Content, state.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);

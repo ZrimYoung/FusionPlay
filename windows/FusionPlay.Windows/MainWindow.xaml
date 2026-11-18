@@ -28,7 +28,7 @@
      </Grid>
      <Grid x:Name="ExpandedLyricsHost" Grid.Column="1" Grid.RowSpan="2" Visibility="Collapsed"/>
     </Grid>
-    <StackPanel Grid.Row="2" Spacing="6"><Button x:Name="ExpandedMigrationButton" Visibility="Collapsed" Click="Migration_Click" HorizontalAlignment="Left"/><TextBlock x:Name="ExpandedStatus" FontSize="12" TextWrapping="Wrap" MaxLines="2" AutomationProperties.LiveSetting="Polite"/></StackPanel>
+    <StackPanel x:Name="ExpandedFooter" Grid.Row="2" Spacing="6"><Button x:Name="ExpandedMigrationButton" Visibility="Collapsed" Click="Migration_Click" HorizontalAlignment="Left"/><TextBlock x:Name="ExpandedStatus" FontSize="12" TextWrapping="Wrap" MaxLines="2" AutomationProperties.LiveSetting="Polite"/></StackPanel>
    </Grid>
   </Grid>
   <Grid x:Name="MiniRoot" Background="#FF152136" RequestedTheme="Dark">
@@ -55,8 +55,8 @@
    </StackPanel>
    </Grid>
    </Grid>
-   <Border x:Name="MiniLyricsDivider" Grid.Row="0" Height="0.5" Background="#10FFFFFF" VerticalAlignment="Bottom" Visibility="Collapsed" IsHitTestVisible="False"/>
    <Grid x:Name="MiniLyricsHost" Grid.Row="2" MinHeight="128" Padding="22,0,22,12" Visibility="Collapsed"/>
   </Grid>
+  <FontIcon x:Name="IdlePlaceholder" Glyph="&#xEC4F;" FontSize="64" Opacity="0.24" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"/>
  </Grid>
 </Window>

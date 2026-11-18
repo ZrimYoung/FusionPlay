@@ -185,9 +185,10 @@ internal static class LyricsPlayerCheck
                 if (compact)
                 {
                     Require(Math.Abs(coverBox.Width - width) <= 2 && Math.Abs(coverBox.Height - width) <= 2 && hostBox.Y >= coverBox.Y + coverBox.Height, "mini_lyric_cover_not_square_or_overlaps");
-                    var divider = Bounds(Find<Border>("MiniLyricsDivider")); double tolerance = 1 / Root().XamlRoot!.RasterizationScale;
-                    Require(Math.Abs(divider.Y + divider.Height - coverBox.Y - coverBox.Height) <= tolerance
-                        && divider.Y <= coverBox.Y + coverBox.Height, "mini_lyric_divider_not_at_cover_edge");
+                    Require(!Descendants(Root()).OfType<FrameworkElement>().Any(element => element.Name == "MiniLyricsDivider"),
+                        "mini_lyric_extra_divider_retained");
+                    Require(Root().FindName("MiniLyricsGapRow") is RowDefinition gap && Math.Abs(gap.Height.Value - 8) <= .01,
+                        "mini_lyric_transparent_gap_changed");
                 }
                 else
                 {
@@ -636,9 +637,9 @@ internal static class LyricsPlayerCheck
                 Require(requested.Count == 1, "disabled_lyric_row_dispatched_seek");
                 cases.Add("native_row_invoke_and_disabled_item_identity");
                 typeof(LyricsView).GetMethod("BeginBrowsing", Private)!.Invoke(component, null);
-                Require(Field(component, "browsing") is true && ((DispatcherQueueTimer)Field(component, "browsingTimer")!).Interval == TimeSpan.FromSeconds(6), "manual_browse_policy_not_six_seconds");
+                Require(Field(component, "browsing") is true && ((DispatcherQueueTimer)Field(component, "browsingTimer")!).Interval == TimeSpan.FromSeconds(5), "manual_browse_policy_not_five_seconds");
             });
-            await Task.Delay(6_150);
+            await Task.Delay(5_150);
             await OnUi(queue!, () => Pass("manual_browse_expires_without_return_button_or_seek", () =>
             {
                 Require(Field(component!, "browsing") is false, "manual_browse_did_not_expire");

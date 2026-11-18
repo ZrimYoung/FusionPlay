@@ -38,6 +38,8 @@ public partial class App : Application
             StartupRecord("unhandled_exception", args.Exception);
             if (Environment.GetCommandLineArgs().Contains("--lyrics-performance-check"))
             { LyricsPerformanceCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
+            if (Environment.GetCommandLineArgs().Contains("--player-refinement-check"))
+            { PlayerRefinementCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--window-input-check"))
             { WindowInputCheck.UnhandledErrors.Add(args.Exception.ToString()); args.Handled = true; }
             if (Environment.GetCommandLineArgs().Contains("--lyrics-player-check"))
@@ -52,6 +54,15 @@ public partial class App : Application
     }
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        if (Environment.GetCommandLineArgs().Contains("--player-refinement-check"))
+        {
+            // Hidden production-view fixtures exit before identity, single-instance,
+            // receiver initialization, audio and system-media registration.
+            try { await PlayerRefinementCheck.Run(Path.Combine(AppContext.BaseDirectory, "player-refinement-check")); }
+            catch (Exception error) { StartupRecord("player_refinement_check_failed", error); }
+            finally { Exit(); }
+            return;
+        }
         if (Environment.GetCommandLineArgs().Contains("--lyrics-performance-check"))
         {
             // Performance fixtures return before instance notification, identity,

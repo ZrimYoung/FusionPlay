@@ -8,6 +8,7 @@ public sealed record UiPreferences
     public bool ShowTransport { get; init; } = true;
     public bool ShowProgress { get; init; } = true;
     public string LyricsDisplayMode { get; init; } = "automatic";
+    public bool CorrectLyricTitles { get; init; }
     public bool AlwaysShowControls { get; init; }
     public bool Pinned { get; init; }
     public bool ShowPinButton { get; init; }

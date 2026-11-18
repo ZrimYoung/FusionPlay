@@ -12,6 +12,8 @@ internal interface ISquareWindow : IDisposable
     void UpdateInputRegions(RectInt32[] passthrough);
     void SetPlayerLayout(bool lyricsVisible, bool fullScreen);
     void SetLayoutTransition(bool active);
+    void RememberLyricsPaneHeight();
+    double PreferredLyricsHeight(double width);
     event Action? MoveSizeStarted;
 }
 
@@ -117,6 +119,7 @@ internal static class WindowSizing
         private readonly Action<bool> hoverChanged;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
         private bool lyricsVisible, fullScreen, expandLyrics, layoutTransition;
+        private double? preferredLyricsPaneHeight;
         public event Action? MoveSizeStarted;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
@@ -192,7 +195,7 @@ internal static class WindowSizing
                 if (argument is 3 or 4 or 5) next.Top = next.Bottom - side - frame.Height; else next.Bottom = next.Top + side + frame.Height;
                 Marshal.StructureToPtr(next, pointer, false); return 1;
             }
-            if (message == 0x0232) { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
+            if (message == 0x0232) EndMoveSize();
             if (message == 0x0047 && !inMoveSize) QueueSettlement();
             if (message == 0x02E0) QueueSettlement(force: true);
             if (message == 0x0082) Dispose();
@@ -223,7 +226,23 @@ internal static class WindowSizing
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
         }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
-        { inMoveSize = false; resizeStartWidth = resizeStartHeight = 0; QueueSettlement(); SetHover(CursorIsOverWindow()); }
+            => EndMoveSize();
+        private void EndMoveSize()
+        {
+            inMoveSize = false; resizeStartWidth = resizeStartHeight = 0;
+            RememberLyricsPaneHeight(); QueueSettlement(); SetHover(CursorIsOverWindow());
+        }
+        public void RememberLyricsPaneHeight()
+        {
+            if (disposed || !lyricsVisible || fullScreen || inMoveSize || layoutTransition || settling
+                || window.AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Restored }
+                || !GetClientRect(hwnd, out var client)) return;
+            double scale = Scale(hwnd), width = Width(client) / scale, height = Height(client) / scale;
+            if (width >= 260 && width < 600 && height >= width + 136 - 1 / scale)
+                preferredLyricsPaneHeight = Math.Max(136, height - width);
+        }
+        public double PreferredLyricsHeight(double width)
+            => Math.Max(width + 136, preferredLyricsPaneHeight is { } pane ? width + pane : width * 1.65);
         public void UpdateInputRegions(RectInt32[] rectangles)
         {
             if (disposed) return;
@@ -235,6 +254,7 @@ internal static class WindowSizing
         public void SetPlayerLayout(bool lyrics, bool fullscreen)
         {
             if (disposed || lyricsVisible == lyrics && fullScreen == fullscreen) return;
+            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics)) RememberLyricsPaneHeight();
             expandLyrics |= !inMoveSize && !lyricsVisible && lyrics && !fullscreen;
             lyricsVisible = lyrics; fullScreen = fullscreen;
             if (fullscreen) expandLyrics = false;
@@ -349,7 +369,7 @@ internal static class WindowSizing
                     int lyricWidth = Math.Min(Width(client), Math.Max((int)Math.Ceiling(260 * Scale(hwnd)), availableHeight - gap));
                     int minimumHeight = Math.Min(availableHeight, lyricWidth + gap);
                     int lyricHeight = Math.Min(availableHeight, Math.Max(Height(client), minimumHeight));
-                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(lyricWidth * 1.65)));
+                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(PreferredLyricsHeight(lyricWidth / Scale(hwnd)) * Scale(hwnd))));
                     expandLyrics = false;
                     if (lyricWidth == Width(client) && lyricHeight == Height(client)) return;
                     settling = true;
