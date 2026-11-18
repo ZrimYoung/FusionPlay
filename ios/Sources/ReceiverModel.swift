@@ -55,6 +55,7 @@ final class ReceiverModel: ObservableObject {
     @Published private(set) var artworkStatus: ArtworkStatus = .disconnected
     @Published private(set) var lyrics = LyricsDocument("")
     @Published private(set) var lyricsLoading = false
+    @Published private(set) var lyricsAvailable = false
     @Published private(set) var initialized = false
     @Published private(set) var busy = false
     // Read the launch preference once. Foreground transitions use the current intent.
@@ -102,6 +103,7 @@ final class ReceiverModel: ObservableObject {
     private var artworkGraceTask: Task<Void, Never>?
     private var lyricsSource = ""
     private var lyricsTask: Task<Void, Never>?
+    private var lyricsHandoff: Task<Void, Never>?
     private var interruptionObserver: NSObjectProtocol?
     private lazy var systemMedia = SystemMediaController(
         seek: { [weak self] request in self?.handleSystemSeek(request) },
@@ -572,12 +574,14 @@ final class ReceiverModel: ObservableObject {
         loadedArtwork = nil
         artworkStatus = .disconnected
         lyricsTask?.cancel()
+        lyricsTask = nil
+        cancelLyricsHandoff()
         seekTimeout?.cancel()
         volumeTimeout?.cancel()
         metadataKey = nil
         lyricsSource = ""
         lyrics = LyricsDocument("")
-        lyricsLoading = false
+        refreshLyricsPresentation()
         artwork = nil
         timeline = PlaybackTimeline()
         currentControl = nil
@@ -593,30 +597,64 @@ final class ReceiverModel: ObservableObject {
             return false
         }
         let key = TrackKey(state)
-        if metadataKey != key {
+        let changedTrack = metadataKey != key
+        if changedTrack {
             metadataKey = key
             controlMessage = ""
+        }
+        updateLyrics(state.lyricsText, track: key, changedTrack: changedTrack)
+        return updateArtwork(ArtworkRequest(state))
+    }
+
+    private func updateLyrics(_ source: String, track: TrackKey, changedTrack: Bool) {
+        defer { refreshLyricsPresentation() }
+        if changedTrack {
             lyricsTask?.cancel()
+            lyricsTask = nil
+            cancelLyricsHandoff()
             lyricsSource = ""
             lyrics = LyricsDocument("")
-            lyricsLoading = false
-        }
-        if state.lyricsText != lyricsSource {
-            lyricsSource = state.lyricsText
-            lyricsTask?.cancel()
-            let source = lyricsSource
-            lyricsLoading = !source.isEmpty
-            if source.isEmpty { lyrics = LyricsDocument("") }
-            else {
-                lyricsTask = Task { [weak self] in
-                    let document = await Task.detached(priority: .utility) { LyricsDocument(source) }.value
-                    guard !Task.isCancelled, let self, self.metadataKey == key, self.lyricsSource == source else { return }
-                    self.lyrics = document
-                    self.lyricsLoading = false
+            if lyricsAvailable {
+                // HyperOS can announce the track before sending its LRC.
+                // Retain the pane without displaying the previous track's words.
+                lyricsHandoff = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                    guard !Task.isCancelled, let self, self.metadataKey == track else { return }
+                    self.lyricsHandoff = nil
+                    self.refreshLyricsPresentation()
                 }
             }
         }
-        return updateArtwork(ArtworkRequest(state))
+
+        guard source != lyricsSource else { return }
+        lyricsSource = source
+        lyricsTask?.cancel()
+        lyricsTask = nil
+        guard !source.isEmpty else {
+            lyrics = LyricsDocument("")
+            return
+        }
+        lyricsTask = Task { [weak self] in
+            let document = await Task.detached(priority: .utility) { LyricsDocument(source) }.value
+            guard !Task.isCancelled, let self, self.metadataKey == track, self.lyricsSource == source else { return }
+            self.lyrics = document
+            self.lyricsTask = nil
+            if !document.lines.isEmpty { self.cancelLyricsHandoff() }
+            self.refreshLyricsPresentation()
+        }
+    }
+
+    private func cancelLyricsHandoff() {
+        lyricsHandoff?.cancel()
+        lyricsHandoff = nil
+    }
+
+    private func refreshLyricsPresentation() {
+        let loading = lyricsTask != nil || lyricsHandoff != nil
+        if lyricsLoading != loading { lyricsLoading = loading }
+        let available = LyricsAutoVisibility.resolve(hasLyrics: !lyrics.lines.isEmpty, loading: loading,
+                                                     previouslyVisible: lyricsAvailable)
+        if lyricsAvailable != available { lyricsAvailable = available }
     }
 
     private func updateArtwork(_ request: ArtworkRequest) -> Bool {

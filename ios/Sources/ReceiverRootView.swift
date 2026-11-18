@@ -23,7 +23,6 @@ struct ReceiverRootView: View {
     @State private var toolbarHideTask: Task<Void, Never>?
     @State private var playerMode: PlayerPresentationLayout.Mode?
     @State private var selectedPage = PlayerSection.player
-    @State private var previousLyricAvailability = false
     @State private var lyricVisibilityOverride: (track: String, visible: Bool)?
 
     private var pagingEnabled: Bool { UIDevice.current.userInterfaceIdiom == .pad && narrowPlayerPaging }
@@ -36,19 +35,12 @@ struct ReceiverRootView: View {
 
     private var trackKey: String { TrackIdentity(snapshot: model.snapshot).key }
 
-    private var lyricsAvailable: Bool {
-        guard hasTrack else { return false }
-        return LyricsAutoVisibility.resolve(hasLyrics: !model.lyrics.lines.isEmpty,
-                                            loading: model.lyricsLoading,
-                                            previouslyVisible: previousLyricAvailability)
-    }
-
     private var showLyrics: Bool {
-        if lyricsDisplayMode == .automatic,
-           let override = lyricVisibilityOverride, override.track == trackKey {
+        if lyricsDisplayMode == .automatic, let override = lyricVisibilityOverride,
+           override.track == trackKey || (model.lyricsLoading && !override.visible) {
             return override.visible
         }
-        return lyricsDisplayMode.isVisible(hasLyrics: lyricsAvailable)
+        return lyricsDisplayMode.isVisible(hasLyrics: model.lyricsAvailable)
     }
 
     private var toolbarCanHide: Bool {
@@ -109,11 +101,17 @@ struct ReceiverRootView: View {
         .receiverTypography()
         .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
-        .onChange(of: lyricsAvailable, initial: true) { _, available in
-            previousLyricAvailability = available
-        }
         .onChange(of: lyricsDisplayMode) { _, _ in lyricVisibilityOverride = nil }
-        .onChange(of: trackKey) { _, _ in lyricVisibilityOverride = nil }
+        .onChange(of: trackKey) { _, _ in
+            if !model.lyricsLoading || lyricVisibilityOverride?.visible != false {
+                lyricVisibilityOverride = nil
+            }
+        }
+        .onChange(of: model.lyricsLoading) { _, loading in
+            if !loading, lyricVisibilityOverride?.track != trackKey {
+                lyricVisibilityOverride = nil
+            }
+        }
         .onChange(of: hasTrack) { _, active in
             if !active {
                 showingVolume = false
