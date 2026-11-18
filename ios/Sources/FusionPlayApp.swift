@@ -5,6 +5,10 @@ struct FusionPlayApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var model = ReceiverModel()
 
+    init() {
+        LyricsDisplayMode.migrateLegacyPreference(legacyKey: "showLyrics")
+    }
+
     var body: some Scene {
         WindowGroup {
             ReceiverRootView(model: model)

@@ -6,7 +6,7 @@ import UIKit
 @MainActor
 struct ReceiverRootView: View {
     @ObservedObject var model: ReceiverModel
-    @AppStorage("showLyrics") private var showLyrics = false
+    @AppStorage(LyricsDisplayMode.storageKey) private var lyricsDisplayMode: LyricsDisplayMode = .never
     @AppStorage("narrowPlayerPaging") private var narrowPlayerPaging = false
     @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
     @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
@@ -23,6 +23,8 @@ struct ReceiverRootView: View {
     @State private var toolbarHideTask: Task<Void, Never>?
     @State private var playerMode: PlayerPresentationLayout.Mode?
     @State private var selectedPage = PlayerSection.player
+    @State private var previousLyricAvailability = false
+    @State private var lyricVisibilityOverride: (track: String, visible: Bool)?
 
     private var pagingEnabled: Bool { UIDevice.current.userInterfaceIdiom == .pad && narrowPlayerPaging }
 
@@ -33,6 +35,21 @@ struct ReceiverRootView: View {
     }
 
     private var trackKey: String { TrackIdentity(snapshot: model.snapshot).key }
+
+    private var lyricsAvailable: Bool {
+        guard hasTrack else { return false }
+        return LyricsAutoVisibility.resolve(hasLyrics: !model.lyrics.lines.isEmpty,
+                                            loading: model.lyricsLoading,
+                                            previouslyVisible: previousLyricAvailability)
+    }
+
+    private var showLyrics: Bool {
+        if lyricsDisplayMode == .automatic,
+           let override = lyricVisibilityOverride, override.track == trackKey {
+            return override.visible
+        }
+        return lyricsDisplayMode.isVisible(hasLyrics: lyricsAvailable)
+    }
 
     private var toolbarCanHide: Bool {
         hasTrack && !toolbarAlwaysVisible && !voiceOver && !showingVolume && !showingSettings
@@ -68,7 +85,7 @@ struct ReceiverRootView: View {
                             playerContent(layout, size: content.size)
                         }
                         .animation(displayAnimation, value: layout.mode)
-                        .animation(displayAnimation, value: showLyrics)
+                        .animation(displayAnimation, value: layout.mode != .paged && showLyrics)
                         .animation(displayAnimation, value: showProgress)
                         .animation(displayAnimation, value: showPlaybackControls)
                     } else {
@@ -91,10 +108,16 @@ struct ReceiverRootView: View {
         .tint(PlayerPalette.accent)
         .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
+        .onChange(of: lyricsAvailable, initial: true) { _, available in
+            previousLyricAvailability = available
+        }
+        .onChange(of: lyricsDisplayMode) { _, _ in lyricVisibilityOverride = nil }
+        .onChange(of: trackKey) { _, _ in lyricVisibilityOverride = nil }
         .onChange(of: hasTrack) { _, active in
             if !active {
                 showingVolume = false
                 selectedPage = .player
+                lyricVisibilityOverride = nil
             }
         }
         .onDisappear { toolbarHideTask?.cancel() }
@@ -257,7 +280,14 @@ struct ReceiverRootView: View {
                         if paged {
                             selectPage(lyricsSelected ? .player : .lyrics)
                         } else {
-                            withAnimation(displayAnimation) { showLyrics.toggle() }
+                            let visible = !lyricsSelected
+                            withAnimation(displayAnimation) {
+                                if lyricsDisplayMode == .automatic {
+                                    lyricVisibilityOverride = (trackKey, visible)
+                                } else {
+                                    lyricsDisplayMode = visible ? .always : .never
+                                }
+                            }
                         }
                     }
                     ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
@@ -531,6 +561,7 @@ private struct ReceiverLyricsView: View {
     @ObservedObject var model: ReceiverModel
     let trackKey: String
     let document: LyricsDocument
+    @AppStorage(LyricsTypography.storageKey) private var lyricScalePercent = LyricsTypography.defaultScalePercent
     @AppStorage("staggerLyricMotion") private var staggerLyricMotion = true
     @AppStorage("lyricStaggerMilliseconds") private var lyricStaggerMilliseconds = LyricReflowTiming.defaultStaggerMilliseconds
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -544,9 +575,14 @@ private struct ReceiverLyricsView: View {
     @State private var following = true
     @State private var lastActiveIndex: Int?
     @State private var showsEmptyState = false
-    @State private var viewportSize: CGSize?
-    @State private var isSettlingSize = false
+    @State private var previousLayout: LayoutMetrics?
+    @State private var isSettlingLayout = false
     @State private var followWave: LyricFollowWave?
+
+    private struct LayoutMetrics: Equatable {
+        let viewport: CGSize
+        let fontSize: CGFloat
+    }
 
     private var staggerSpan: TimeInterval {
         guard staggerLyricMotion, !reduceMotion, !voiceOver else { return 0 }
@@ -610,8 +646,8 @@ private struct ReceiverLyricsView: View {
             if isEmpty {
                 scrollInMotion = false
                 following = true
-                viewportSize = nil
-                isSettlingSize = false
+                previousLayout = nil
+                isSettlingLayout = false
             }
         }
     }
@@ -636,6 +672,8 @@ private struct ReceiverLyricsView: View {
         let allowsEffects = !reduceTransparency && !voiceOver && contrast != .increased
         let bleed: CGFloat = allowsEffects ? 14 : 0
         let fontSize = min(36, max(26, size.width * 0.076)) * typeScale
+            * LyricsTypography.scale(percent: lyricScalePercent)
+        let layout = LayoutMetrics(viewport: size, fontSize: fontSize)
         let topBlur: CGFloat = allowsEffects ? 3.5 : 0
         let bottomBlur: CGFloat = allowsEffects ? 10 : 0
         let timed = document.isTimed
@@ -680,17 +718,16 @@ private struct ReceiverLyricsView: View {
             .onChange(of: activeID, initial: true) { previous, current in
                 scroll(proxy, to: current, animated: previous != current, from: previous)
             }
-            .task(id: size) {
-                guard let previous = viewportSize else {
-                    viewportSize = size
-                    return
+            .task(id: layout) {
+                let prior = previousLayout
+                previousLayout = layout
+                guard let prior, prior != layout else { return }
+                if !reduceMotion && !voiceOver {
+                    isSettlingLayout = true
+                    do { try await Task.sleep(for: .seconds(LyricReflowTiming.duration + staggerSpan + 0.05)) }
+                    catch { return }
                 }
-                viewportSize = size
-                guard previous != size else { return }
-                isSettlingSize = true
-                do { try await Task.sleep(for: .seconds(LyricReflowTiming.duration + staggerSpan + 0.05)) }
-                catch { return }
-                isSettlingSize = false
+                isSettlingLayout = false
                 let latest = model.lyrics
                 let index = model.displayedPositionMs.flatMap { latest.activeLineIndex(at: $0) }
                 scroll(proxy, to: index.map { latest.lines[$0].id }, animated: true)
@@ -783,7 +820,7 @@ private struct ReceiverLyricsView: View {
     }
 
     private func scroll(_ proxy: ScrollViewProxy, to id: Int?, animated: Bool, from previous: Int? = nil) {
-        guard isCurrentTrack, following, !isSettlingSize, !dragging, !scrollInMotion, !voiceOver, let id else { return }
+        guard isCurrentTrack, following, !isSettlingLayout, !dragging, !scrollInMotion, !voiceOver, let id else { return }
         let span = staggerSpan
         if animated, span > 0, let previous, (1...2).contains(abs(id - previous)) {
             followWave = LyricFollowWave(start: Date(), direction: id > previous ? 1 : -1, span: span)

@@ -13,9 +13,10 @@ enum LyricsDisplayMode: String, CaseIterable {
         }
     }
 
-    static func migrateLegacyPreference(in defaults: UserDefaults = .standard) {
+    static func migrateLegacyPreference(in defaults: UserDefaults = .standard,
+                                        legacyKey: String = "playerShowsLyrics") {
         guard defaults.object(forKey: storageKey) == nil,
-              let legacy = defaults.object(forKey: "playerShowsLyrics") as? Bool else { return }
+              let legacy = defaults.object(forKey: legacyKey) as? Bool else { return }
         defaults.set((legacy ? Self.always : Self.never).rawValue, forKey: storageKey)
     }
 

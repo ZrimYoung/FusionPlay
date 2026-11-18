@@ -7,7 +7,8 @@ struct ReceiverSettingsView: View {
     @AppStorage("autoStartReceiver") private var autoStartReceiver = true
     @AppStorage("playerShowsProgress") private var showProgress = true
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
-    @AppStorage("showLyrics") private var showLyrics = false
+    @AppStorage(LyricsDisplayMode.storageKey) private var lyricsDisplayMode: LyricsDisplayMode = .never
+    @AppStorage(LyricsTypography.storageKey) private var lyricScalePercent = LyricsTypography.defaultScalePercent
     @AppStorage("narrowPlayerPaging") private var narrowPlayerPaging = false
     @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
     @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
@@ -107,7 +108,10 @@ struct ReceiverSettingsView: View {
         switch current {
         case .receiver: receiverForm
         case .appearance: appearanceForm
-        case .audio: Form { ReceiverSyncSettings(model: model) }
+        case .audio: Form {
+            ReceiverSyncSettings(model: model)
+            ReceiverDiagnosticsView(model: model)
+        }
         case .about: aboutForm
         }
     }
@@ -153,7 +157,12 @@ struct ReceiverSettingsView: View {
             }
             Section("歌词") {
                 let visibility: LocalizedStringKey = isPad && narrowPlayerPaging ? "非分页时显示歌词" : "显示歌词"
-                Toggle(visibility, isOn: $showLyrics)
+                Picker(visibility, selection: $lyricsDisplayMode) {
+                    ForEach(LyricsDisplayMode.allCases, id: \.self) { mode in
+                        Text(LocalizedStringKey(mode.title)).tag(mode)
+                    }
+                }
+                lyricScaleControl
                 Toggle("修正歌词标题", isOn: $correctLyricTitles)
                     .onChange(of: correctLyricTitles) { _, _ in model.refreshDisplayPresentation() }
                 Toggle("歌词交错动效", isOn: $staggerLyricMotion)
@@ -194,6 +203,27 @@ struct ReceiverSettingsView: View {
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
         guard let build = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String else { return version }
         return "\(version) (\(build))"
+    }
+
+    private var lyricScaleControl: some View {
+        let range = LyricsTypography.scaleRange
+        let percent = LyricsTypography.clampScalePercent(lyricScalePercent)
+        let value = Text(verbatim: (Double(percent) / 100).formatted(.percent.precision(.fractionLength(0))))
+            .monospacedDigit()
+        return VStack(alignment: .leading, spacing: 7) {
+            LabeledContent("歌词字号") { value }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(LyricsTypography.clampScalePercent(lyricScalePercent)) },
+                    set: { lyricScalePercent = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: Double(LyricsTypography.scaleStep)
+            )
+            .accessibilityLabel("歌词字号")
+            .accessibilityValue(value)
+        }
     }
 
     private var lyricStaggerControl: some View {

@@ -26,6 +26,17 @@ private final class MemoryDefaults: UserDefaults {
             LyricsDisplayMode.migrateLegacyPreference(in: preferences)
             precondition(preferences.object(forKey: key) as? String == "automatic")
         }
+        preferences.values = ["showLyrics": true]
+        LyricsDisplayMode.migrateLegacyPreference(in: preferences)
+        precondition(preferences.object(forKey: key) == nil, "Mac must still read its own legacy key")
+        for legacy in [false, true] {
+            preferences.values = ["showLyrics": legacy, "playerShowsLyrics": !legacy]
+            LyricsDisplayMode.migrateLegacyPreference(in: preferences, legacyKey: "showLyrics")
+            precondition(preferences.object(forKey: key) as? String == (legacy ? "always" : "never"))
+            preferences.set(LyricsDisplayMode.automatic.rawValue, forKey: key)
+            LyricsDisplayMode.migrateLegacyPreference(in: preferences, legacyKey: "showLyrics")
+            precondition(preferences.object(forKey: key) as? String == "automatic")
+        }
         preferences.values = [key: "future-value", "playerShowsLyrics": true]
         LyricsDisplayMode.migrateLegacyPreference(in: preferences)
         precondition(preferences.object(forKey: key) as? String == "future-value")

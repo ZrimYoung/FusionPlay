@@ -16,6 +16,8 @@
 		A10000000000000000000038 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000028 /* Assets.xcassets */; };
 		A10000000000000000000039 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002B /* InfoPlist.strings */; };
 		A1000000000000000000003A /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002E /* Localizable.strings */; };
+		A1000000000000000000003B /* LyricsDisplayMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002F /* LyricsDisplayMode.swift */; };
+		A1000000000000000000003C /* LyricsTypography.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000040 /* LyricsTypography.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +36,8 @@
 		A1000000000000000000002A /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "Resources/zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
 		A1000000000000000000002C /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = Resources/en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		A1000000000000000000002D /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "Resources/zh-Hans.lproj/Localizable.strings"; sourceTree = "<group>"; };
+		A1000000000000000000002F /* LyricsDisplayMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LyricsDisplayMode.swift; sourceTree = "<group>"; };
+		A10000000000000000000040 /* LyricsTypography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LyricsTypography.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -83,6 +87,8 @@
 				A10000000000000000000024 /* PlaybackTimeline.swift */,
 				A10000000000000000000025 /* SystemMedia.swift */,
 				A10000000000000000000026 /* VolumeInteraction.swift */,
+				A10000000000000000000040 /* LyricsTypography.swift */,
+				A1000000000000000000002F /* LyricsDisplayMode.swift */,
 			);
 			name = "Shared with macOS";
 			path = ../macos/Sources;
@@ -160,6 +166,8 @@
 				A10000000000000000000034 /* PlaybackTimeline.swift in Sources */,
 				A10000000000000000000035 /* SystemMedia.swift in Sources */,
 				A10000000000000000000036 /* VolumeInteraction.swift in Sources */,
+				A1000000000000000000003C /* LyricsTypography.swift in Sources */,
+				A1000000000000000000003B /* LyricsDisplayMode.swift in Sources */,
 				A10000000000000000000037 /* FusionPlayBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
