@@ -149,7 +149,106 @@ class XiaomiPlaybackReducerContinuityTest {
             mediaEvent(1, 5, "First caption", "stable-id", null, trackIdSource = "explicit"),
         ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
         assertFalse(duringSeek.replaceTrack)
-        assertEquals(55_000L, duringSeek.mediaInfo.positionMs)
+        assertNull(duringSeek.mediaInfo.positionMs)
+
+        val staleSample = reducer.reduce(progressEvent(1, 6, 37_500)).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertNull(staleSample.mediaInfo.positionMs)
+        val acknowledgement = reducer.reduce(progressEvent(1, 7, 55_400)).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(55_400L, acknowledgement.mediaInfo.positionMs)
+    }
+
+    @Test
+    fun sameExplicitIdKeepsTrackWhenSenderAlternatesTitleAndTimedCaption() {
+        val reducer = XiaomiPlaybackReducer()
+        val lyrics = "[ti:Song]\n[00:01]Caption"
+        reducer.reduce(playbackEvent(1, 1, active = true, rawState = 2))
+        reducer.reduce(mediaEvent(1, 2, "Song", "stable-id", null, lyricsText = lyrics, trackIdSource = "explicit", positionMs = 1000))
+
+        for ((sequence, title) in listOf(3L to "Caption", 4L to "Song")) {
+            val update = reducer.reduce(mediaEvent(1, sequence, title, "stable-id", null, trackIdSource = "explicit"))
+                .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+            assertFalse(update.replaceTrack)
+            assertEquals("stable-id", update.mediaInfo.trackId)
+            assertNull(update.mediaInfo.positionMs)
+        }
+    }
+
+    @Test
+    fun equivalentLyricsAndCanonicalTitleKeepAnchorAcrossIdentityPromotion() {
+        val reducer = XiaomiPlaybackReducer()
+        val lyrics = "[ti:Song]\n[00:01.00]Caption\n[00:02]Second line"
+        val reformattedLyrics = "[ti:Song]\r\n[00:01.000]Caption\r\n[00:02.00]Second line"
+        reducer.reduce(playbackEvent(1, 1, active = true, rawState = 2))
+        reducer.reduce(mediaEvent(1, 2, "Song", "lyrics:one", null, lyricsText = lyrics, trackIdSource = "lyrics"))
+
+        val refreshed = reducer.reduce(
+            mediaEvent(1, 3, "Caption", "metadata:song-header", null, lyricsText = reformattedLyrics, trackIdSource = "lyrics_metadata"),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(refreshed.replaceTrack)
+        assertEquals("lyrics:one", refreshed.mediaInfo.trackId)
+
+        val canonical = reducer.reduce(
+            mediaEvent(1, 4, "Song", "metadata:song", null, trackIdSource = "metadata"),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(canonical.replaceTrack)
+        assertEquals("lyrics:one", canonical.mediaInfo.trackId)
+
+        val promoted = reducer.reduce(
+            mediaEvent(1, 5, "Song", "sender-id", null, trackIdSource = "explicit"),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(promoted.replaceTrack)
+        assertEquals("lyrics:one", promoted.mediaInfo.trackId)
+
+        val replacement = reducer.reduce(
+            mediaEvent(1, 6, "Song", "different-sender-id", null, lyricsText = lyrics, trackIdSource = "explicit", positionMs = 0),
+        ).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertTrue(replacement.replaceTrack)
+        assertEquals("different-sender-id", replacement.mediaInfo.trackId)
+        assertEquals(0L, replacement.mediaInfo.positionMs)
+    }
+
+    @Test
+    fun sameTrackMetadataZeroCannotRewindPlaybackOrConfirmZeroSeek() {
+        val reducer = XiaomiPlaybackReducer(nowMillis = { 10_000 })
+        reducer.reduce(playbackEvent(1, 1, active = true, rawState = 2))
+        val first = reducer.reduce(mediaEvent(1, 2, "Song", "one", null, positionMs = 0))
+            .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(0L, first.mediaInfo.positionMs)
+
+        val placeholder = reducer.reduce(mediaEvent(1, 3, "Song", "one", null, positionMs = 0), displayedPositionMs = 2500)
+            .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertNull(placeholder.mediaInfo.positionMs)
+        reducer.reduce(progressEvent(1, 4, 18_000))
+        val wireAdvancePlaceholder = reducer.reduce(mediaEvent(1, 5, "Song", "one", null, positionMs = 0))
+            .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertNull(wireAdvancePlaceholder.mediaInfo.positionMs)
+
+        reducer.beginSeek(0)
+        val seekPlaceholder = reducer.reduce(mediaEvent(1, 6, "Song", "one", null, positionMs = 0))
+            .mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertNull(seekPlaceholder.mediaInfo.positionMs)
+        val stale = reducer.reduce(progressEvent(1, 7, 18_500)).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertNull(stale.mediaInfo.positionMs)
+        val realZero = reducer.reduce(progressEvent(1, 8, 0)).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(0L, realZero.mediaInfo.positionMs)
+        val resumed = reducer.reduce(progressEvent(1, 9, 3500)).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(3500L, resumed.mediaInfo.positionMs)
+    }
+
+    @Test
+    fun pendingMetadataZeroDoesNotOverwriteCachedProgress() {
+        val reducer = XiaomiPlaybackReducer()
+        reducer.reduce(mediaEvent(1, 1, "Song", "one", null, positionMs = 6000))
+        reducer.reduce(mediaEvent(1, 2, "Song", "one", null, positionMs = 0))
+        val resumed = reducer.reduce(playbackEvent(1, 3, active = true, rawState = 2))
+            .mutations.filterIsInstance<XiaomiPlaybackMutation.ApplyMediaInfo>().single()
+        assertEquals(6000L, resumed.mediaInfo.positionMs)
+
+        reducer.reduce(mediaEvent(2, 4, "Next", "two", null, positionMs = 4000))
+        reducer.reduce(progressEvent(2, 5, 0))
+        val next = reducer.reduce(playbackEvent(2, 6, active = true, rawState = 2))
+            .mutations.filterIsInstance<XiaomiPlaybackMutation.ApplyMediaInfo>().single()
+        assertEquals(0L, next.mediaInfo.positionMs)
     }
 
     @Test
@@ -191,6 +290,15 @@ class XiaomiPlaybackReducerContinuityTest {
         sessionSequence = session,
         rawJson = "{}",
     )
+
+    private fun progressEvent(session: Long, sequence: Long, positionMs: Long): WindowsBridgeXiaomiEvent =
+        WindowsBridgeXiaomiEvent(
+            eventName = "progress",
+            payload = buildJsonObject { put("position_ms", JsonPrimitive(positionMs)) },
+            bridgeSequence = sequence,
+            sessionSequence = session,
+            rawJson = "{}",
+        )
 
     private fun mediaEvent(
         session: Long,

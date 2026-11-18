@@ -2,7 +2,10 @@ package com.airplayreceiver.desktop.bridge
 
 import com.airplayreceiver.desktop.backend.LrcParser
 import com.airplayreceiver.desktop.backend.LyricsDocument
+import com.airplayreceiver.desktop.backend.PlaybackDisplayMetadata
 import com.airplayreceiver.desktop.backend.containsExactTimedCaption
+import com.airplayreceiver.desktop.backend.parseLrcDisplayHeaders
+import com.airplayreceiver.desktop.backend.sameLabel
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -24,9 +27,10 @@ class XiaomiPlaybackReducer(
     private var currentSessionSequence = 0L
     private var sessionActive = false
     private var currentMediaInfo: XiaomiMediaInfo? = null
+    private var currentTrackAnchor: String? = null
     private var pendingMediaInfo: PendingMediaInfo? = null
     private var pendingSeek: PendingSeek? = null
-    private var captionLyricsCache: Pair<String, LyricsDocument?>? = null
+    private var lyricsEvidenceCache: Pair<String, LyricsEvidence>? = null
     private var mediaGeneration: Long? = null
     private var mediaClosed = false
     private var mediaCloseDeadline: Long? = null
@@ -55,7 +59,7 @@ class XiaomiPlaybackReducer(
         currentMediaInfo = currentMediaInfo?.copy(positionMs = target)
     }
 
-    fun reduce(event: WindowsBridgeXiaomiEvent): XiaomiReduction {
+    fun reduce(event: WindowsBridgeXiaomiEvent, displayedPositionMs: Long? = null): XiaomiReduction {
         reduceMediaLifecycle(event)?.let { return it }
         val playbackState = event.toPlaybackStateOrNull()
         if (mediaClosed && playbackState?.sessionActive == true) {
@@ -90,7 +94,7 @@ class XiaomiPlaybackReducer(
         return if (playbackState != null) {
             reducePlaybackState(playbackState)
         } else {
-            reduceMediaInfo(requireNotNull(mediaInfo))
+            reduceMediaInfo(requireNotNull(mediaInfo), event.eventName.equals("media_info", ignoreCase = true), displayedPositionMs)
         }
     }
 
@@ -147,9 +151,10 @@ class XiaomiPlaybackReducer(
         mediaCloseDeadline = null
         sessionActive = false
         currentMediaInfo = null
+        currentTrackAnchor = null
         pendingMediaInfo = null
         pendingSeek = null
-        captionLyricsCache = null
+        lyricsEvidenceCache = null
         return XiaomiReduction(
             mutations = oldSession
                 ?.let { listOf(XiaomiPlaybackMutation.Deactivate(it)) }
@@ -199,7 +204,7 @@ class XiaomiPlaybackReducer(
             sessionActive = false
             pendingSeek = null
             currentMediaInfo = currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
-            captionLyricsCache = null
+            lyricsEvidenceCache = null
             pendingMediaInfo = pendingMediaInfo
                 ?.takeIf { it.sessionSequence > resolvedSession }
             return XiaomiReduction(
@@ -220,7 +225,7 @@ class XiaomiPlaybackReducer(
             sessionActive = true
             pendingSeek = null
             currentMediaInfo = currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
-            captionLyricsCache = null
+            lyricsEvidenceCache = null
         }
 
         val mutations = mutableListOf<XiaomiPlaybackMutation>(
@@ -236,9 +241,10 @@ class XiaomiPlaybackReducer(
         if (pending != null) {
             pendingMediaInfo = null
             currentMediaInfo = pending.mediaInfo
+            currentTrackAnchor = pending.trackAnchor
             mutations += XiaomiPlaybackMutation.ApplyMediaInfo(
                 sessionSequence = resolvedSession,
-                mediaInfo = pending.mediaInfo,
+                mediaInfo = pending.mediaInfo.copy(trackId = currentTrackAnchor),
                 replaceTrack = pending.replaceTrack,
             )
         } else {
@@ -263,7 +269,7 @@ class XiaomiPlaybackReducer(
         )
     }
 
-    private fun reduceMediaInfo(mediaInfo: XiaomiMediaInfo): XiaomiReduction {
+    private fun reduceMediaInfo(mediaInfo: XiaomiMediaInfo, fromMetadata: Boolean, displayedPositionMs: Long?): XiaomiReduction {
         val explicitSession = mediaInfo.sessionSequence
         val resolvedSession = explicitSession ?: when {
             sessionActive -> currentSessionSequence
@@ -298,12 +304,14 @@ class XiaomiPlaybackReducer(
             val pending = pendingMediaInfo?.takeIf { it.sessionSequence == resolvedSession }
             val previous = pending?.mediaInfo
                 ?: currentMediaInfo?.copy(lyricsText = null, titleIsLyric = null, trackIdSource = null)
-            val caption = pending?.mediaInfo?.let { retainCaptionTrack(it, mediaInfo) }
-            val replaceTrack = caption == null && isNewTrack(previous, mediaInfo)
-            val merged = mergeMediaInfo(previous, caption ?: mediaInfo, replaceTrack)
+            val replaceTrack = isNewTrack(previous, mediaInfo)
+            val samePendingTrackHasProgress = (pending?.mediaInfo?.positionMs ?: 0L) > 0L
+            val incoming = discardMetadataPositionZero(mediaInfo, fromMetadata, replaceTrack, samePendingTrackHasProgress)
+            val merged = mergeMediaInfo(previous, incoming, replaceTrack)
             pendingMediaInfo = PendingMediaInfo(
                 sessionSequence = resolvedSession,
                 mediaInfo = merged,
+                trackAnchor = trackAnchor(if (pending == null) currentTrackAnchor else pending.trackAnchor, merged, replaceTrack),
                 replaceTrack = replaceTrack || pending?.replaceTrack == true,
             )
             return XiaomiReduction(
@@ -323,10 +331,12 @@ class XiaomiPlaybackReducer(
             )
         }
 
-        val caption = currentMediaInfo?.let { retainCaptionTrack(it, mediaInfo) }
-        val replaceTrack = caption == null && isNewTrack(currentMediaInfo, mediaInfo)
+        val replaceTrack = isNewTrack(currentMediaInfo, mediaInfo)
+        val hasProgress = (currentMediaInfo?.positionMs ?: 0L) > 0L ||
+            (displayedPositionMs ?: 0L) > 0L || pendingSeek?.targetPositionMs == 0L
+        val incoming = discardMetadataPositionZero(mediaInfo, fromMetadata, replaceTrack, hasProgress)
         val reconciledMediaInfo = reconcilePendingSeek(
-            incoming = caption ?: mediaInfo,
+            incoming = incoming,
             replaceTrack = replaceTrack,
             sessionSequence = resolvedSession,
         )
@@ -341,11 +351,13 @@ class XiaomiPlaybackReducer(
             replaceTrack || it != currentMediaInfo?.lyricsText
         }
         currentMediaInfo = mergedMediaInfo
+        currentTrackAnchor = trackAnchor(currentTrackAnchor, mergedMediaInfo, replaceTrack)
         return XiaomiReduction(
             mutations = listOf(
                 XiaomiPlaybackMutation.ApplyMediaInfo(
                     sessionSequence = resolvedSession,
                     mediaInfo = mergedMediaInfo.copy(
+                        trackId = currentTrackAnchor,
                         // Missing position leaves the locally advanced cursor alone.
                         positionMs = reconciledMediaInfo.positionMs,
                         lyricsText = updatedLyrics,
@@ -377,30 +389,6 @@ class XiaomiPlaybackReducer(
             ?: (currentSessionSequence + 1L)
     }
 
-    private fun retainCaptionTrack(previous: XiaomiMediaInfo, incoming: XiaomiMediaInfo): XiaomiMediaInfo? {
-        val title = incoming.title ?: return null
-        val sameId = incoming.trackId != null && incoming.trackId == previous.trackId
-        val fallbackId = incoming.trackIdSource != "explicit" && (incoming.trackId == null ||
-            (incoming.trackIdSource == "metadata" && incoming.trackId.isSyntheticMetadataIdentity()))
-        if (!sameId && !fallbackId) return null
-
-        val previousLyrics = previous.lyricsText
-        if (incoming.lyricsText != null && incoming.lyricsText != previousLyrics &&
-            (previousLyrics != null || !sameId)
-        ) return null
-
-        if (!(sameId && incoming.titleIsLyric == true)) {
-            if (previousLyrics == null) return null
-            val parsed = captionLyricsCache?.takeIf { it.first == previousLyrics }
-                ?: (previousLyrics to LrcParser.parse(previousLyrics)).also { captionLyricsCache = it }
-            if (!parsed.second.containsExactTimedCaption(title)) return null
-        }
-        return incoming.copy(
-            trackId = previous.trackId ?: incoming.trackId,
-            trackIdSource = previous.trackIdSource ?: incoming.trackIdSource,
-        )
-    }
-
     private fun isNewTrack(
         previous: XiaomiMediaInfo?,
         incoming: XiaomiMediaInfo,
@@ -409,25 +397,36 @@ class XiaomiPlaybackReducer(
             incoming.trackId != null ||
                 incoming.title != null ||
                 incoming.artist != null ||
-                incoming.album != null
+                incoming.album != null ||
+                incoming.lyricsText != null
         if (!hasIncomingIdentity) {
             return false
         }
         if (previous == null) {
             return true
         }
-        if (
-            incoming.trackId != null &&
-            previous.trackId != null &&
-            incoming.trackId != previous.trackId &&
-            // A legacy sidecar may first synthesize `metadata:*` from the
-            // title and then publish the phone's real mAudioId in a partial
-            // update. Treat that as identity promotion, not a second song,
-            // unless the human-readable metadata also changed.
-            !(incoming.trackId.isSyntheticMetadataIdentity() xor
-                previous.trackId.isSyntheticMetadataIdentity())
-        ) {
-            return true
+        val previousExplicitId = previous.explicitTrackId()
+        val incomingExplicitId = incoming.explicitTrackId()
+        if (previousExplicitId != null && incomingExplicitId != null) {
+            return previousExplicitId != incomingExplicitId
+        }
+
+        val previousLyrics = previous.lyricsText
+        val incomingLyrics = incoming.lyricsText
+        if (previousLyrics != null && incomingLyrics != null) {
+            if (previousLyrics == incomingLyrics) return false
+            val before = lyricsEvidence(previousLyrics)
+            val after = lyricsEvidence(incomingLyrics)
+            val previousLines = before.document?.lines
+            return previousLines == null || previousLines != after.document?.lines ||
+                before.metadata.conflictsWith(after.metadata)
+        }
+        if (previousLyrics != null && incoming.title != null) {
+            val evidence = lyricsEvidence(previousLyrics)
+            if (evidence.document.containsExactTimedCaption(incoming.title)) return false
+            if (sameLabel(evidence.metadata.title, incoming.title) &&
+                !evidence.metadata.conflictsWith(PlaybackDisplayMetadata(incoming.title, incoming.artist, incoming.album))
+            ) return false
         }
         if (
             incoming.title != null &&
@@ -449,8 +448,44 @@ class XiaomiPlaybackReducer(
             !incoming.album.equals(previous.album)
     }
 
-    private fun String.isSyntheticMetadataIdentity(): Boolean =
-        startsWith("metadata:")
+    private fun XiaomiMediaInfo.explicitTrackId(): String? = trackId?.takeIf {
+        when (trackIdSource) {
+            "explicit" -> true
+            "metadata", "lyrics_metadata", "lyrics" -> false
+            else -> !it.startsWith("metadata:") && !it.startsWith("lyrics:")
+        }
+    }
+
+    private fun lyricsEvidence(text: String): LyricsEvidence {
+        val cached = lyricsEvidenceCache
+        if (cached != null && cached.first == text) return cached.second
+        // Scope the cache to the accepted track, rather than reparsing it on
+        // every title update or replacing it with an unaccepted document.
+        val evidence = LyricsEvidence(LrcParser.parse(text), parseLrcDisplayHeaders(text))
+        if (text == currentMediaInfo?.lyricsText) lyricsEvidenceCache = text to evidence
+        return evidence
+    }
+
+    private fun PlaybackDisplayMetadata.conflictsWith(other: PlaybackDisplayMetadata): Boolean =
+        labelsConflict(title, other.title) || labelsConflict(artist, other.artist) || labelsConflict(album, other.album)
+
+    private fun labelsConflict(previous: String?, incoming: String?): Boolean =
+        previous != null && incoming != null && !sameLabel(previous, incoming)
+
+    private fun trackAnchor(
+        previousAnchor: String?,
+        incoming: XiaomiMediaInfo,
+        replaceTrack: Boolean,
+    ): String? = previousAnchor.takeUnless { replaceTrack } ?: incoming.trackId
+
+    private fun discardMetadataPositionZero(
+        incoming: XiaomiMediaInfo,
+        fromMetadata: Boolean,
+        replaceTrack: Boolean,
+        hasProgress: Boolean,
+    ): XiaomiMediaInfo = if (fromMetadata && !replaceTrack && incoming.positionMs == 0L && hasProgress) {
+        incoming.copy(positionMs = null)
+    } else incoming
 
     private fun mergeMediaInfo(
         previous: XiaomiMediaInfo?,
@@ -460,8 +495,10 @@ class XiaomiPlaybackReducer(
         if (previous == null || replaceTrack) {
             return incoming
         }
+        val keepPreviousTrackId = incoming.trackId == null ||
+            (previous.explicitTrackId() != null && incoming.explicitTrackId() == null)
         return incoming.copy(
-            trackId = incoming.trackId ?: previous.trackId,
+            trackId = if (keepPreviousTrackId) previous.trackId else incoming.trackId,
             title = incoming.title ?: previous.title,
             artist = incoming.artist ?: previous.artist,
             album = incoming.album ?: previous.album,
@@ -478,9 +515,7 @@ class XiaomiPlaybackReducer(
                 incoming.metadataChangeType ?: previous.metadataChangeType,
             lyricsText = incoming.lyricsText ?: previous.lyricsText,
             titleIsLyric = incoming.titleIsLyric ?: previous.titleIsLyric.takeIf { incoming.title == null },
-            trackIdSource = incoming.trackIdSource ?: previous.trackIdSource.takeIf {
-                incoming.trackId == null && incoming.title == null
-            },
+            trackIdSource = if (keepPreviousTrackId) previous.trackIdSource else incoming.trackIdSource,
         )
     }
 
@@ -515,16 +550,19 @@ class XiaomiPlaybackReducer(
             return incoming
         }
 
-        return incoming.copy(
-            positionMs = pending.targetPositionMs,
-        )
+        // Dispatch already applied the target once. Missing or rejected
+        // samples must not rewind subsequent locally extrapolated playback.
+        return if (position == null) incoming else incoming.copy(positionMs = null)
     }
 
     private data class PendingMediaInfo(
         val sessionSequence: Long,
         val mediaInfo: XiaomiMediaInfo,
+        val trackAnchor: String?,
         val replaceTrack: Boolean,
     )
+
+    private data class LyricsEvidence(val document: LyricsDocument?, val metadata: PlaybackDisplayMetadata)
 
     private data class PendingSeek(
         val sessionSequence: Long,

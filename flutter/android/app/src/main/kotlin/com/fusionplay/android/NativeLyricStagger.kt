@@ -25,8 +25,10 @@ internal object NativeLyricStagger {
         if (!rowPosition.isFinite()) return 0f
         val rank = (rowPosition.coerceIn(0f, 1f) * RANK_STEPS).roundToInt() / RANK_STEPS
         val delay = clampSpan(spanMs) * rank
-        return direction * MAX_OFFSET_DP * (ease(elapsedMs.toFloat()) - ease(elapsedMs - delay))
+        return direction * MAX_OFFSET_DP * (scrollFraction(elapsedMs) - ease(elapsedMs - delay))
     }
+
+    fun scrollFraction(elapsedMs: Long): Float = ease(elapsedMs.toFloat())
 
     private fun ease(elapsedMs: Float): Float {
         val progress = (elapsedMs / FOLLOW_DURATION_MS).coerceIn(0f, 1f)

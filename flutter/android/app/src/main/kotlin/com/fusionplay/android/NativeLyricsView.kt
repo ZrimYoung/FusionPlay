@@ -30,6 +30,7 @@ import android.widget.ListView
 import android.widget.TextView
 import com.airplayreceiver.desktop.backend.LyricsDocument
 import com.airplayreceiver.desktop.backend.PlaybackSnapshot
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /** A recycled lyric list which follows the current line approximately one third down. */
@@ -39,6 +40,7 @@ internal class NativeLyricsView(
     private val television: Boolean = false,
 ) : FrameLayout(context) {
     private data class Track(val source: String?, val epoch: Long?, val id: String?)
+    private data class ExpectedSeek(val positionMs: Long, val expiresAt: Long)
 
     private val accessibility = context.getSystemService(AccessibilityManager::class.java)
     private val list = LyricList()
@@ -54,6 +56,7 @@ internal class NativeLyricsView(
     private var document: LyricsDocument? = null
     private var track: Track? = null
     private var playingIndex: Int? = null
+    private var expectedSeek: ExpectedSeek? = null
     private var seeking = false
     private var browsingUntil = 0L
     private var userScrolling = false
@@ -62,7 +65,7 @@ internal class NativeLyricsView(
     private var remoteBrowsing = false
     var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)? = null
     private var staggerSpan = 0
-    private var staggerAnimator: ValueAnimator? = null
+    private var followAnimator: ValueAnimator? = null
     private val resumeFollow = Runnable { followCurrent() }
     private val alignCurrentLine = Runnable { followCurrent() }
 
@@ -107,7 +110,10 @@ internal class NativeLyricsView(
                 if (!seeking || (gesture != null && gesture != (track to document))) {
                     return@setOnItemClickListener
                 }
-                document?.lines?.getOrNull(position - 1)?.startMs?.let(onSeek)
+                document?.lines?.getOrNull(position - 1)?.startMs?.let { target ->
+                    expectSeek(target)
+                    onSeek(target)
+                }
             }
         }
         addView(list, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -135,12 +141,19 @@ internal class NativeLyricsView(
         val seekChanged = seeking != canSeek
         val previousIndex = playingIndex
         val nextSpan = if (staggerEnabled) NativeLyricStagger.clampSpan(staggerMilliseconds) else 0
-        if (rowsChanged || seekChanged || nextSpan != staggerSpan) cancelStagger()
+        if (rowsChanged || seekChanged || nextSpan != staggerSpan) cancelFollowMotion()
+        if (trackChanged) expectedSeek = null
         staggerSpan = nextSpan
         track = nextTrack
         document = nextDocument
         seeking = canSeek
-        playingIndex = nextDocument?.activeLineIndex(playback.positionMs)
+        val requestedJump = acceptExpectedSeek(playback.positionMs)
+        playingIndex = NativeLyricFollow.activeIndex(
+            nextDocument,
+            playback.positionMs,
+            previousIndex,
+            continuousPlayback = !rowsChanged && !requestedJump && playback.isPlaying,
+        )
 
         val hasLines = !nextDocument?.lines.isNullOrEmpty()
         if (television) {
@@ -174,13 +187,30 @@ internal class NativeLyricsView(
             if (trackChanged && playingIndex == null) list.setSelection(0)
             scheduleLineAlignment()
         } else if (playingIndex != previousIndex) {
-            followCurrent(previousIndex)
+            followCurrent(previousIndex.takeIf { !requestedJump && playback.isPlaying })
         }
+    }
+
+    fun expectSeek(positionMs: Long) {
+        expectedSeek = ExpectedSeek(positionMs, SystemClock.uptimeMillis() + SEEK_WINDOW_MS)
+    }
+
+    private fun acceptExpectedSeek(positionMs: Long): Boolean {
+        val seek = expectedSeek ?: return false
+        if (SystemClock.uptimeMillis() >= seek.expiresAt) {
+            expectedSeek = null
+            return false
+        }
+        if (abs(positionMs - seek.positionMs) > SEEK_POSITION_TOLERANCE_MS ||
+            document?.activeLineIndex(positionMs) != document?.activeLineIndex(seek.positionMs)
+        ) return false
+        expectedSeek = null
+        return true
     }
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
-        cancelStagger()
+        cancelFollowMotion()
         updateScrollInsets()
         if (width != oldWidth) rows.notifyDataSetChanged()
         scheduleLineAlignment()
@@ -190,7 +220,8 @@ internal class NativeLyricsView(
         stopRemoteBrowse(returnToPane = false)
         removeCallbacks(resumeFollow)
         removeCallbacks(alignCurrentLine)
-        cancelStagger()
+        cancelFollowMotion()
+        expectedSeek = null
         super.onDetachedFromWindow()
     }
 
@@ -198,7 +229,7 @@ internal class NativeLyricsView(
         super.onVisibilityAggregated(isVisible)
         if (!isVisible) {
             stopRemoteBrowse(returnToPane = false)
-            cancelStagger()
+            cancelFollowMotion()
         }
     }
 
@@ -245,12 +276,18 @@ internal class NativeLyricsView(
 
     private fun updateScrollInsets() {
         val canFollow = document?.isSynchronized == true && accessibility?.isTouchExplorationEnabled != true
-        topSpace.layoutParams = AbsListView.LayoutParams(LayoutParams.MATCH_PARENT, if (canFollow) (height * ANCHOR).roundToInt() else dp(12))
-        bottomSpace.layoutParams = AbsListView.LayoutParams(LayoutParams.MATCH_PARENT, if (canFollow) (height * (1 - ANCHOR)).roundToInt() else dp(16))
+        val top = if (canFollow) (height * ANCHOR).roundToInt() else dp(12)
+        val bottom = if (canFollow) height - top else dp(16)
+        if (topSpace.layoutParams?.height != top) {
+            topSpace.layoutParams = AbsListView.LayoutParams(LayoutParams.MATCH_PARENT, top)
+        }
+        if (bottomSpace.layoutParams?.height != bottom) {
+            bottomSpace.layoutParams = AbsListView.LayoutParams(LayoutParams.MATCH_PARENT, bottom)
+        }
     }
 
     private fun pauseFollow() {
-        cancelStagger()
+        cancelFollowMotion()
         browsingUntil = SystemClock.uptimeMillis() + FOLLOW_PAUSE_MS
         removeCallbacks(resumeFollow)
         postDelayed(resumeFollow, FOLLOW_PAUSE_MS)
@@ -262,57 +299,67 @@ internal class NativeLyricsView(
     }
 
     private fun followCurrent(previousIndex: Int? = null) {
-        cancelStagger()
         val index = playingIndex ?: return
         if (!isShown || height == 0 || userScrolling || touchBrowsing || SystemClock.uptimeMillis() < browsingUntil ||
             accessibility?.isTouchExplorationEnabled == true || list.hasFocus() || remoteBrowsing
         ) return
+        cancelFollowMotion()
         val target = index + 1 // The timed list has a blank header above its first row.
         val offset = (height * ANCHOR).roundToInt()
-        val direction = NativeLyricStagger.direction(previousIndex, index)
-        if (direction != null && motionEnabled()) {
-            list.smoothScrollToPositionFromTop(target, offset, NativeLyricStagger.FOLLOW_DURATION_MS)
-            if (staggerSpan > 0) startStagger(direction)
-        } else {
-            list.setSelectionFromTop(target, offset)
+        val row = list.getChildAt(target - list.firstVisiblePosition)
+        if (NativeLyricStagger.direction(previousIndex, index) == 1 && row != null &&
+            !list.isLayoutRequested && motionEnabled()
+        ) {
+            val distance = row.top - offset - list.paddingTop
+            if (distance == 0) return
+            if (distance > 0) {
+                animateFollow(distance)
+                return
+            }
         }
+        list.setSelectionFromTop(target, offset)
     }
 
-    private fun startStagger(direction: Int) {
+    private fun animateFollow(distancePx: Int) {
         val span = staggerSpan
         val density = resources.displayMetrics.density
+        var scrolled = 0
         val animator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = (NativeLyricStagger.FOLLOW_DURATION_MS + span).toLong()
             interpolator = LinearInterpolator()
             addUpdateListener { motion ->
                 if (!isShown || list.height == 0 || accessibility?.isTouchExplorationEnabled == true) {
-                    cancelStagger()
+                    cancelFollowMotion()
                     return@addUpdateListener
                 }
                 val elapsed = motion.currentPlayTime
-                // ListView already lays out and recycles the rows. Only adjust
-                // the presentation of the attached rows during this short wave.
+                val nextOffset = (distancePx * NativeLyricStagger.scrollFraction(elapsed)).roundToInt()
+                if (nextOffset != scrolled) {
+                    list.scrollListBy(nextOffset - scrolled)
+                    scrolled = nextOffset
+                }
+                if (span == 0) return@addUpdateListener
                 for (index in 0 until list.childCount) {
                     val row = list.getChildAt(index) as? TextView ?: continue
                     val center = (row.top + row.bottom) * .5f / list.height
-                    row.translationY = density * NativeLyricStagger.offsetDp(elapsed, center, span, direction)
+                    row.translationY = density * NativeLyricStagger.offsetDp(elapsed, center, span, direction = 1)
                 }
             }
             addListener(object : AnimatorListenerAdapter() {
                 override fun onAnimationEnd(animation: Animator) {
-                    if (staggerAnimator !== animation) return
-                    staggerAnimator = null
+                    if (followAnimator !== animation) return
+                    followAnimator = null
                     resetRowOffsets()
                 }
             })
         }
-        staggerAnimator = animator
+        followAnimator = animator
         animator.start()
     }
 
-    private fun cancelStagger() {
-        val animator = staggerAnimator ?: return
-        staggerAnimator = null
+    private fun cancelFollowMotion() {
+        val animator = followAnimator ?: return
+        followAnimator = null
         animator.removeAllUpdateListeners()
         animator.removeAllListeners()
         animator.cancel()
@@ -406,7 +453,7 @@ internal class NativeLyricsView(
 
         override fun onFocusChanged(gainFocus: Boolean, direction: Int, oldRect: android.graphics.Rect?) {
             super.onFocusChanged(gainFocus, direction, oldRect)
-            if (gainFocus) cancelStagger()
+            if (gainFocus) cancelFollowMotion()
             else if (remoteBrowsing) stopRemoteBrowse(returnToPane = false)
             else if (!television) pauseFollow()
         }
@@ -470,6 +517,8 @@ internal class NativeLyricsView(
     private companion object {
         const val ANCHOR = .32f
         const val FOLLOW_PAUSE_MS = 5_000L
+        const val SEEK_WINDOW_MS = 3_000L
+        const val SEEK_POSITION_TOLERANCE_MS = 250L
         val ENTER_KEYS = setOf(KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER)
     }
 }

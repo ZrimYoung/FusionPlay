@@ -34,8 +34,8 @@ android {
             if (applicationId == "com.fusionplay.android.portfix") "FusionPlay 修复版" else "FusionPlay")
         minSdk = 24 // Shizuku API 13.1.5 requires Android 7.
         targetSdk = 36
-        versionCode = providers.gradleProperty("fusionPlayVersionCode").map(String::toInt).getOrElse(10207)
-        versionName = providers.gradleProperty("fusionPlayVersionName").getOrElse("1.2.4-native-preview4")
+        versionCode = providers.gradleProperty("fusionPlayVersionCode").map(String::toInt).getOrElse(10208)
+        versionName = providers.gradleProperty("fusionPlayVersionName").getOrElse("1.2.4-native-preview5")
         ndk {
             abiFilters += nativeAbis
         }

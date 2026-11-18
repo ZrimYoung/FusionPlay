@@ -762,8 +762,11 @@ class FusionPlayRuntime(
             }
             publishState(viewModel.state.value)
         }
-        val reduction = xiaomiReducer.reduce(event)
+        val xiaomiPlayback = viewModel.playbackForSource(MediaSource.XIAOMI_MIPLAY)
+        val reduction = xiaomiReducer.reduce(event, displayedPositionMs = xiaomiPlayback.positionMs)
         if (shouldPersistMiPlayEvent(event.eventName)) {
+            val payload = (event.payload as? JsonObject).orEmpty()
+            val mediaUpdate = reduction.mutations.lastOrNull() as? XiaomiPlaybackMutation.ApplyMediaInfo
             logMiPlay(
                 event = "protocol_event",
                 outcome = reduction.outcome.name.lowercase(),
@@ -774,7 +777,11 @@ class FusionPlayRuntime(
                     "reason" to reduction.reason,
                     "mutation_count" to reduction.mutations.size,
                     "volume_percent" to event.toVolumePercentOrNull(),
-                ) + (event.payload as? JsonObject).orEmpty()
+                    "replace_track" to mediaUpdate?.replaceTrack,
+                    "previous_position_ms" to xiaomiPlayback.positionMs.takeIf { mediaUpdate != null },
+                    "accepted_position_ms" to mediaUpdate?.mediaInfo?.positionMs,
+                    "caption_reported" to (payload["title_is_lyric"] as? JsonPrimitive)?.booleanOrNull,
+                ) + payload
                     .filterKeys { it in MIPLAY_DIAGNOSTIC_FIELDS }
                     .mapKeys { (key, _) -> "protocol_$key" }
                     .mapValues { (_, value) ->
@@ -1241,6 +1248,7 @@ class FusionPlayRuntime(
             "source", "destination", "service", "success", "unicast",
             "address_family", "profile", "port", "control_port", "code", "message",
             "stage", "state", "playing", "raw_state", "session_active",
+            "position_ms", "duration_ms", "track_id_source", "metadata_change_type",
             "group_target_delay_ms", "queue_delay_ms", "output_latency_ms",
             "output_callback_frames", "output_sample_rate", "synchronization_mode",
             "time_offset_us", "clock_synchronized", "server_minus_local_us",

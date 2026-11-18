@@ -624,6 +624,7 @@ internal class NativePlayerView(
         clearPendingSeek()
         pendingSeek = PendingSeek(key, target, SystemClock.elapsedRealtime() + SEEK_CONFIRMATION_MS)
         postDelayed(expireSeek, SEEK_CONFIRMATION_MS)
+        lyrics.expectSeek(target)
         onSeek(target)
     }
 
