@@ -349,9 +349,6 @@ struct PlayerView: View {
     private func horizontalInset(for width: CGFloat) -> CGFloat {
         min(80, 36 + max(0, width - 600) * 0.1)
     }
-    private func lyricsColumnSpacing(for width: CGFloat) -> CGFloat {
-        32 + min(16, max(0, width - 600) * 0.1)
-    }
     private var displayMetadata: DisplayMetadata {
         if correctLyricTitles { return model.correctedDisplayMetadata }
         return DisplayMetadata(title: model.snapshot?.title ?? "", artist: model.snapshot?.artist ?? "", album: model.snapshot?.album ?? "")
@@ -401,20 +398,22 @@ struct PlayerView: View {
             .environment(\.colorScheme, .dark)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showPlaybackControls)
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showProgress)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.3), value: showLyrics)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.36), value: showLyrics)
+            .modifier(PlayerFullScreenEligibility())
     }
     private func expanded(size: CGSize) -> some View {
-        let inset = horizontalInset(for: size.width)
-        let gap = lyricsColumnSpacing(for: size.width)
+        let lyricsLayout = ExpandedLyricsLayout(size: size, showsProgress: showProgress,
+                                                showsTransport: showPlaybackControls)
+        let inset = showLyrics ? lyricsLayout.horizontalInset : horizontalInset(for: size.width)
+        let gap = lyricsLayout.columnGap
         let availableWidth = max(0, size.width - inset * 2)
-        let column = min(330, size.width * 0.38)
-        let reserved: CGFloat = 72 + (showProgress ? 36 : 0) + (showPlaybackControls ? 44 : 0)
-        let padding: CGFloat = size.height < 360 ? 20 : 32
+        let column = lyricsLayout.albumColumnWidth
+        let padding = lyricsLayout.verticalPadding
         let standardSide = min(360, size.height - 48, size.width * 0.37)
-        let side = showLyrics ? max(60, min(column, size.height - padding * 2 - reserved)) : standardSide
+        let side = showLyrics ? lyricsLayout.artworkSide : standardSide
         let detailWidth = min(440, max(0, availableWidth - standardSide - 28))
         let albumWidth = showLyrics ? column : standardSide + 28 + detailWidth
-        let lyricsWidth = max(0, availableWidth - column - gap)
+        let lyricsWidth = lyricsLayout.lyricsWidth
         let albumLayout = showLyrics
             ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
             : AnyLayout(HStackLayout(alignment: .top, spacing: 28))
@@ -422,7 +421,7 @@ struct PlayerView: View {
             // AnyLayout moves the same cover/details between horizontal and
             // vertical arrangements instead of replacing the player subtree.
             albumLayout {
-                cover(side: side).frame(width: showLyrics ? column : side)
+                cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
                 expandedDetails
                     .frame(width: showLyrics ? column : detailWidth)
                     .frame(height: showLyrics ? nil : side)
@@ -431,10 +430,11 @@ struct PlayerView: View {
             // reading width while the surrounding slot collapses and fades.
             lyricsPanel(compact: false)
                 .frame(width: lyricsWidth, height: max(0, size.height - padding * 2))
+                .animation(nil, value: CGSize(width: lyricsWidth, height: max(0, size.height - padding * 2)))
                 .frame(width: showLyrics ? lyricsWidth : 0, alignment: .leading)
                 .mask { Rectangle().padding(.horizontal, -24) }
                 .opacity(showLyrics ? 1 : 0)
-                .offset(x: showLyrics ? 0 : max(0, (size.width - albumWidth) / 2))
+                .offset(y: showLyrics ? 0 : 12)
                 .allowsHitTesting(showLyrics).accessibilityHidden(!showLyrics)
         }.padding(.horizontal, inset).padding(.vertical, showLyrics ? padding : 0)
             .frame(width: size.width, height: size.height, alignment: .center)
@@ -546,8 +546,10 @@ struct PlayerView: View {
             lyricsPanel(compact: true)
                 .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
                 .frame(width: size.width, height: lyricsHeight)
+                .animation(nil, value: CGSize(width: size.width, height: lyricsHeight))
                 .frame(height: showLyrics ? lyricsHeight : 0, alignment: .top)
                 .clipped().opacity(showLyrics ? 1 : 0)
+                .offset(y: showLyrics ? 0 : 12)
                 .allowsHitTesting(showLyrics).accessibilityHidden(!showLyrics)
         }.frame(width: size.width, height: size.height).clipped()
             .overlay(alignment: .topTrailing) {

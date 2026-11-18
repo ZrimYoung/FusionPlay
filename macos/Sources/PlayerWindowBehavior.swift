@@ -49,6 +49,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             guard window !== attachedWindow else { return }
             windowObservers.forEach(NotificationCenter.default.removeObserver)
             windowObservers = []; attachedWindow = window
+            PlayerWindowDiagnostics.record("attach", window: window, force: true)
             fullScreenTransition = false; fullScreenTransitionGeneration &+= 1
             appliedSquare = nil; appliedDimButtons = nil; normalizeSquareAfterResize = false
             lastLyricsPreference = nil; expandLyricsAfterResize = false
@@ -69,6 +70,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             }
         }
         private func fullScreenChanged(_ name: Notification.Name, window: NSWindow) {
+            PlayerWindowDiagnostics.record(name.rawValue, window: window, force: true)
             fullScreenTransitionGeneration &+= 1
             fullScreenTransition = name == NSWindow.willEnterFullScreenNotification || name == NSWindow.willExitFullScreenNotification
             if fullScreenTransition {
@@ -82,7 +84,9 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 // delegate receives failure instead of a did-enter/exit event.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
                     guard let self, self.fullScreenTransitionGeneration == token else { return }
-                    self.fullScreenTransition = false; self.schedule()
+                    self.fullScreenTransition = false
+                    PlayerWindowDiagnostics.record("fullscreen-transition-timeout", window: self.attachedWindow, force: true)
+                    self.schedule()
                 }
             }
             schedule()
@@ -118,6 +122,10 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             preferredLyricsPaneHeight = content.height - content.width
         }
         private func apply(_ policy: PlayerWindowBehavior, to window: NSWindow) {
+            let diagnosticPolicy = ["square": String(policy.square), "lyrics": String(policy.miniLyrics),
+                                    "pinned": String(policy.pinned), "transition": String(fullScreenTransition)]
+            PlayerWindowDiagnostics.record("apply.before", window: window, details: diagnosticPolicy)
+            defer { PlayerWindowDiagnostics.record("apply.after", window: window, details: diagnosticPolicy) }
             let fullScreen = fullScreenTransition || window.styleMask.contains(.fullScreen)
             window.level = !fullScreen && policy.pinned ? .floating : .normal
             // Explicitly mark this viewer as a primary window even when hiding
@@ -244,6 +252,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             if square { window.contentAspectRatio = NSSize(width: 1, height: 1) }
         }
         func dismantle() {
+            PlayerWindowDiagnostics.record("dismantle", window: attachedWindow, force: true)
             generation &+= 1
             fullScreenTransitionGeneration &+= 1; fullScreenTransition = false
             windowObservers.forEach(NotificationCenter.default.removeObserver)
@@ -263,5 +272,99 @@ struct PlayerWindowBehavior: NSViewRepresentable {
     static func dismantleNSView(_ view: WindowAttachmentView, coordinator: Coordinator) {
         view.coordinator = nil
         coordinator.dismantle()
+    }
+}
+
+/// Bounded, opt-in diagnostics for the app's own native window. No media,
+/// network identifiers, input text, or other applications are observed.
+/// The environment path is supplied only for a dedicated diagnostic launch.
+enum PlayerWindowDiagnostics {
+    static func record(_ event: String, window: NSWindow?, details: [String: String] = [:], force: Bool = false) {
+        guard let path = ProcessInfo.processInfo.environment["FUSIONPLAY_WINDOW_DIAGNOSTICS_PATH"],
+              path.hasPrefix("/"), Thread.isMainThread else { return }
+        MainActor.assumeIsolated { Storage.record(event, window: window, details: details, force: force, path: path) }
+    }
+
+    @MainActor private enum Storage {
+        private static var signatures: [String: Data] = [:]
+        private static let limit = 1_048_576
+
+        static func record(_ event: String, window: NSWindow?, details: [String: String], force: Bool, path: String) {
+            var value: [String: Any] = [
+                "event": event, "policy": details,
+                "activationPolicy": NSApp.activationPolicy().rawValue,
+                "presentationOptions": NSApp.presentationOptions.rawValue,
+                "appActive": NSApp.isActive,
+                "keyWindow": NSApp.keyWindow?.windowNumber as Any? ?? NSNull(),
+                "mainWindow": NSApp.mainWindow?.windowNumber as Any? ?? NSNull(),
+                "eventType": NSApp.currentEvent?.type.rawValue as Any? ?? NSNull(),
+                "eventModifiers": NSApp.currentEvent?.modifierFlags.rawValue as Any? ?? NSNull()
+            ]
+            if let window {
+                let button = window.standardWindowButton(.zoomButton)
+                value["window"] = [
+                    "number": window.windowNumber, "class": String(describing: type(of: window)),
+                    "delegate": window.delegate.map { String(describing: type(of: $0)) } ?? "nil",
+                    "frame": NSStringFromRect(window.frame), "contentLayout": NSStringFromRect(window.contentLayoutRect),
+                    "styleMask": window.styleMask.rawValue, "collectionBehavior": window.collectionBehavior.rawValue,
+                    "fullScreen": window.styleMask.contains(.fullScreen), "zoomed": window.isZoomed,
+                    "level": window.level.rawValue, "visible": window.isVisible,
+                    "key": window.isKeyWindow, "main": window.isMainWindow,
+                    "canBecomeKey": window.canBecomeKey, "canBecomeMain": window.canBecomeMain,
+                    "inLiveResize": window.inLiveResize, "opaque": window.isOpaque,
+                    "minSize": NSStringFromSize(window.minSize), "maxSize": NSStringFromSize(window.maxSize),
+                    "contentMinSize": NSStringFromSize(window.contentMinSize), "contentMaxSize": NSStringFromSize(window.contentMaxSize),
+                    "aspectRatio": NSStringFromSize(window.aspectRatio), "contentAspectRatio": NSStringFromSize(window.contentAspectRatio),
+                    "resizeIncrements": NSStringFromSize(window.resizeIncrements), "contentResizeIncrements": NSStringFromSize(window.contentResizeIncrements),
+                    "screenFrame": window.screen.map { NSStringFromRect($0.frame) } ?? "nil",
+                    "screenVisibleFrame": window.screen.map { NSStringFromRect($0.visibleFrame) } ?? "nil",
+                    "zoomButtonEnabled": button?.isEnabled as Any? ?? NSNull(),
+                    "zoomButtonAction": button?.action.map(NSStringFromSelector) ?? "nil",
+                    "zoomButtonTarget": button?.target.map { String(describing: type(of: $0)) } ?? "nil",
+                    "accessibilityFullScreenButton": window.accessibilityFullScreenButton() != nil
+                ]
+            } else { value["window"] = NSNull() }
+            let key = event + ":" + String(window?.windowNumber ?? -1)
+            guard let signature = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+                  force || signatures[key] != signature else { return }
+            signatures[key] = signature
+            if signatures.count > 32 { signatures = [key: signature] }
+            value["uptime"] = ProcessInfo.processInfo.systemUptime
+            guard var data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]), data.count < limit else { return }
+            data.append(0x0a)
+            let url = URL(fileURLWithPath: path)
+            do {
+                let manager = FileManager.default
+                try manager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                if !manager.fileExists(atPath: path) {
+                    guard manager.createFile(atPath: path, contents: nil,
+                                             attributes: [.posixPermissions: NSNumber(value: 0o600)]) else { return }
+                }
+                let handle = try FileHandle(forWritingTo: url)
+                defer { try? handle.close() }
+                let size = try handle.seekToEnd()
+                if size + UInt64(data.count) > UInt64(limit) {
+                    try handle.truncate(atOffset: 0)
+                    try handle.seek(toOffset: 0)
+                }
+                try handle.write(contentsOf: data)
+            } catch {
+                // Diagnostics must never change window behavior on a write failure.
+            }
+        }
+    }
+}
+
+/// Keep SwiftUI's eligibility consistent with the native window policy. Its
+/// automatic content-size inference can otherwise restore fullScreenNone.
+struct PlayerFullScreenEligibility: ViewModifier {
+    @ViewBuilder func body(content: Content) -> some View {
+#if compiler(>=6.0)
+        if #available(macOS 15.0, *) {
+            content.windowFullScreenBehavior(.enabled)
+        } else { content }
+#else
+        content
+#endif
     }
 }

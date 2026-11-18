@@ -23,6 +23,7 @@ struct AppearanceSettingsPage: View {
     var body: some View {
         Form {
             playbackSection
+            LyricsStaggerSettingsSection()
             miniPlayerSection
             menuPanelSection
             FontSettingsSection()

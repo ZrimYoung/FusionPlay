@@ -1,5 +1,8 @@
 #!/bin/bash
 source "$(dirname "$0")/env.sh"
+# Default checks remain alpha-zero and do not create a menu-bar item or take
+# focus. Opt into visible interaction/captures only when explicitly requested.
+export FUSIONPLAY_MENU_VISUAL_CHECK="${FUSIONPLAY_MENU_VISUAL_CHECK:-0}"
 cd "$REPO"
 CHECK="$PROJECT/tmp/menu-native-check.app"
 mkdir -p "$CHECK/Contents/MacOS" "$CHECK/Contents/Resources"

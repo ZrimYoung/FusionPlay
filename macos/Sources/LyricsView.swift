@@ -11,17 +11,54 @@ struct LyricsView: View {
     let compact: Bool
     let canSeek: Bool
     let seek: (UInt64) -> Void
+#if FUSIONPLAY_UI_CHECKS
+    var checkReduceMotion: Bool? = nil
+    var checkVoiceOver: Bool? = nil
+#endif
 
     @AppStorage("appLanguage") private var language = "zh-Hans"
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("staggerLyricMotion") private var staggerLyricMotion = LyricsStaggerTiming.defaultEnabled
+    @AppStorage("lyricStaggerMilliseconds") private var lyricStaggerMilliseconds = LyricsStaggerTiming.defaultMilliseconds
+    @AppStorage("lyricLineMoveMilliseconds") private var lyricLineMoveMilliseconds = LyricsStaggerTiming.defaultMoveMilliseconds
+    @AppStorage("lyricsFontScalePercent") private var lyricsFontScalePercent = LyricsTypography.defaultScalePercent
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.accessibilityVoiceOverEnabled) private var systemVoiceOver
     @Environment(\.colorSchemeContrast) private var contrast
     @State private var browsing = false
     @GestureState private var dragging = false
     @State private var browsingRevision = 0
     @State private var followRequestRevision: Int?
     @State private var followPosition = LyricsFollowPosition()
+    @State private var liveResizing = false
+    @State private var viewportSettling = false
+    @State private var viewportRevision = 0
+    @State private var viewportFollowRequest: Int?
+    @State private var followWave: LyricsFollowWave?
+    @StateObject private var viewportAnchor = LyricsViewportAnchor()
+
+    private var lineMoveDuration: TimeInterval {
+        LyricsStaggerTiming.moveDuration(milliseconds: lyricLineMoveMilliseconds)
+    }
+    private var staggerSpan: TimeInterval {
+        guard staggerLyricMotion, !reduceMotion, !voiceOver else { return 0 }
+        return LyricsStaggerTiming.span(milliseconds: lyricStaggerMilliseconds)
+    }
+
+    private var reduceMotion: Bool {
+#if FUSIONPLAY_UI_CHECKS
+        return checkReduceMotion ?? systemReduceMotion
+#else
+        return systemReduceMotion
+#endif
+    }
+    private var voiceOver: Bool {
+#if FUSIONPLAY_UI_CHECKS
+        return checkVoiceOver ?? systemVoiceOver
+#else
+        return systemVoiceOver
+#endif
+    }
 
     private var activeIndex: Int? {
         guard let position = followPosition.current(positionMs, connected: connected) else { return nil }
@@ -50,11 +87,19 @@ struct LyricsView: View {
                             ForEach(document.lines.indices, id: \.self) { index in
                                 let line = document.lines[index]
                                 lyricRow(line, index: index, width: geometry.size.width)
-                                    .visualEffect { [height = geometry.size.height, maximumBlur, maximumTopBlur] content, row in
+                                    .background {
+                                        LyricsViewportRowProbe(id: line.id, anchor: viewportAnchor)
+                                            .allowsHitTesting(false).accessibilityHidden(true)
+                                    }
+                                    .modifier(LyricsRowStagger(span: staggerSpan, viewport: "fusionplay.lyrics.viewport",
+                                                              viewportHeight: geometry.size.height, wave: followWave))
+                                    .visualEffect { [height = geometry.size.height, maximumBlur, maximumTopBlur,
+                                                    current = line.id == activeID] content, row in
                                         content.blur(radius: Self.edgeBlurRadius(
                                             frame: row.frame(in: .named("fusionplay.lyrics.viewport")),
                                             viewportHeight: height, topMaximum: maximumTopBlur,
-                                            bottomMaximum: maximumBlur))
+                                            bottomMaximum: maximumBlur,
+                                            current: current))
                                     }
                                     .id(line.id)
                             }
@@ -70,7 +115,13 @@ struct LyricsView: View {
                     .scrollClipDisabled()
                     .scrollIndicators(.hidden)
                     .background {
-                        LyricsScrollActivity { userBeganBrowsing() }
+                        LyricsScrollActivity(anchor: viewportAnchor, activeID: activeID,
+                                             browsing: browsing, anchoringEnabled: !voiceOver,
+                                             onScroll: { userBeganBrowsing() }, onLiveResize: { resizing in
+                            guard liveResizing != resizing else { return }
+                            liveResizing = resizing
+                            viewportChanged()
+                        })
                     }
                     .simultaneousGesture(DragGesture(minimumDistance: 6)
                         .updating($dragging) { _, dragging, _ in dragging = true }
@@ -85,24 +136,58 @@ struct LyricsView: View {
                         .init(color: .clear, location: 1)
                     ], startPoint: .top, endPoint: .bottom))
                     .onAppear {
-                        DispatchQueue.main.async { follow(proxy, animated: false) }
+                        DispatchQueue.main.async { follow(proxy, animated: false, reason: "appear") }
                     }
-                    .onChange(of: activeID) { _, _ in
+                    .onChange(of: activeID) { previous, _ in
                         // VoiceOver owns its reading position; do not scroll its
                         // focused line away when playback advances.
-                        if !browsing && !voiceOver { follow(proxy, animated: true) }
+                        if !browsing && !dragging && !voiceOver && !liveResizing && !viewportSettling {
+                            follow(proxy, animated: true, reason: "playback", previousID: previous)
+                        }
                     }
-                    .onChange(of: geometry.size) { _, _ in
-                        if document.isTimed && !browsing && !voiceOver { follow(proxy, animated: false) }
+                    .onChange(of: geometry.size) { _, _ in viewportChanged() }
+                    .task(id: viewportRevision) {
+                        guard viewportRevision > 0, !liveResizing else { return }
+                        // Let the final word reflow and row-height move finish before
+                        // restoring the reading anchor, as on the iPad player.
+                        let settle = reduceMotion ? 0.18 : LyricsReflowText.transitionDuration + staggerSpan + 0.05
+                        do { try await Task.sleep(nanoseconds: UInt64(settle * 1_000_000_000)) }
+                        catch { return }
+                        // A newly realized lazy row can arrive just after the
+                        // text renderer's deadline. Release only after a short
+                        // quiet period, with a bound for continuously playing text.
+                        let quietLimit = Date().addingTimeInterval(0.4)
+                        while Date().timeIntervalSince(viewportAnchor.lastGeometryChange) < 0.1, Date() < quietLimit {
+                            do { try await Task.sleep(for: .milliseconds(20)) }
+                            catch { return }
+                        }
+                        guard !Task.isCancelled, !liveResizing else { return }
+                        viewportSettling = false
+                        // Trigger a fresh view callback after the quiet period;
+                        // an async task's captured playback position can be old.
+                        viewportFollowRequest = viewportRevision
+                    }
+                    .onChange(of: viewportFollowRequest) { _, revision in
+                        guard revision == viewportRevision, !viewportSettling, !liveResizing else { return }
+                        let preserved = viewportAnchor.finish(activeID: activeID)
+#if FUSIONPLAY_UI_CHECKS
+                        LyricsViewCheckEvents.anchorFinished?(activeID, preserved)
+#endif
+                        if browsing { browsingRevision &+= 1 }
+                        guard document.isTimed, !browsing, !dragging, !voiceOver else { return }
+                        if !preserved { follow(proxy, animated: true, reason: "viewport") }
                     }
                     .onChange(of: document) { _, _ in
-                        DispatchQueue.main.async { follow(proxy, animated: false) }
+                        DispatchQueue.main.async {
+                            if !liveResizing && !viewportSettling { follow(proxy, animated: false, reason: "document") }
+                        }
                     }
                     .onChange(of: followRequestRevision) { _, revision in
                         guard let revision, revision == browsingRevision, !browsing, !voiceOver else { return }
                         // Resolve the target from the latest playback value,
                         // not the view captured before the inactivity delay.
-                        follow(proxy, animated: true)
+                        guard !liveResizing && !viewportSettling else { return }
+                        follow(proxy, animated: true, reason: "resume")
                     }
                     .task(id: browsingRevision) {
                         guard browsing else { return }
@@ -110,7 +195,7 @@ struct LyricsView: View {
                         catch { return }
                         // A held drag may be stationary for longer than the
                         // delay. Its end starts a fresh inactivity countdown.
-                        guard !Task.isCancelled, !dragging else { return }
+                        guard !Task.isCancelled, !dragging, !liveResizing, !viewportSettling else { return }
                         browsing = false
                         followRequestRevision = browsingRevision
                     }
@@ -121,6 +206,16 @@ struct LyricsView: View {
             }
         }
         .onAppear { followPosition.observe(positionMs, connected: connected) }
+        .task(id: followWave?.start) {
+            guard let wave = followWave else { return }
+            do { try await Task.sleep(nanoseconds: UInt64(max(0, wave.end.timeIntervalSinceNow) * 1_000_000_000)) }
+            catch { return }
+            guard !Task.isCancelled, followWave?.start == wave.start else { return }
+            clearFollowWave()
+        }
+        .onChange(of: staggerSpan) { _, _ in clearFollowWave() }
+        .onChange(of: lineMoveDuration) { _, _ in clearFollowWave() }
+        .onChange(of: lyricsFontScalePercent) { _, _ in viewportChanged() }
         .onChange(of: positionMs) { _, position in
             followPosition.observe(position, connected: connected)
         }
@@ -128,10 +223,15 @@ struct LyricsView: View {
             followPosition.observe(positionMs, connected: connected)
             if !connected { resetBrowsing() }
         }
-        .onDisappear { resetBrowsing() }
+        .onDisappear {
+            resetBrowsing()
+            viewportAnchor.disconnect()
+            liveResizing = false; viewportSettling = false
+            viewportRevision &+= 1; viewportFollowRequest = nil
+        }
         // Keep the reset outside the empty/nonempty branch: switching tracks
         // briefly clears the document while the next LRC is parsed.
-        .onChange(of: document) { _, _ in resetBrowsing() }
+        .onChange(of: document) { _, _ in resetBrowsing(); clearFollowWave() }
     }
 
     @ViewBuilder private var emptyState: some View {
@@ -180,7 +280,10 @@ struct LyricsView: View {
 
     private func rowContent(_ line: LyricsLine, index: Int, width: CGFloat) -> some View {
         let active = index == activeIndex
-        let size = compact ? min(28, max(20, width * 0.075)) : min(34, max(25, width * 0.075))
+        let baseSize = compact ? min(28, max(20, width * 0.075)) : min(34, max(25, width * 0.075))
+        let scale = LyricsTypography.scale(percent: lyricsFontScalePercent)
+        let size = baseSize * scale
+        let translationSize = (compact ? max(12, baseSize * 0.56) : baseSize * 0.6) * scale
         let opacity: Double = {
             if !document.isTimed { return 0.88 }
             if active { return 1 }
@@ -195,16 +298,15 @@ struct LyricsView: View {
                     .tracking(5)
                     .accessibilityLabel(L("歌词间隔"))
             } else {
-                Text(line.text)
-                    .font(typography.font(size: size, weight: .bold))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .lineSpacing(compact ? 1 : 3)
+                LyricsReflowText(text: line.text, font: typography.nsFont(size: size, weight: .bold),
+                                 lineSpacing: compact ? 1 : 3, reduceMotion: reduceMotion,
+                                 width: max(1, width - 6))
             }
             if let translation = line.translation, !translation.isEmpty {
-                Text(translation)
-                    .font(typography.font(size: compact ? max(12, size * 0.56) : size * 0.6, weight: .semibold))
+                LyricsReflowText(text: translation,
+                                 font: typography.nsFont(size: translationSize, weight: .semibold),
+                                 lineSpacing: 0, reduceMotion: reduceMotion, width: max(1, width - 6))
                     .opacity(0.78)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -218,8 +320,10 @@ struct LyricsView: View {
     /// A visual-only transform: scrolling updates geometry without changing
     /// layout, row identity, or SwiftUI state. Blur grows smoothly at both edges.
     nonisolated private static func edgeBlurRadius(frame: CGRect, viewportHeight: CGFloat,
-                                                  topMaximum: CGFloat, bottomMaximum: CGFloat) -> CGFloat {
+                                                  topMaximum: CGFloat, bottomMaximum: CGFloat,
+                                                  current: Bool) -> CGFloat {
         guard viewportHeight > 0 else { return 0 }
+        if current && frame.height > viewportHeight * 0.6 { return 0 }
         let topBand = max(12, viewportHeight * 0.30)
         let bottomBand = max(12, viewportHeight * 0.45)
         let topAmount = 1 - min(1, max(0, frame.midY / topBand))
@@ -230,23 +334,61 @@ struct LyricsView: View {
         return max(topBlur, bottomBlur)
     }
 
+    private func viewportChanged() {
+        viewportAnchor.configure(activeID: activeID, browsing: browsing, enabled: !voiceOver)
+        viewportAnchor.beginIfNeeded(retryWhenReady: true)
+        if !viewportSettling {
+            if let wave = followWave {
+                followWave = LyricsFollowWave(start: Date(), direction: 0, span: 0,
+                                               duration: 0.18, previous: wave)
+            }
+        }
+        viewportSettling = true
+        viewportRevision &+= 1
+    }
     private func userBeganBrowsing() {
+        viewportAnchor.cancel()
         guard document.isTimed, connected else { return }
+        clearFollowWave()
         browsing = true
         browsingRevision &+= 1
     }
     private func resetBrowsing() {
+        viewportAnchor.cancel()
+        clearFollowWave()
         browsing = false
         browsingRevision &+= 1
         followRequestRevision = nil
     }
-    private func follow(_ proxy: ScrollViewProxy, animated: Bool) {
+    private func clearFollowWave() {
+        guard followWave != nil else { return }
+        followWave = nil
+#if FUSIONPLAY_UI_CHECKS
+        LyricsViewCheckEvents.wave?(nil)
+#endif
+    }
+    private func follow(_ proxy: ScrollViewProxy, animated: Bool, reason: String,
+                        previousID: Int? = nil) {
+        // Respect native browsing and accessibility even for asynchronous
+        // appear/document callbacks captured before the activity began.
+        guard !browsing, !dragging, !voiceOver, !liveResizing, !viewportSettling else { return }
         // Unknown progress is not an instruction to jump to the first line.
         guard document.isTimed, followPosition.current(positionMs, connected: connected) != nil else { return }
         guard let id = activeID ?? document.lines.first?.id else { return }
         let anchor = UnitPoint(x: 0.5, y: 0.32)
+        if animated, staggerSpan > 0, let previousID, (1...2).contains(abs(id - previousID)) {
+            let wave = LyricsFollowWave(start: Date(), direction: id > previousID ? 1 : -1, span: staggerSpan,
+                                        duration: lineMoveDuration, previous: followWave)
+            followWave = wave
+#if FUSIONPLAY_UI_CHECKS
+            LyricsViewCheckEvents.wave?(wave)
+#endif
+        } else { clearFollowWave() }
+#if FUSIONPLAY_UI_CHECKS
+        LyricsViewCheckEvents.follow?(reason, id, animated && !reduceMotion)
+#endif
         if animated && !reduceMotion {
-            withAnimation(.easeInOut(duration: 0.48)) { proxy.scrollTo(id, anchor: anchor) }
+            withAnimation(.easeInOut(duration: lineMoveDuration)) { proxy.scrollTo(id, anchor: anchor) }
         } else {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true
@@ -254,6 +396,22 @@ struct LyricsView: View {
         }
     }
 }
+
+#if FUSIONPLAY_UI_CHECKS
+@MainActor enum LyricsViewCheckEvents {
+    static var follow: ((String, Int, Bool) -> Void)?
+    static var wave: ((LyricsFollowWave?) -> Void)?
+    static var anchorFinished: ((Int?, Bool) -> Void)?
+}
+
+typealias LyricsRowGeometryCheckView = LyricsViewportRowView
+#endif
+
+#if FUSIONPLAY_UI_CHECKS
+protocol LyricsActivityCheckDriving {
+    func beginBrowsingForCheck()
+}
+#endif
 
 private struct LyricsRowButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -264,24 +422,54 @@ private struct LyricsRowButtonStyle: ButtonStyle {
 /// Observe only wheel events inside this lyric scroll region. Returning the
 /// original event preserves native scrolling and does not capture input.
 private struct LyricsScrollActivity: NSViewRepresentable {
+    let anchor: LyricsViewportAnchor
+    let activeID: Int?
+    let browsing: Bool
+    let anchoringEnabled: Bool
     let onScroll: () -> Void
+    let onLiveResize: (Bool) -> Void
     func makeNSView(context: Context) -> ActivityView {
         let view = ActivityView()
+        view.anchor = anchor
+        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled)
         view.onScroll = onScroll
+        view.onLiveResize = onLiveResize
         return view
     }
-    func updateNSView(_ view: ActivityView, context: Context) { view.onScroll = onScroll }
+    func updateNSView(_ view: ActivityView, context: Context) {
+        view.anchor = anchor
+        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled)
+        view.onScroll = onScroll; view.onLiveResize = onLiveResize
+        view.bindScrollView()
+    }
     static func dismantleNSView(_ view: ActivityView, coordinator: ()) { view.disconnect() }
 
     final class ActivityView: NSView {
+        weak var anchor: LyricsViewportAnchor?
         var onScroll: (() -> Void)?
+        var onLiveResize: ((Bool) -> Void)?
         private var monitor: Any?
+        private var resizeObservers: [NSObjectProtocol] = []
         override var acceptsFirstResponder: Bool { false }
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             disconnect()
-            guard window != nil else { return }
+            guard let window else { return }
+            bindScrollView()
+            // A compact/wide layout can attach midway through a native drag,
+            // after willStartLiveResize has already been delivered.
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, self.window === window else { return }
+                self.onLiveResize?(window?.inLiveResize ?? false)
+            }
+            for (name, resizing) in [(NSWindow.willStartLiveResizeNotification, true),
+                                     (NSWindow.didEndLiveResizeNotification, false)] {
+                let token = NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    DispatchQueue.main.async { [weak self] in self?.onLiveResize?(resizing) }
+                }
+                resizeObservers.append(token)
+            }
             monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
                 guard let self, let window = self.window, event.window === window,
                       self.bounds.contains(self.convert(event.locationInWindow, from: nil)),
@@ -291,10 +479,43 @@ private struct LyricsScrollActivity: NSViewRepresentable {
                 return event
             }
         }
+        override func layout() { super.layout(); bindScrollView() }
+        override func setFrameSize(_ newSize: NSSize) {
+            if frame.width > 0, frame.height > 0,
+               abs(frame.width - newSize.width) > 0.5 || abs(frame.height - newSize.height) > 0.5 {
+                anchor?.beginIfNeeded()
+            }
+            super.setFrameSize(newSize)
+            bindScrollView()
+        }
+        func bindScrollView() {
+            guard let root = window?.contentView, bounds.width > 0 else { return }
+            let scope = convert(bounds, to: nil)
+            func scrolls(_ view: NSView) -> [NSScrollView] {
+                (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrolls)
+            }
+            let selected = scrolls(root).filter {
+                let overlap = $0.convert($0.bounds, to: nil).intersection(scope)
+                return !overlap.isNull && overlap.width > scope.width * 0.7 && overlap.height > 40
+            }.max { $0.bounds.height < $1.bounds.height }
+            if let selected { anchor?.attach(selected, owner: self) }
+        }
         func disconnect() {
             if let monitor { NSEvent.removeMonitor(monitor) }
             monitor = nil
+            resizeObservers.forEach(NotificationCenter.default.removeObserver)
+            resizeObservers.removeAll()
+            anchor?.detach(owner: self)
         }
-        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            resizeObservers.forEach(NotificationCenter.default.removeObserver)
+        }
     }
 }
+
+#if FUSIONPLAY_UI_CHECKS
+extension LyricsScrollActivity.ActivityView: LyricsActivityCheckDriving {
+    func beginBrowsingForCheck() { onScroll?() }
+}
+#endif

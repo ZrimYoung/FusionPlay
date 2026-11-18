@@ -11,7 +11,13 @@ struct MenuPanelNativeSmoke {
         Task { @MainActor in
             do {
                 try await runChecks()
-                print("PASS: native menu materials, retained host, positioning, entry points, quit sheet and dismissal")
+                let visual = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_VISUAL_CHECK"] == "1"
+                print(visual
+                    ? "PASS: visual native menu materials, retained host, positioning, entry points, quit sheet and dismissal"
+                    : "PASS: hidden native menu materials, retained host, positioning, shadows and preference compatibility")
+                if !visual {
+                    print("Hidden mode: no windows ordered; interactive opening/dismissal, quit-sheet and screenshot checks skipped")
+                }
                 exit(0)
             } catch {
                 FileHandle.standardError.write(Data("Native menu check failed: \(error)\n".utf8))
@@ -42,18 +48,34 @@ struct MenuPanelNativeSmoke {
         }
         let model = ReceiverModel.preview(state, artwork: art, root: root)
         let defaults = UserDefaults(suiteName: "tech.zrim.fusionplay.menu-native-check.isolated")!
-        func preference(_ style: MenuPanelBackgroundStyle, visible: Bool = true) {
+        let visual = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_VISUAL_CHECK"] == "1"
+        func preference(_ style: MenuPanelBackgroundStyle, visible: Bool? = nil) {
             defaults.setVolatileDomain([
-                "showMenuBarIcon": visible, "appLanguage": "en",
+                "showMenuBarIcon": visible ?? visual, "appLanguage": "en",
                 MenuPanelBackgroundStyle.storageKey: style.rawValue
             ], forName: UserDefaults.argumentDomain)
+        }
+        precondition(MenuPanelBackgroundStyle(rawValue: "liquid") == .liquidGlass,
+                     "An explicit previous clear preference must remain clear")
+        precondition(MenuPanelBackgroundStyle.resolve("liquid") == (MenuPanelBackgroundStyle.supportsLiquidGlass ? .liquidGlass : .frosted))
+        if MenuPanelBackgroundStyle.supportsLiquidGlass {
+            precondition(MenuPanelBackgroundStyle.defaultValue == .regularGlass)
+            precondition(MenuPanelBackgroundStyle.choices.map(\.rawValue) == ["frosted", "regular", "liquid"])
+        } else {
+            precondition(MenuPanelBackgroundStyle.defaultValue == .frosted)
+            precondition(MenuPanelBackgroundStyle.choices == [.frosted])
         }
         preference(.liquidGlass)
         var destinations: [String] = []
         let menu = MenuPanelController(model: model, openWindow: { destinations.append($0) }, defaults: defaults)
         defer { menu.invalidate() }
+        // A transparent window can still take keyboard focus when made key.
+        // The default mode never calls show()/makeKeyAndOrderFront, creates no
+        // status item, never presents a sheet and never asks for screen access.
+        menu.testPanel.alphaValue = visual ? 1 : 0
+        menu.testPanel.ignoresMouseEvents = !visual
         let host = menu.testHostIdentity
-        precondition(menu.testHasStatusItem)
+        precondition(menu.testHasStatusItem == visual)
         precondition(!menu.testPanel.isOpaque && menu.testPanel.backgroundColor.alphaComponent == 0)
         precondition(menu.testPanel.level == .statusBar)
 
@@ -65,9 +87,61 @@ struct MenuPanelNativeSmoke {
             precondition(rect.maxY <= anchor.minY - 6, "Menu overlapped its status item")
         }
 
+        func validateMaterial(_ style: MenuPanelBackgroundStyle) {
+#if compiler(>=6.2)
+            if #available(macOS 26.0, *), style != .frosted,
+               !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+                guard let glass = menu.testMaterial as? NSGlassEffectView else { fatalError("Native glass missing") }
+                precondition(glass.style == (style == .regularGlass ? .regular : .clear) && glass.tintColor == nil)
+                precondition(menu.testPanel.contentView === glass)
+                precondition(glass.contentView.map(ObjectIdentifier.init) == host,
+                             "Glass must directly host the retained controls, without another material")
+                precondition(!menu.testPanel.hasShadow, "Glass retained a second window shadow")
+            } else {
+                precondition(menu.testMaterial is NSVisualEffectView && menu.testPanel.hasShadow)
+            }
+#else
+            precondition(menu.testMaterial is NSVisualEffectView && menu.testPanel.hasShadow)
+#endif
+            precondition(defaults.string(forKey: MenuPanelBackgroundStyle.storageKey) == style.rawValue,
+                         "Changing native material rewrote the user's selection")
+        }
+
+        if !visual {
+            let previousKey = NSApp.keyWindow
+            var materials: [[String: Any]] = []
+            for style in MenuPanelBackgroundStyle.choices {
+                preference(style, visible: false)
+                menu.syncPreferences()
+                // Even orderBack may choose a key window during AppKit startup.
+                // Inspect the native hierarchy without ordering any window.
+                menu.testPanel.contentView?.layoutSubtreeIfNeeded()
+                await pause(0.12)
+                precondition(!menu.testPanel.isVisible && menu.testPanel.alphaValue == 0)
+                precondition(!menu.testPanel.isKeyWindow && NSApp.keyWindow === previousKey,
+                             "Hidden menu check took keyboard focus")
+                precondition(!menu.testHasStatusItem && menu.testHostIdentity == host)
+                validateMaterial(style)
+                materials.append(["style": style.rawValue, "shadow": menu.testPanel.hasShadow,
+                                  "visible": menu.testPanel.isVisible, "alpha": menu.testPanel.alphaValue])
+                menu.close()
+                precondition(!menu.testPanel.isVisible)
+            }
+            menu.invalidate(); menu.invalidate()
+            precondition(!menu.testHasStatusItem && !menu.testPanel.isVisible)
+            try JSONSerialization.data(withJSONObject: ["passed": true, "mode": "hidden-materials",
+                "materials": materials, "interactiveChecksRun": false, "captures": [],
+                "receiverStarted": false, "realPreferencesChanged": false, "keyWindowUnchanged": true,
+                "reduceTransparency": NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency,
+                "materialsChecked": MenuPanelBackgroundStyle.choices.map(\.rawValue)], options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("native-menu-check.json"), options: .atomic)
+            return
+        }
+
         let backdrop = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 400),
                                 styleMask: .borderless, backing: .buffered, defer: false)
         backdrop.isReleasedWhenClosed = false
+        backdrop.alphaValue = visual ? 1 : 0
         backdrop.level = .floating
         let backdropView = CheckBackdrop()
         backdrop.contentView = backdropView
@@ -83,18 +157,7 @@ struct MenuPanelNativeSmoke {
                 precondition(menu.testPanel.frame.width == 280)
                 precondition(menu.testPanel.frame.height >= 130 && menu.testPanel.frame.height < 350,
                              "Menu sizing did not settle")
-#if compiler(>=6.2)
-                if #available(macOS 26.0, *), style == .liquidGlass,
-                   !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
-                    guard let glass = menu.testMaterial as? NSGlassEffectView else { fatalError("Native clear glass missing") }
-                    precondition(glass.style == .clear && glass.tintColor == nil)
-                    precondition(glass.contentView != nil)
-                } else {
-                    precondition(menu.testMaterial is NSVisualEffectView)
-                }
-#else
-                precondition(menu.testMaterial is NSVisualEffectView)
-#endif
+                validateMaterial(style)
                 backdrop.setFrame(menu.testPanel.frame.insetBy(dx: -80, dy: -70), display: true)
                 backdrop.orderFront(nil); menu.testPanel.orderFront(nil)
                 await pause(0.3)
@@ -116,6 +179,7 @@ struct MenuPanelNativeSmoke {
         precondition(menu.testHasStatusItem && menu.testPanel.isVisible && menu.testHostIdentity == host)
 
         let alert = NSAlert()
+        alert.window.alphaValue = visual ? 1 : 0
         alert.messageText = "Quit FusionPlay?"
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: menu.testPanel) { _ in }
@@ -153,8 +217,8 @@ struct MenuPanelNativeSmoke {
         menu.invalidate(); menu.invalidate()
         precondition(!menu.testHasStatusItem && !menu.testPanel.isVisible)
         menu.show(); precondition(!menu.testPanel.isVisible)
-        try JSONSerialization.data(withJSONObject: ["passed": true, "captures": captures,
-            "receiverStarted": false, "realPreferencesChanged": false], options: [.prettyPrinted, .sortedKeys])
+        try JSONSerialization.data(withJSONObject: ["passed": true, "mode": "visual-interactive", "interactiveChecksRun": true, "captures": captures,
+            "receiverStarted": false, "realPreferencesChanged": false, "materialsChecked": MenuPanelBackgroundStyle.choices.map(\.rawValue)], options: [.prettyPrinted, .sortedKeys])
             .write(to: output.appendingPathComponent("native-menu-check.json"), options: .atomic)
     }
 

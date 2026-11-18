@@ -1,0 +1,196 @@
+import AppKit
+import SwiftUI
+
+/// Keeps a visible reading point stationary while native text changes height.
+/// Compensation changes only the clip origin, never row sizing or view identity.
+@MainActor final class LyricsViewportAnchor: ObservableObject {
+    private final class WeakRow {
+        weak var value: LyricsViewportRowView?
+        init(_ value: LyricsViewportRowView) { self.value = value }
+    }
+    private struct ReadingPoint {
+        let id: Int
+        let rowFraction: CGFloat
+        let viewportFraction: CGFloat
+        let playingID: Int?
+        let browsing: Bool
+    }
+    private var rows: [Int: WeakRow] = [:]
+    private weak var scroll: NSScrollView?
+    private var bindingOwner: ObjectIdentifier?
+    private var observers: [NSObjectProtocol] = []
+    private var readingPoint: ReadingPoint?
+    private var correctionScheduled = false
+    private var captureWhenReady = false
+    private var compensating = false
+    private var activeID: Int?
+    private var browsing = false
+    private var enabled = true
+    private(set) var lastGeometryChange = Date.distantPast
+    var isHolding: Bool { readingPoint != nil }
+#if FUSIONPLAY_UI_CHECKS
+    var heldReadingPoint: (id: Int, rowFraction: CGFloat, viewportFraction: CGFloat)? {
+        readingPoint.map { ($0.id, $0.rowFraction, $0.viewportFraction) }
+    }
+#endif
+
+    func configure(activeID: Int?, browsing: Bool, enabled: Bool) {
+        self.activeID = activeID
+        self.browsing = browsing
+        self.enabled = enabled
+        if !enabled { cancel() }
+    }
+    func attach(_ scroll: NSScrollView?, owner: AnyObject) {
+        bindingOwner = ObjectIdentifier(owner)
+        guard self.scroll !== scroll else { return }
+        observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll()
+        self.scroll = scroll
+        guard let scroll else { readingPoint = nil; return }
+        for view in [scroll.contentView, scroll.documentView].compactMap({ $0 }) {
+            view.postsFrameChangedNotifications = true
+            view.postsBoundsChangedNotifications = true
+            for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: view, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, !self.compensating else { return }
+                        self.scheduleCorrection()
+                    }
+                })
+            }
+        }
+        if captureWhenReady { beginIfNeeded() }
+    }
+    func register(_ row: LyricsViewportRowView) {
+        guard rows[row.lineID]?.value !== row else { return }
+        rows[row.lineID] = WeakRow(row)
+        lastGeometryChange = Date()
+        if captureWhenReady { beginIfNeeded() }
+        scheduleCorrection()
+    }
+    func unregister(_ row: LyricsViewportRowView) {
+        if rows[row.lineID]?.value === row { rows.removeValue(forKey: row.lineID) }
+    }
+    func rowChanged(_ row: LyricsViewportRowView) {
+        lastGeometryChange = Date()
+        scheduleCorrection()
+    }
+    func beginIfNeeded(retryWhenReady: Bool = false) {
+        guard enabled else { return }
+        if retryWhenReady { captureWhenReady = true }
+        guard readingPoint == nil, let scroll else { return }
+        let clip = scroll.contentView
+        guard clip.bounds.height > 0 else { return }
+        let candidates = rows.values.compactMap(\.value).filter { $0.window === scroll.window }
+        let visible = candidates.filter { row in
+            let rect = row.convert(row.bounds, to: clip)
+            return rect.intersects(clip.bounds)
+        }
+        let preferred = !browsing ? visible.first { $0.lineID == activeID } : nil
+        let row = preferred ?? visible.min {
+            abs(viewportTop($0, clip: clip) - clip.bounds.height * 0.32)
+                < abs(viewportTop($1, clip: clip) - clip.bounds.height * 0.32)
+        }
+        guard let row, row.window === scroll.window else { return }
+        let rect = row.convert(row.bounds, to: clip)
+        let top = viewportTop(row, clip: clip)
+        // Following preserves the first visible line. Browsing can preserve a
+        // point inside a tall paragraph rather than pulling it back to its start.
+        let fraction = browsing || top < 0
+            ? min(1, max(0, (clip.bounds.height * 0.32 - top) / max(1, rect.height))) : 0
+        let viewportY = top + rect.height * fraction
+        readingPoint = ReadingPoint(id: row.lineID, rowFraction: fraction,
+            viewportFraction: viewportY / clip.bounds.height, playingID: activeID, browsing: browsing)
+        captureWhenReady = false
+        lastGeometryChange = Date()
+    }
+    private func viewportTop(_ row: NSView, clip: NSClipView) -> CGFloat {
+        let rect = row.convert(row.bounds, to: clip)
+        return clip.isFlipped ? rect.minY - clip.bounds.minY : clip.bounds.maxY - rect.maxY
+    }
+    private func scheduleCorrection() {
+        guard readingPoint != nil, !correctionScheduled else { return }
+        correctionScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.correctionScheduled = false
+            self.correct()
+        }
+    }
+    func correct() {
+        guard !compensating, let point = readingPoint, let scroll,
+              let row = rows[point.id]?.value, row.window === scroll.window else { return }
+        let clip = scroll.contentView
+        let rect = row.convert(row.bounds, to: clip)
+        let actual = viewportTop(row, clip: clip) + rect.height * point.rowFraction
+        let desired = clip.bounds.height * point.viewportFraction
+        let delta = actual - desired
+        guard delta.isFinite, abs(delta) > 0.25 else { return }
+        var bounds = clip.bounds
+        bounds.origin.y += clip.isFlipped ? delta : -delta
+        bounds = clip.constrainBoundsRect(bounds)
+        guard abs(bounds.minY - clip.bounds.minY) > 0.25 else { return }
+        compensating = true
+        clip.scroll(to: bounds.origin)
+        scroll.reflectScrolledClipView(clip)
+        compensating = false
+    }
+    /// True means the same playing sentence was held; a final whole-page
+    /// scroll would only undo that preservation and create a visible bounce.
+    func finish(activeID: Int?) -> Bool {
+        correct()
+        let preserved = readingPoint.map { point in
+            guard !point.browsing, point.id == activeID, point.playingID == activeID,
+                  let scroll, let row = rows[point.id]?.value, row.window === scroll.window else { return false }
+            return row.convert(row.bounds, to: scroll.contentView).intersects(scroll.contentView.bounds)
+        } ?? false
+        readingPoint = nil
+        captureWhenReady = false
+        return preserved
+    }
+    func cancel() { readingPoint = nil; captureWhenReady = false }
+    func detach(owner: AnyObject) {
+        guard bindingOwner == ObjectIdentifier(owner) else { return }
+        disconnect()
+    }
+    func disconnect() {
+        cancel(); observers.forEach(NotificationCenter.default.removeObserver)
+        observers.removeAll(); scroll = nil; bindingOwner = nil
+    }
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+}
+
+struct LyricsViewportRowProbe: NSViewRepresentable {
+    let id: Int
+    let anchor: LyricsViewportAnchor
+    func makeNSView(context: Context) -> LyricsViewportRowView {
+        LyricsViewportRowView(lineID: id, anchor: anchor)
+    }
+    func updateNSView(_ view: LyricsViewportRowView, context: Context) {
+        view.lineID = id
+        view.anchor = anchor
+        anchor.register(view)
+    }
+    static func dismantleNSView(_ view: LyricsViewportRowView, coordinator: ()) { view.anchor?.unregister(view) }
+}
+
+final class LyricsViewportRowView: NSView {
+    var lineID: Int
+    weak var anchor: LyricsViewportAnchor?
+    init(lineID: Int, anchor: LyricsViewportAnchor) {
+        self.lineID = lineID; self.anchor = anchor; super.init(frame: .zero)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window != nil { anchor?.register(self) } }
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        let changed = frame.origin != newOrigin
+        super.setFrameOrigin(newOrigin)
+        if changed { anchor?.rowChanged(self) }
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = frame.size != newSize
+        super.setFrameSize(newSize)
+        if changed { anchor?.rowChanged(self) }
+    }
+}

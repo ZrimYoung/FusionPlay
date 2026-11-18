@@ -136,11 +136,17 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 #endif
         host.removeFromSuperview()
         let root: NSView
+        var windowShadow = true
 #if compiler(>=6.2)
-        if #available(macOS 26.0, *), style == .liquidGlass, !reduced {
+        if #available(macOS 26.0, *), style != .frosted, !reduced {
             let glass = NSGlassEffectView()
-            glass.style = .clear; glass.cornerRadius = 18
+            glass.style = style == .regularGlass ? .regular : .clear
+            glass.cornerRadius = 18
+            glass.tintColor = nil
             glass.contentView = host
+            // Native glass already draws its optical edge. A second window
+            // shadow makes clear glass look like it has a dark extra rim.
+            windowShadow = false
             root = glass
         } else { root = makeFrostedMaterial() }
 #else
@@ -151,6 +157,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         if host.superview == nil { root.addSubview(host) }
         host.frame = root.bounds
         material = root; panel.contentView = root
+        panel.hasShadow = windowShadow
         panel.invalidateShadow()
     }
 

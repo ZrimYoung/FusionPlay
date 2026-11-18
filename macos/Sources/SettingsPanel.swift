@@ -19,7 +19,6 @@ struct SettingsPanel: View {
     @AppStorage("settingsSidebarVisible") private var sidebarVisible = true
     @StateObject private var titlebarLayout = SettingsTitlebarLayout()
     @StateObject private var navigationMotion: SettingsNavigationMotion
-    @State private var diagnosticsExpanded = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.appTypography) private var typography
     init(model: ReceiverModel, initialPage: ReceiverSettingsPage = .receiver) {
@@ -42,6 +41,10 @@ struct SettingsPanel: View {
                 }
             }.transaction { $0.animation = nil }
                 .frame(minWidth: 440, maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
+                .overlay {
+                    SettingsHeaderBackdrop().allowsHitTesting(false).accessibilityHidden(true)
+                }
         }
         .toolbar {
             ToolbarItem(id: "fusionplay.settings.sidebar", placement: .navigation) {
@@ -203,38 +206,7 @@ struct SettingsPanel: View {
         }
     }
     private var appearancePage: some View { AppearanceSettingsPage(onTitleCorrectionChanged: model.refreshDisplayPresentation) }
-    private var advancedPage: some View {
-        Form {
-            Section(L("同步微调")) {
-                SyncAdjustmentControl(model: model)
-                Text(L("提前幅度受已接收音频限制。调整时会短暂重新同步；如出现断音，请减小幅度或恢复默认。"))
-                    .font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize)).foregroundStyle(.secondary)
-                if !model.syncAdjustmentError.isEmpty { Text(model.syncAdjustmentError).font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize)).foregroundStyle(.red) }
-            }
-            Section {
-                DisclosureGroup(L("同步诊断"), isExpanded: $diagnosticsExpanded) {
-                    LabeledContent(L("状态"), value: L(model.phaseLabel))
-                    LabeledContent(L("专辑封面"), value: L(model.artworkStatus))
-                    if model.snapshot?.controlsAvailable == true && model.artwork == nil {
-                        Button(L("重新加载封面")) { model.reloadArtwork() }.disabled(model.artworkLoading)
-                    }
-                    if let state = model.snapshot {
-                        LabeledContent(L("输出设备"), value: state.output.isEmpty ? L("尚未输出") : state.output)
-                        LabeledContent(L("音频缓冲"), value: String(format: "%.1f ms", state.queueMs))
-                        LabeledContent(L("设备输出延迟"), value: String(format: "%.1f ms", state.outputLatencyMs))
-                        LabeledContent(L("调度误差"), value: String(format: "%.1f ms", state.scheduleErrorMs))
-                        LabeledContent(L("欠载 / 重新同步"), value: "\(state.underruns) / \(state.resyncs)")
-                    }
-                    Text(L("调度误差是软件内部指标，不代表与其他音箱的实测声音偏差。"))
-                        .font(typography.font(size: NSFont.preferredFont(forTextStyle: .caption1).pointSize)).foregroundStyle(.secondary)
-                }
-            }
-            Section(L("数据与日志")) {
-                Button(L("打开日志")) { model.openLogs() }
-                Button(L("打开数据与卸载目录")) { NSWorkspace.shared.open(model.root) }
-            }
-        }.formStyle(.grouped)
-    }
+    private var advancedPage: some View { AdvancedSettingsPage(model: model) }
     private var aboutPage: some View {
         ScrollView {
             VStack(spacing: 14) {

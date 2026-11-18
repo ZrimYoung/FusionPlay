@@ -6,7 +6,7 @@ struct FontSettingsSection: View {
     @AppStorage("uiFontWeight") private var weight = AppTypography.defaultWeight
     @AppStorage("appLanguage") private var language = "zh-Hans"
     @Environment(\.appTypography) private var typography
-    @State private var expanded = false
+    @State private var showingDetails = false
     @State private var showingFamilies = false
     @State private var search = ""
     @FocusState private var searchFocused: Bool
@@ -39,90 +39,88 @@ struct FontSettingsSection: View {
 
     var body: some View {
         Section(text("字体", "Fonts")) {
-            DisclosureGroup(isExpanded: $expanded) {
-                controls.padding(.top, 8)
-            } label: {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(text("界面字体", "Interface font"))
-                        .font(typography.font(size: 13))
-                    Text(summary)
-                        .font(typography.font(size: 12))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(summary)
-                }
-            }
+            Button { showingDetails = true } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(text("界面字体", "Interface font"))
+                            .font(typography.font(size: 13))
+                        Text(summary)
+                            .font(typography.font(size: 12)).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 12)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain).help(summary)
+                .accessibilityLabel(text("界面字体", "Interface font"))
+                .accessibilityValue(summary)
+                .accessibilityIdentifier("settings.font.details")
+        }
+        .sheet(isPresented: $showingDetails, onDismiss: { showingFamilies = false; search = "" }) {
+            SettingsDetailPanel(title: text("界面字体", "Interface font")) {
+                fontDetails
+            }.appTypography()
         }
     }
 
-    private var controls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            LabeledContent {
-                Button {
-                    search = ""
-                    showingFamilies = true
+    private var fontDetails: some View {
+        Form {
+            Section {
+                LabeledContent {
+                    Button {
+                        search = ""
+                        showingFamilies = true
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(familyLabel)
+                                .font(typography.font(size: 13))
+                                .lineLimit(1).truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                        }.frame(width: 210, alignment: .leading)
+                    }.buttonStyle(.bordered).controlSize(.small).help(familyLabel)
+                        .accessibilityLabel(text("选择界面字体", "Choose interface font"))
+                        .popover(isPresented: $showingFamilies, arrowEdge: .bottom) { familyPopover }
                 } label: {
-                    HStack(spacing: 8) {
-                        Text(familyLabel)
-                            .font(typography.font(size: 13))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                    Text(text("字族", "Font family")).font(typography.font(size: 13))
+                }
+                Picker(text("字重", "Weight"), selection: weightBinding) {
+                    ForEach(selection.availableWeights, id: \.self) { value in
+                        Text(weightLabel(value)).tag(value)
                     }
-                    .frame(width: 210, alignment: .leading)
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help(familyLabel)
-                .accessibilityLabel(text("选择界面字体", "Choose interface font"))
-                .popover(isPresented: $showingFamilies, arrowEdge: .bottom) {
-                    familyPopover
-                }
-            } label: {
-                Text(text("字族", "Font family"))
-                    .font(typography.font(size: 13))
-            }
-            Picker(text("字重", "Weight"), selection: weightBinding) {
-                ForEach(selection.availableWeights, id: \.self) { value in
-                    Text(weightLabel(value)).tag(value)
+                }.pickerStyle(.menu).controlSize(.small).font(typography.font(size: 13))
+            } footer: {
+                if selection.isMissing {
+                    Text(text("此字体未安装，当前使用系统字体；已保留原来的选择。",
+                              "This font is not installed. The system font is used while your original choice is preserved."))
+                        .font(typography.font(size: 12)).foregroundStyle(.secondary)
                 }
             }
-            .pickerStyle(.menu)
-            .controlSize(.small)
-            .font(typography.font(size: 13))
-            if selection.isMissing {
-                Text(text("此字体未安装，当前使用系统字体；已保留原来的选择。",
-                          "This font is not installed. The system font is used while your original choice is preserved."))
-                    .font(typography.font(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Section {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("FusionPlay · 让音乐，连接此刻")
+                        .font(selection.font(size: 17, weight: .semibold))
+                    Text("Music brings us together · 0123456789")
+                        .font(selection.font(size: 13))
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(text("字体预览", "Font preview"))
+            } header: {
+                Text(text("字体预览", "Font preview"))
+            } footer: {
+                Text(text("标题和歌词保留原有字号与字重层级。", "Headings and lyrics keep their existing text sizes and emphasis."))
+                    .font(typography.font(size: 11)).foregroundStyle(.secondary)
             }
-            VStack(alignment: .leading, spacing: 5) {
-                Text("FusionPlay · 让音乐，连接此刻")
-                    .font(selection.font(size: 17, weight: .semibold))
-                Text("Music brings us together · 0123456789")
-                    .font(selection.font(size: 13))
+            Section {
+                Button(text("恢复默认字体", "Restore default font")) {
+                    family = ""
+                    weight = AppTypography.defaultWeight
+                }.font(typography.font(size: 13))
+                    .disabled(family.isEmpty && weight == AppTypography.defaultWeight)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(text("字体预览", "Font preview"))
-            Text(text("标题和歌词保留原有字号与字重层级。", "Headings and lyrics keep their existing text sizes and emphasis."))
-                .font(typography.font(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(text("恢复默认字体", "Restore default font")) {
-                family = ""
-                weight = AppTypography.defaultWeight
-            }
-            .font(typography.font(size: 13))
-            .disabled(family.isEmpty && weight == AppTypography.defaultWeight)
-        }
+        }.formStyle(.grouped)
     }
 
     private var familyPopover: some View {

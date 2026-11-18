@@ -162,3 +162,23 @@
 
 "液态玻璃需要 macOS 26 或更高版本。" = "Liquid Glass requires macOS 26 or later.";
 "清透液态玻璃" = "Clear Liquid Glass";
+
+"磨砂玻璃" = "Frosted Glass";
+
+"液态玻璃（默认）" = "Liquid Glass (Default)";
+
+"液态玻璃（通透）" = "Liquid Glass (Clear)";
+
+"关闭" = "Close";
+
+"歌词动效" = "Lyric Motion";
+
+"交错滚动" = "Staggered Scrolling";
+
+"交错时间跨度" = "Stagger Duration";
+
+"可见歌词从上到下的最大动效时差" = "Maximum animation delay from the top to the bottom visible lyric line";
+
+"歌词字号" = "Lyric Text Size";
+
+"单行移动时长" = "Line Movement Duration";
