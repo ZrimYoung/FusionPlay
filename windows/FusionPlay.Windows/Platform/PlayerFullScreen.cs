@@ -16,6 +16,8 @@ internal sealed class PlayerFullScreen : IDisposable
     private uint savedDpi;
     private bool wasMaximized, changing, disposed;
     public bool IsFullScreen { get; private set; }
+    /// <summary>Raised before presenter, sizing policy or full-screen state changes.</summary>
+    public event Action<bool>? Changing;
     public event Action? Changed;
 
     public PlayerFullScreen(Window window, Func<bool> pinned, Action<bool> sizingPolicy)
@@ -32,9 +34,11 @@ internal sealed class PlayerFullScreen : IDisposable
         savedFrame = new(position.X, position.Y, size.Width, size.Height);
         savedWorkArea = DisplayArea.GetFromWindowId(window.AppWindow.Id, DisplayAreaFallback.Nearest).WorkArea;
         savedDpi = Math.Max(96, GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(window)));
-        changing = true; IsFullScreen = true;
+        changing = true;
         try
         {
+            Changing?.Invoke(true);
+            IsFullScreen = true;
             // Lift square/minimum constraints before the system changes geometry.
             sizingPolicy(true); presenter.IsAlwaysOnTop = false;
             window.AppWindow.SetPresenter(AppWindowPresenterKind.FullScreen);
@@ -60,6 +64,7 @@ internal sealed class PlayerFullScreen : IDisposable
         changing = true;
         try
         {
+            Changing?.Invoke(false);
             // Keep constraints lifted until the original frame/state is restored.
             window.AppWindow.SetPresenter(savedPresenter);
             if (wasMaximized) savedPresenter.Maximize();
@@ -93,7 +98,7 @@ internal sealed class PlayerFullScreen : IDisposable
     public void Dispose()
     {
         if (disposed) return; disposed = true;
-        window.AppWindow.Changed -= PresenterChanged; Changed = null;
+        window.AppWindow.Changed -= PresenterChanged; Changing = null; Changed = null;
     }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);

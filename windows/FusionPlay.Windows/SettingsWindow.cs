@@ -109,7 +109,7 @@ internal sealed class SettingsWindow : Window
         Label(() => { Title = titleBarText.Text = L.Text("FusionPlay 设置", "FusionPlay Settings"); navigation.PaneTitle = L.Text("设置", "Settings"); });
         AddPage("receiver", "接收", "Receiver", "\uE839", ReceiverPage());
         AddPage("audio", "音频", "Audio", "\uE767", AudioPage());
-        AddPage("player", "播放器", "Player", "\uE714", PlayerPage());
+        AddPage("player", "播放器", "Player", "\uE768", PlayerPage());
         AddPage("general", "通用", "General", "\uE713", GeneralPage());
         AddPage("about", "关于", "About", "\uE946", AboutPage());
         navigation.SelectionChanged += (_, _) =>
@@ -279,7 +279,7 @@ internal sealed class SettingsWindow : Window
             if (heading.Children[0] is TextBlock title) title.Name = "SettingsPageTitle_" + key;
             if (heading.Children[1] is TextBlock description) description.Name = "SettingsPageDescription_" + key;
         }
-        var item = new NavigationViewItem { Tag = key, Icon = new FontIcon { Glyph = glyph } };
+        var item = new NavigationViewItem { Tag = key, Icon = new FontIcon { Glyph = glyph, FontSize = 16, FontWeight = Microsoft.UI.Text.FontWeights.Normal } };
         Label(() => item.Content = L.Text(chinese, english)); navigation.MenuItems.Add(item);
         // Keep MaxWidth on the inner page. A MaxWidth-constrained direct
         // ScrollViewer child can be centered using its smaller desired width
