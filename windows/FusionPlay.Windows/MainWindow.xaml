@@ -53,7 +53,7 @@
     <Button x:Name="MigrationButton" Visibility="Collapsed" Click="Migration_Click" HorizontalAlignment="Left"/><TextBlock x:Name="MiniStatus" FontSize="11" TextWrapping="Wrap" MaxLines="2" AutomationProperties.LiveSetting="Polite"/>
    </StackPanel>
    </Grid>
-   <Border x:Name="MiniLyricsDivider" Grid.Row="1" Height="0.5" Background="#10FFFFFF" VerticalAlignment="Center" Visibility="Collapsed" IsHitTestVisible="False"/>
+   <Border x:Name="MiniLyricsDivider" Grid.Row="0" Height="0.5" Background="#10FFFFFF" VerticalAlignment="Bottom" Visibility="Collapsed" IsHitTestVisible="False"/>
    <Grid x:Name="MiniLyricsHost" Grid.Row="2" MinHeight="128" Padding="22,0,22,12" Visibility="Collapsed"/>
   </Grid>
  </Grid>
