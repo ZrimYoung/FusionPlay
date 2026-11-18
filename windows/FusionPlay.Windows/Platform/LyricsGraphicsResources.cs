@@ -14,6 +14,7 @@ internal sealed class LyricsGraphicsResources : IDisposable
     internal CompositionEffectFactory BlurFactory { get; }
     internal Compositor Compositor { get; }
     private readonly Action deviceLost;
+    private int activeClusterMotions;
 
     internal LyricsGraphicsResources(Compositor compositor, Action deviceLost)
     {
@@ -31,6 +32,13 @@ internal sealed class LyricsGraphicsResources : IDisposable
         }
         catch { Close(BlurFactory); Close(GraphicsDevice); throw; }
     }
+    internal bool TryReserveClusterMotion()
+    {
+        if (activeClusterMotions >= 3) return false;
+        activeClusterMotions++;
+        return true;
+    }
+    internal void ReleaseClusterMotion() => activeClusterMotions--;
     private void DeviceLost(CanvasDevice sender, object args) => deviceLost();
     internal static void Close(IDisposable? value)
     {

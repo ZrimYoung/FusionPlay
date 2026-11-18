@@ -36,18 +36,20 @@ public sealed partial class MainWindow : Window
     private readonly PlayerAcrylic acrylic;
     private readonly WindowResizeTransition resizeTransition;
     private readonly PlayerLayoutTransition layoutTransition;
+    private readonly CompactLyricsPager miniPager;
     private readonly LyricsView miniLyrics, expandedLyrics;
     private readonly TransportTransition transportTransition, expandedTransportTransition;
     private readonly TransportTransition progressTransition, expandedProgressTransition;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
     private string? progressColorKey;
-    private (double Width, double Height, bool Lyrics, bool Progress, bool Transport, double ProgressHeight, double TransportHeight, bool Idle)? appliedLayout;
+    private (double Width, double Height, bool Lyrics, bool Progress, bool Transport, double ProgressHeight, double TransportHeight, bool Idle, bool Paged)? appliedLayout;
     private bool? configuredLyricsLayout, configuredMiniLyricsLayout;
     private bool presenterTransitionPending, geometryCommitQueued;
     private long geometryQueuedVersion;
     private bool? requestedLyricsLayout;
-    private bool lyricsLayoutTransitioning, contentTransitionDone, nativeTransitionDone, holdExpandedLayout, closeShown = true;
+    private bool lyricsLayoutTransitioning, contentTransitionDone, nativeTransitionDone, holdExpandedLayout;
+    private bool? windowActionsShown;
     private long layoutTransitionVersion;
     private bool inputRegionsQueued;
     private bool pointerInside, focusInside, controlsShown = true, captionShown = true, fullscreenCaptionShown = true, progressShown, lyricsVisible, closed, compact = true, rendering = true, revealMiniRequested;
@@ -80,6 +82,9 @@ public sealed partial class MainWindow : Window
         MiniCoverPanel.SizeChanged += (_, args) => coverClip.Rect = new global::Windows.Foundation.Rect(0, 0, args.NewSize.Width, args.NewSize.Height);
         miniLyrics = new LyricsView(); expandedLyrics = new LyricsView();
         MiniLyricsHost.Children.Add(miniLyrics); ExpandedLyricsHost.Children.Add(expandedLyrics);
+        miniPager = new CompactLyricsPager(MiniRoot, MiniCoverPanel, MiniLyricsHost, MiniPageButton,
+            () => !closed && compact && !idle && !lyricsLayoutTransitioning && !presenterTransitionPending && !MiniProgressSeek.PointerSeekActive,
+            () => CanAnimateLayout && !WindowSizing.ScreenReaderActive, MiniPageChanged);
         miniLyrics.SeekRequested += SeekLyric; expandedLyrics.SeekRequested += SeekLyric;
         foreach (var seek in new[] { ProgressSeek, MiniProgressSeek })
         {
@@ -87,6 +92,11 @@ public sealed partial class MainWindow : Window
             // duration and command validation always retain source metadata.
             seek.Snapshot = () => model.State with { PositionMs = model.State.HasMedia ? model.DisplayPositionMs : null };
             seek.SeekRequested += SeekRequested;
+            seek.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) =>
+            {
+                miniLyrics.CancelFollowAnimation();
+                expandedLyrics.CancelFollowAnimation();
+            }), true);
         }
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         {
@@ -102,7 +112,9 @@ public sealed partial class MainWindow : Window
             [MiniRoot, ExpandedRoot], () => compact ? MiniRoot : ExpandedRoot,
             [(MiniArtworkLayer, CoverFrame), (MiniControlsTransitionLayer, ExpandedDetails)], ClientFrame);
         squareSizing.MoveSizeStarted += WindowMoveSizeStarted;
-        fullScreen = new PlayerFullScreen(this, () => model.Preferences.Value.Pinned, active => squareSizing.SetPlayerLayout(lyricsVisible, active));
+        squareSizing.MoveSizeEnded += WindowMoveSizeEnded;
+        fullScreen = new PlayerFullScreen(this, () => model.Preferences.Value.Pinned,
+            active => SetNativePlayerLayout(lyricsVisible, active));
         fullScreen.Changed += FullScreenChanged;
         fullScreen.Changing += FullScreenChanging;
         transportTransition = new TransportTransition(MiniTransport);
@@ -117,6 +129,7 @@ public sealed partial class MainWindow : Window
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         AppWindow.Closing += (_, args) =>
         {
+            miniPager.FinishInteraction();
             CancelLyricsTransition(snapResize: true);
             ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer();
             if (AllowClose) return;
@@ -150,6 +163,12 @@ public sealed partial class MainWindow : Window
         var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
         escape.Invoked += (_, args) => { if (IsFullScreen) { ToggleFullScreen(); args.Handled = true; } };
         RootGrid.KeyboardAccelerators.Add(escape);
+        foreach (var direction in new[] { VirtualKey.Left, VirtualKey.Right })
+        {
+            var pageKey = new KeyboardAccelerator { Key = direction, Modifiers = VirtualKeyModifiers.Control };
+            pageKey.Invoked += (_, args) => args.Handled = miniPager.Navigate(direction == VirtualKey.Right);
+            RootGrid.KeyboardAccelerators.Add(pageKey);
+        }
         RootGrid.KeyDown += (_, args) => { if (args.Key == VirtualKey.Tab) { focusInside = true; ShowControls(true); ShowCaption(true); } };
         RootGrid.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) => focusInside = false), true);
         Activated += (_, args) =>
@@ -167,8 +186,10 @@ public sealed partial class MainWindow : Window
             expandedLyricsBackdrop.Changed -= Render; expandedLyricsBackdrop.Failed -= LogBackdropFailure; appearance.ColorValuesChanged -= ContrastChanged; appearance.AdvancedEffectsEnabledChanged -= ContrastChanged;
             sceneBackdrop.Changed -= Render; sceneBackdrop.Failed -= LogBackdropFailure;
             miniLyrics.SeekRequested -= SeekLyric; expandedLyrics.SeekRequested -= SeekLyric;
-            miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose(); acrylic.Dispose();
-            squareSizing.MoveSizeStarted -= WindowMoveSizeStarted; layoutTransition.Dispose(); resizeTransition.Dispose();
+            miniPager.Dispose(); miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose(); acrylic.Dispose();
+            squareSizing.MoveSizeStarted -= WindowMoveSizeStarted;
+            squareSizing.MoveSizeEnded -= WindowMoveSizeEnded;
+            layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
             AppWindow.Changed -= WindowFrameChanged;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
@@ -199,7 +220,7 @@ public sealed partial class MainWindow : Window
         CancelLyricsTransition(snapResize: true);
         if (IsFullScreen) fullScreen.Exit();
         revealMiniRequested = true;
-        WindowSizing.ResizeContent(this, 420, lyricsVisible ? squareSizing.PreferredLyricsHeight(420) : 420);
+        WindowSizing.ResizeContent(this, 420, StackedLyrics(lyricsVisible, 420, false) ? squareSizing.PreferredLyricsHeight(420) : 420);
         if (compact) { revealMiniRequested = false; ShowControls(true); ShowCaption(pointerInside); ScheduleHide(); }
     }
     internal static void AttachVolume(Slider slider, ReceiverController model)
@@ -219,15 +240,18 @@ public sealed partial class MainWindow : Window
         var state = model.State; var preferences = model.Preferences.Value;
         string error = preferenceError.Length > 0 ? preferenceError : model.Error;
         bool nextIdle = !model.HasCurrentTrack && !model.MigrationRequired && error.Length == 0;
-        if (idle != nextIdle) { idle = nextIdle; appliedLayout = null; }
+        if (idle != nextIdle) { idle = nextIdle; appliedLayout = null; if (idle) miniPager.ResetToPlayer(); }
         ulong? displayPosition = model.DisplayPositionMs;
         RequestLyricsLayout(!idle && LyricsDisplayModes.IsVisible(preferences.LyricsDisplayMode, model.LyricsAvailable));
-        squareSizing.SetPlayerLayout(lyricsVisible, IsFullScreen);
         ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
+        SetNativePlayerLayout(lyricsVisible, IsFullScreen);
+        miniPager.RefreshLanguage();
         if (!model.LyricsLoading) { lyricsTrackId = state.TrackId; lyricsTitle = state.Title; }
         bool lyricSeek = model.CanSeek && !model.LyricsLoading && !lyricsLayoutTransitioning;
-        miniLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: true, preferences: preferences);
-        expandedLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: false, preferences: preferences);
+        bool allowStagger = state.Phase == ReceiverPhase.Playing && !model.SeekPending && !lyricsLayoutTransitioning
+            && !MiniProgressSeek.PointerSeekActive && !ProgressSeek.PointerSeekActive && !miniPager.Animating;
+        miniLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: true, preferences: preferences, allowStagger: allowStagger);
+        expandedLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: false, preferences: preferences, allowStagger: allowStagger);
         UiTypography.Apply(RootGrid, preferences);
         var presentation = model.DisplayMetadata;
         MiniTitle.Text = TitleText.Text = presentation.Title.Length > 0 ? presentation.Title : L.Text(state.HasMedia ? "正在接收音乐" : "让音乐，连接此刻");
@@ -261,7 +285,8 @@ public sealed partial class MainWindow : Window
         RootGrid.RequestedTheme = acrylicRequested && !highContrast ? ElementTheme.Dark : ElementTheme.Default;
         BackdropLayer.Visibility = expandedLyricsMode ? Visibility.Collapsed : Visibility.Visible;
         ExpandedLyricsBackground.Visibility = !idle && expandedLyricsMode && !expandedAcrylic ? Visibility.Visible : Visibility.Collapsed;
-        MiniLyricsBackground.Visibility = !idle && miniLyricsMode ? Visibility.Visible : Visibility.Collapsed;
+        bool pagedAcrylic = miniPager.Active && miniAcrylic;
+        MiniLyricsBackground.Visibility = !idle && miniLyricsMode && !pagedAcrylic ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetRowSpan(MiniLyricsBackground, miniAcrylic ? 1 : 3);
         Grid.SetRowSpan(MiniLyricsGlobalShade, miniAcrylic ? 1 : 3);
         SceneBacking.Visibility = !idle && lyricsLayoutTransitioning ? Visibility.Visible : Visibility.Collapsed;
@@ -282,7 +307,7 @@ public sealed partial class MainWindow : Window
         MiniRoot.Background = miniAcrylic ? materialBackground : highContrast ? solid : miniLyricsMode ? lyricFallback : charcoal;
         MiniRoot.RequestedTheme = highContrast ? ElementTheme.Default : ElementTheme.Dark;
         MiniLyricsGlobalShade.Background = miniLyricEffects ? lyricArtShade : lyricEmptyShade;
-        MiniLyricsGlobalShade.Visibility = !idle && miniLyricsMode && !highContrast ? Visibility.Visible : Visibility.Collapsed;
+        MiniLyricsGlobalShade.Visibility = !idle && miniLyricsMode && !highContrast && !pagedAcrylic ? Visibility.Visible : Visibility.Collapsed;
         foreach (var button in new[] { CloseButton, PinButton, MiniFullScreenButton })
             button.Background = effects || idleAcrylic ? captionBackdrop : solid;
         MiniShade.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
@@ -294,9 +319,11 @@ public sealed partial class MainWindow : Window
         MiniPreviousButton.IsEnabled = MiniPlayButton.IsEnabled = MiniNextButton.IsEnabled = PreviousButton.IsEnabled = PlayButton.IsEnabled = NextButton.IsEnabled = model.CanControl && !lyricsLayoutTransitioning;
         PlaybackIcons.Update(MiniPreviousIcon, PlaybackCommand.Previous);
         PlaybackIcons.Update(MiniNextIcon, PlaybackCommand.Next);
-        PlaybackIcons.Update(MiniPlayIcon, state.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
+        bool playing = state.Phase == ReceiverPhase.Playing;
+        bool animateTransport = !idle && !lyricsLayoutTransitioning && preferences.ShowTransport && AppWindow.IsVisible;
+        MiniPlayIcon.Update(playing, allowAnimation: animateTransport && compact && controlsShown && (!miniPager.Active || !miniPager.ShowingLyrics));
         PlaybackIcons.Update(PreviousIcon, PlaybackCommand.Previous); PlaybackIcons.Update(NextIcon, PlaybackCommand.Next);
-        PlaybackIcons.Update(PlayIcon, state.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
+        PlayIcon.Update(playing, allowAnimation: animateTransport && !compact);
         Label(MiniPlayButton, L.Text(state.Phase == ReceiverPhase.Playing ? "暂停" : "播放"));
         Label(MiniPreviousButton, L.Text("上一曲")); Label(MiniNextButton, L.Text("下一曲"));
         Label(PreviousButton, L.Text("上一曲")); Label(NextButton, L.Text("下一曲")); Label(PlayButton, L.Text(state.Phase == ReceiverPhase.Playing ? "暂停" : "播放"));
@@ -359,11 +386,26 @@ public sealed partial class MainWindow : Window
             ElementCompositionPreview.GetElementVisual(ExpandedHeader).StopAnimation("Opacity");
             ElementCompositionPreview.GetElementVisual(ExpandedHeader).Opacity = 1; ExpandedHeader.IsHitTestVisible = true; fullscreenCaptionShown = true;
         }
-        ShowClose(pointerInside);
-        ExpandedDetails.IsHitTestVisible = MiniControlsTransitionLayer.IsHitTestVisible = MiniLyricsHost.IsHitTestVisible = ExpandedLyricsHost.IsHitTestVisible = !lyricsLayoutTransitioning;
+        ShowWindowActions(pointerInside);
+        ExpandedDetails.IsHitTestVisible = ExpandedLyricsHost.IsHitTestVisible = !lyricsLayoutTransitioning;
+        ApplyMiniPageInput();
         // Requested visibility disables native input holes synchronously; layout
         // callbacks still coalesce the later geometry updates during animations.
         UpdateBlurCoverage(); UpdateInputRegions(); rendering = false;
+    }
+    private void MiniPageChanged()
+    {
+        ApplyMiniPageInput();
+        UpdateInputRegions();
+    }
+    private void ApplyMiniPageInput()
+    {
+        bool available = !lyricsLayoutTransitioning && !idle;
+        bool pagerAtRest = !miniPager.Animating;
+        MiniPageButton.IsEnabled = available;
+        MiniControlsTransitionLayer.IsHitTestVisible = available && (!miniPager.Active || pagerAtRest && !miniPager.ShowingLyrics);
+        MiniCoverPanel.IsHitTestVisible = !miniPager.Active || available && pagerAtRest && !miniPager.ShowingLyrics;
+        MiniLyricsHost.IsHitTestVisible = available && (!miniPager.Active || pagerAtRest && miniPager.ShowingLyrics);
     }
     private bool UpdateIdleBackdrop(bool enabled)
     {
@@ -423,12 +465,14 @@ public sealed partial class MainWindow : Window
         if (lyricsVisible && !visible) squareSizing.RememberLyricsPaneHeight();
         requestedLyricsLayout = visible;
         if (first) { lyricsVisible = visible; return; }
+        miniPager.FinishInteraction();
+        bool useLyricsSizing = StackedLyrics(visible, RootGrid.ActualWidth, IsFullScreen);
         if (!animate)
         {
             CancelLyricsTransition(snapResize: false);
             lyricsVisible = visible; appliedLayout = null;
-            squareSizing.SetLayoutTransition(true); squareSizing.SetPlayerLayout(visible, IsFullScreen);
-            resizeTransition.AnimateLyrics(visible, false, () => { });
+            squareSizing.SetLayoutTransition(true); SetNativePlayerLayout(visible, IsFullScreen);
+            resizeTransition.AnimateLyrics(useLyricsSizing, false, () => { });
             return;
         }
 
@@ -443,7 +487,7 @@ public sealed partial class MainWindow : Window
         // Otherwise closing lyrics would stretch it to the old tall window.
         appliedLayout = null; ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
         UpdateInputRegions();
-        resizeTransition.AnimateLyrics(visible, true, () =>
+        resizeTransition.AnimateLyrics(useLyricsSizing, true, () =>
         {
             if (closed || request != layoutTransitionVersion) return;
             nativeTransitionDone = true; CompleteLyricsTransition(request);
@@ -452,7 +496,7 @@ public sealed partial class MainWindow : Window
         {
             if (closed || request != layoutTransitionVersion) return;
             lyricsVisible = visible; appliedLayout = null;
-            squareSizing.SetPlayerLayout(visible, IsFullScreen); Render();
+            SetNativePlayerLayout(visible, IsFullScreen); Render();
         }, () =>
         {
             if (closed || request != layoutTransitionVersion) return;
@@ -462,6 +506,7 @@ public sealed partial class MainWindow : Window
     private bool CanAnimateLayout => RootGrid.IsLoaded && (AppWindow.IsVisible || AnimateHiddenLayoutForCheck) && Backdrop.AnimationsEnabled;
     private long BeginSceneTransition(bool useRemembered)
     {
+        miniPager.FinishInteraction();
         long request = ++layoutTransitionVersion;
         bool cached = useRemembered && !layoutTransition.IsRunning;
         lyricsLayoutTransitioning = true; holdExpandedLayout = false; contentTransitionDone = false; nativeTransitionDone = true;
@@ -502,14 +547,27 @@ public sealed partial class MainWindow : Window
         layoutTransition.Cancel(); resizeTransition.Cancel(snapResize);
         lyricsLayoutTransitioning = holdExpandedLayout = false;
         lyricsVisible = requestedLyricsLayout ?? lyricsVisible; appliedLayout = null;
-        squareSizing.SetPlayerLayout(lyricsVisible, IsFullScreen); squareSizing.SetLayoutTransition(false);
+        SetNativePlayerLayout(lyricsVisible, IsFullScreen);
+        squareSizing.SetLayoutTransition(false);
         // Closing to the tray and requesting mini mode can both happen while
         // paused, with no later receiver notification to restore interaction.
         // An enclosing Render already performs this restoration itself.
         if (!closed && !rendering) Render();
     }
     private void WindowMoveSizeStarted()
-    { if (!closed && lyricsLayoutTransitioning) CancelLyricsTransition(snapResize: false); }
+    {
+        if (closed) return;
+        miniPager.FinishInteraction();
+        miniLyrics.BeginViewportResize();
+        expandedLyrics.BeginViewportResize();
+        if (lyricsLayoutTransitioning) CancelLyricsTransition(snapResize: false);
+    }
+    private void WindowMoveSizeEnded()
+    {
+        if (closed) return;
+        miniLyrics.EndViewportResize();
+        expandedLyrics.EndViewportResize();
+    }
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (presenterTransitionPending) { QueueGeometryCommit(); return; }
@@ -539,6 +597,12 @@ public sealed partial class MainWindow : Window
         }
         UpdateBlurCoverage(); QueueInputRegions();
     }
+    private bool StackedLyrics(bool visible, double width, bool fullScreen)
+        => WindowSizing.UsesLyricsGeometry(visible, !fullScreen && model.Preferences.Value.NarrowLyricsPaging, width);
+
+    private void SetNativePlayerLayout(bool lyrics, bool fullScreen)
+        => squareSizing.SetPlayerLayout(lyrics, fullScreen, model.Preferences.Value.NarrowLyricsPaging);
+
     private void ApplyPlayerLayout(double width, double height)
     {
         if (width <= 0 || height <= 0) return;
@@ -550,10 +614,11 @@ public sealed partial class MainWindow : Window
             ProgressPanel.Visibility == Visibility.Visible ? ProgressPanel.ActualHeight : 0);
         double transportHeight = Math.Max(preferences.ShowTransport ? 44 : 0,
             TransportPanel.Visibility == Visibility.Visible ? TransportPanel.ActualHeight : 0);
-        var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight, idle);
+        bool nextCompact = !holdExpandedLayout && WindowSizing.IsCompactContent(width, height, lyricsVisible);
+        bool paged = nextCompact && lyricsVisible && !idle && !StackedLyrics(true, width, IsFullScreen);
+        var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight, idle, paged);
         if (appliedLayout is { } previousLayout && previousLayout == layout) return;
         appliedLayout = layout;
-        bool nextCompact = !holdExpandedLayout && WindowSizing.IsCompactContent(width, height, lyricsVisible);
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
         compact = nextCompact;
         ExpandedRoot.Visibility = !compact || ReferenceEquals(layoutTransition?.RetainedScene, ExpandedRoot) ? Visibility.Visible : Visibility.Collapsed;
@@ -561,17 +626,23 @@ public sealed partial class MainWindow : Window
         if (compact)
         {
         configuredMiniLyricsLayout = lyricsVisible;
-        bool squareCover = lyricsVisible || lyricsLayoutTransitioning;
+        bool squareCover = !paged && (lyricsVisible || lyricsLayoutTransitioning);
         MiniCoverRow.Height = squareCover ? new GridLength(width) : new GridLength(1, GridUnitType.Star);
         MiniCoverPanel.Height = squareCover ? width : double.NaN;
-        MiniCover.Stretch = MiniPreviousCover.Stretch = lyricsVisible ? Stretch.Uniform : Stretch.UniformToFill;
-        MiniLyricsGapRow.Height = new GridLength(lyricsVisible ? 8 : 0);
-        MiniLyricsRow.Height = lyricsVisible ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
-        MiniLyricsHost.Visibility = lyricsVisible && !idle ? Visibility.Visible : Visibility.Collapsed;
-        MiniLyricsHost.Padding = new Thickness(width < 320 ? 16 : 22, 0, width < 320 ? 16 : 22, 12);
+        MiniCover.Stretch = MiniPreviousCover.Stretch = lyricsVisible && !paged ? Stretch.Uniform : Stretch.UniformToFill;
+        MiniLyricsGapRow.Height = new GridLength(lyricsVisible && !paged ? 8 : 0);
+        MiniLyricsRow.Height = lyricsVisible && !paged ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        if (!paged) MiniLyricsHost.Visibility = lyricsVisible && !idle ? Visibility.Visible : Visibility.Collapsed;
+        Grid.SetRow(MiniLyricsHost, paged ? 0 : 2);
+        MiniLyricsHost.MinHeight = paged ? 0 : 128;
+        double lyricInset = width < 320 ? 16 : 22;
+        MiniLyricsHost.Padding = new Thickness(lyricInset, paged ? CompactLyricsPager.HeaderHeight : 0, lyricInset, 12);
         MiniTitle.FontSize = width < 320 ? 17 : 20; MiniArtist.FontSize = 14;
         MiniTitle.MaxLines = lyricsVisible ? 1 : 2;
         }
+        // Leave the outgoing page intact while the wide layout overlaps it.
+        if (compact || !ReferenceEquals(layoutTransition?.RetainedScene, MiniRoot))
+            miniPager.Configure(paged, width);
 
         if (!compact)
         {
@@ -692,7 +763,7 @@ public sealed partial class MainWindow : Window
         }
         if (!compact)
         {
-            Add(SettingsButton); Add(ExpandedFullScreenButton); if (closeShown) Add(ExpandedCloseButton);
+            Add(SettingsButton); Add(ExpandedFullScreenButton); Add(ExpandedCloseButton);
             if (!lyricsLayoutTransitioning && !idle)
             {
                 Add(ExpandedMigrationButton);
@@ -704,8 +775,17 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            if (captionShown) { if (closeShown) Add(CloseButton); Add(PinButton); Add(MiniFullScreenButton); }
-            if (!lyricsLayoutTransitioning && !idle && lyricsVisible) Add(MiniLyricsHost);
+            if (captionShown) { Add(CloseButton); Add(PinButton); Add(MiniFullScreenButton); }
+            if (miniPager.Active && !lyricsLayoutTransitioning && !idle)
+            {
+                Add(MiniPageButton);
+                // Reserve the rest of the top strip for dragging this frameless window.
+                int top = (int)Math.Ceiling(CompactLyricsPager.HeaderHeight * scale);
+                int bottom = (int)Math.Ceiling(MiniRoot.ActualHeight * scale);
+                int width = (int)Math.Ceiling(MiniRoot.ActualWidth * scale);
+                if (bottom > top && width > 0) rectangles.Add(new(0, top, width, bottom - top));
+            }
+            else if (!lyricsLayoutTransitioning && !idle && lyricsVisible) Add(MiniLyricsHost);
             if (!lyricsLayoutTransitioning && !idle && controlsShown)
             {
                 if (progressShown && MiniProgressPanel.Visibility == Visibility.Visible) Add(MiniProgressSeek, MiniProgressPanel);
@@ -759,7 +839,7 @@ public sealed partial class MainWindow : Window
     private void ShowCaption(bool visible)
     {
         if (MiniActions == null) return;
-        ShowClose(pointerInside);
+        ShowWindowActions(pointerInside);
         visible |= focusInside || WindowSizing.ScreenReaderActive;
         if (!compact)
         {
@@ -773,13 +853,15 @@ public sealed partial class MainWindow : Window
         MiniActions.IsHitTestVisible = visible;
         UpdateInputRegions();
     }
-    private void ShowClose(bool visible)
+    private void ShowWindowActions(bool visible)
     {
-        if (CloseButton == null || visible == closeShown) return;
-        closeShown = visible;
-        foreach (var button in new[] { CloseButton, ExpandedCloseButton })
+        if (CloseButton == null || windowActionsShown == visible) return;
+        bool animate = windowActionsShown != null && RootGrid.IsLoaded && AppWindow.IsVisible;
+        windowActionsShown = visible;
+        foreach (var button in new[] { SettingsButton, ExpandedFullScreenButton, ExpandedCloseButton, MiniFullScreenButton, CloseButton })
         {
-            AnimateVisibility(button, visible, visible ? .25 : .20, 0);
+            if (animate) AnimateVisibility(button, visible, visible ? .25 : .20, 0);
+            else Fade(button, 0, visible ? 1 : 0, 0);
             button.IsHitTestVisible = visible; button.IsTabStop = visible;
         }
         UpdateInputRegions();

@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
 using Rectangle = Microsoft.UI.Xaml.Shapes.Rectangle;
@@ -501,15 +502,29 @@ internal static class SeekInputCheck
                     && Find<Button>("ExpandedFullScreenButton").Visibility == Visibility.Visible
                     && Find<Button>("MiniFullScreenButton").Visibility == Visibility.Visible, "caption_button_preference_did_not_restore");
             }));
-            await OnUi(queue!, () => Pass("close_buttons_follow_pointer_only", () =>
+            await OnUi(queue!, () => Pass("window_actions_sync_opacity_and_window_input_with_hover", () =>
             {
                 typeof(MainWindow).GetField("focusInside", Private)!.SetValue(main, true);
                 var hover = typeof(MainWindow).GetMethod("NativeHoverChanged", Private)!;
+                var actions = new[] { "SettingsButton", "ExpandedFullScreenButton", "ExpandedCloseButton", "MiniFullScreenButton", "CloseButton" }
+                    .Select(Find<Button>).ToArray();
+                var input = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id);
+                var regions = actions.Take(3).Select(button => MainRegion(button, (FrameworkElement)main.Content)).ToArray();
                 hover.Invoke(main, [true]);
-                Require(Find<Button>("CloseButton").IsHitTestVisible && Find<Button>("ExpandedCloseButton").IsHitTestVisible, "pointer_did_not_reveal_close_buttons");
+                Require(actions.All(button => button.IsHitTestVisible && button.IsTabStop
+                    && ElementCompositionPreview.GetElementVisual(button).Opacity == 1), "pointer_did_not_reveal_window_actions");
+                Require(regions.All(region => input.GetRegionRects(NonClientRegionKind.Passthrough).Any(rect => Contains(rect, region))),
+                    "visible_window_actions_lost_native_input");
+                controller!.Preferences.Update(controller.Preferences.Value with { ShowSettingsButton = false, ShowFullScreenButton = false });
+                Require(Find<Button>("SettingsButton").Visibility == Visibility.Collapsed
+                    && Find<Button>("ExpandedFullScreenButton").Visibility == Visibility.Collapsed
+                    && Find<Button>("MiniFullScreenButton").Visibility == Visibility.Collapsed, "pointer_overrode_hidden_window_actions");
+                controller.Preferences.Update(controller.Preferences.Value with { ShowSettingsButton = true, ShowFullScreenButton = true });
                 hover.Invoke(main, [false]);
-                Require(!Find<Button>("CloseButton").IsHitTestVisible && !Find<Button>("ExpandedCloseButton").IsHitTestVisible
-                    && !Find<Button>("CloseButton").IsTabStop && !Find<Button>("ExpandedCloseButton").IsTabStop, "focus_forced_close_button_visible_without_pointer");
+                Require(actions.All(button => !button.IsHitTestVisible && !button.IsTabStop
+                    && ElementCompositionPreview.GetElementVisual(button).Opacity == 0), "focus_forced_window_actions_visible_without_pointer");
+                Require(regions.All(region => !input.GetRegionRects(NonClientRegionKind.Passthrough).Any(rect => Contains(rect, region))),
+                    "hidden_window_actions_kept_native_input");
                 typeof(MainWindow).GetField("focusInside", Private)!.SetValue(main, false);
             }));
             await OnUi(queue!, () => Pass("plain_progress_theme_keeps_native_reposition_transition", () =>
