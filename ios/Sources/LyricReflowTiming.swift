@@ -1,10 +1,16 @@
-import Foundation
+import SwiftUI
 
 enum LyricReflowTiming {
     static let hideEnd = 0.31
     static let rowStart = 0.34
     static let rowEnd = 0.64
     static let showStart = 0.68
+
+    // Use the same vertical easing for the scroll and its per-row delay.
+    static let verticalMove = UnitCurve.bezier(
+        startControlPoint: UnitPoint(x: 0.32, y: 0),
+        endControlPoint: UnitPoint(x: 0.24, y: 1)
+    )
 
     static let staggerRange = 0...1_000
     static let defaultStaggerMilliseconds = 140
@@ -78,8 +84,7 @@ struct LyricFollowWave {
         let delay = LyricReflowTiming.staggerDelay(span: span, position: position)
         let elapsed = time.timeIntervalSince(start)
         func eased(_ time: TimeInterval) -> Double {
-            let phase = min(1, max(0, time / duration))
-            return phase * phase * (3 - 2 * phase)
+            LyricReflowTiming.verticalMove.value(at: min(1, max(0, time / duration)))
         }
         let base = direction * 36 * CGFloat(eased(elapsed) - eased(elapsed - delay))
         let residual = carriedOffset(at: position) * CGFloat(1 - eased(elapsed))

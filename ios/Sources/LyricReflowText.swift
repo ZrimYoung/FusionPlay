@@ -27,27 +27,54 @@ struct LyricReflowText: View {
 
     let value: String
     let size: CGFloat
+    let scale: CGFloat
     let weight: Font.Weight
     let lineSpacing: CGFloat
 
-    init(_ value: String, size: CGFloat, weight: Font.Weight, lineSpacing: CGFloat = 0) {
+    init(_ value: String, size: CGFloat, scale: CGFloat, weight: Font.Weight, lineSpacing: CGFloat = 0) {
         self.value = value
         self.size = size
+        self.scale = scale
         self.weight = weight
         self.lineSpacing = lineSpacing
     }
 
     var body: some View {
-        let text = Text(verbatim: value).font(typography.font(size: size, weight: weight))
-        Group {
-            if #available(iOS 18.0, *), !reduceMotion, !voiceOver, value.utf8.count <= 1_024 {
-                AnimatedLyricText(text: text, overflow: min(120, max(8, size * 2)))
+        if #available(iOS 18.0, *), !reduceMotion, !voiceOver, value.utf8.count <= 1_024 {
+            let text = Text(verbatim: value).font(typography.font(size: size, weight: weight))
+            ScaledLyricTextLayout(scale: scale) {
+                AnimatedLyricText(text: text, overflow: min(120 / scale, max(8 / scale, size * 2)))
                     .id(value)
-            } else {
-                text
+                    .id(typography.face)
+                    .lineSpacing(lineSpacing)
+                    .scaleEffect(scale, anchor: .topLeading)
             }
+            .animation(nil, value: scale)
+        } else {
+            Text(verbatim: value)
+                .font(typography.font(size: size * scale, weight: weight))
+                .lineSpacing(lineSpacing)
         }
-        .lineSpacing(lineSpacing)
+    }
+}
+
+/// Keep the renderer's glyph positions in one font coordinate system. The
+/// layout measures the available width there, then scales all the ink together.
+private struct ScaledLyricTextLayout: Layout {
+    let scale: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let text = subviews.first else { return .zero }
+        let size = text.sizeThatFits(unscaled(proposal))
+        return CGSize(width: size.width * scale, height: size.height * scale)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: unscaled(proposal))
+    }
+
+    private func unscaled(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        ProposedViewSize(width: proposal.width.map { $0 / scale }, height: proposal.height.map { $0 / scale })
     }
 }
 
