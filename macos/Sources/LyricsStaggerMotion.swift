@@ -16,6 +16,13 @@ enum LyricsStaggerTiming {
     static let moveMillisecondsRange = 100...1500
     static let moveStepMilliseconds = 10
 
+    // One vertical curve keeps native scrolling, row height and the delayed
+    // follow wave in the same coordinate-time relationship.
+    static let verticalMove = UnitCurve.bezier(
+        startControlPoint: UnitPoint(x: 0.32, y: 0),
+        endControlPoint: UnitPoint(x: 0.24, y: 1)
+    )
+
     static func clampMoveMilliseconds(_ value: Int) -> Int {
         min(moveMillisecondsRange.upperBound, max(moveMillisecondsRange.lowerBound, value))
     }
@@ -94,8 +101,7 @@ struct LyricsFollowWave: Equatable {
         let delay = LyricsStaggerTiming.delay(span: span, position: position)
         let elapsed = time.timeIntervalSince(start)
         func eased(_ elapsed: TimeInterval) -> Double {
-            let progress = min(1, max(0, elapsed / duration))
-            return progress * progress * (3 - 2 * progress)
+            LyricsStaggerTiming.verticalMove.value(at: min(1, max(0, elapsed / duration)))
         }
         let base = direction * 36 * CGFloat(eased(elapsed) - eased(elapsed - delay))
         let residual = carry(at: position) * CGFloat(1 - eased(elapsed))
@@ -116,6 +122,26 @@ struct LyricsFollowWave: Equatable {
     }
 }
 
+/// Keep one delay for an entire overlapping follow sequence. Geometry still
+/// tracks the row so ending/cancelling the sequence immediately restores its
+/// current position; a lazy row can capture its first measurement after start.
+struct LyricsRowFollowRank {
+    private(set) var measured: Int?
+    private(set) var held: Int?
+
+    mutating func setFollowing(_ active: Bool) {
+        held = active ? (held ?? measured) : nil
+    }
+    mutating func observe(_ rank: Int, following: Bool) {
+        measured = min(LyricsStaggerTiming.geometrySteps, max(0, rank))
+        if following { held = held ?? measured }
+        else { held = nil }
+    }
+    func position(following: Bool) -> Double {
+        LyricsStaggerTiming.position(rank: (following ? held : nil) ?? measured ?? 0)
+    }
+}
+
 /// Quantized viewport position keeps scroll geometry from writing state on
 /// every pixel. Both glyph reflow and the row-follow wave use the same delay.
 struct LyricsRowStagger: ViewModifier {
@@ -123,20 +149,24 @@ struct LyricsRowStagger: ViewModifier {
     let viewport: String
     let viewportHeight: CGFloat
     let wave: LyricsFollowWave?
-    @State private var rank = 0
+    @State private var followRank = LyricsRowFollowRank()
 
     func body(content: Content) -> some View {
-        let position = LyricsStaggerTiming.position(rank: rank)
-        let delay = LyricsStaggerTiming.delay(span: span, position: position)
         let activeWave = LyricsStaggerTiming.clampSpan(span) > 0 ? wave : nil
+        let following = activeWave != nil
+        let position = followRank.position(following: following)
+        let delay = LyricsStaggerTiming.delay(span: span, position: position)
         TimelineView(.animation(minimumInterval: 1.0 / 60, paused: activeWave == nil)) { context in
             content
                 .environment(\.lyricsRowMotionDelay, delay)
                 .offset(y: activeWave?.offset(at: context.date, position: position) ?? 0)
         }
+        .onChange(of: following, initial: true) { _, active in
+            followRank.setFollowing(active)
+        }
         .onGeometryChange(for: Int.self) { geometry in
             LyricsStaggerTiming.quantizedRank(midY: geometry.frame(in: .named(viewport)).midY,
                                                viewportHeight: viewportHeight, span: span)
-        } action: { rank = $0 }
+        } action: { followRank.observe($0, following: following) }
     }
 }

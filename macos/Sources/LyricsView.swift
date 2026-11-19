@@ -437,7 +437,9 @@ struct LyricsView: View {
         LyricsViewCheckEvents.follow?(reason, id, animated && !reduceMotion)
 #endif
         if animated && !reduceMotion {
-            withAnimation(.easeInOut(duration: lineMoveDuration)) { proxy.scrollTo(id, anchor: anchor) }
+            withAnimation(.timingCurve(LyricsStaggerTiming.verticalMove, duration: lineMoveDuration)) {
+                proxy.scrollTo(id, anchor: anchor)
+            }
         } else {
             var transaction = Transaction(animation: nil)
             transaction.disablesAnimations = true

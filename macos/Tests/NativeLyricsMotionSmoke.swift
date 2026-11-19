@@ -7,6 +7,7 @@ import SwiftUI
     @Published var motionDelay: Double = 0
     @Published var font = NSFont.systemFont(ofSize: 34, weight: .bold)
     @Published var text = "Keep the quiet words together while the winding river moves across the mountains and the sea again"
+    var measuredSize: CGSize = .zero
 }
 
 private struct NativeMotionFixtureView: View {
@@ -14,6 +15,7 @@ private struct NativeMotionFixtureView: View {
     var body: some View {
         LyricsReflowText(text: model.text, font: model.font, lineSpacing: 3,
                          reduceMotion: model.reduced, width: model.width, motionDelay: model.motionDelay)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { model.measuredSize = $0 }
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -74,6 +76,8 @@ private struct NativeMotionFixtureView: View {
             try data.write(to: output.appendingPathComponent(name + ".png"), options: .atomic)
         }
         func resize(_ width: CGFloat) async {
+            // A no-op assignment must not demand a new native layout delivery.
+            guard abs(current().width - width) >= 0.5 else { return }
             let count = current().nativeLayoutCount
             model.width = width
             for _ in 0..<100 {
@@ -184,6 +188,55 @@ private struct NativeMotionFixtureView: View {
                      "Continuous point-size changes reset the native lyric identity")
         precondition(current().poses.values.allSatisfy { $0.opacity == 1 && $0.blur == 0 },
                      "Continuous font resizing retained stale glyph motion")
+
+        // Proportional width/font changes must scale the same native glyph
+        // coordinates, rather than starting another text-position animation.
+        model.text = plainFixtureText
+        model.font = NSFont.systemFont(ofSize: 34, weight: .bold)
+        model.width = 620
+        await pause(0.7); host.layoutSubtreeIfNeeded()
+        let scaleBase = current()
+        precondition(abs(scaleBase.coordinateFontPointSize - 34) < 0.01 && abs(scaleBase.drawingScale - 1) < 0.01)
+        precondition(abs(model.measuredSize.height - scaleBase.height) < 0.5,
+                     "Native row does not report its actual intrinsic height")
+        model.font = NSFont.systemFont(ofSize: 27.2, weight: .bold)
+        model.width = 496
+        await pause(0.12); host.layoutSubtreeIfNeeded()
+        let scaled = current()
+        precondition(abs(scaled.width - 496) < 0.01 && abs(scaled.drawingScale - 0.8) < 0.001 &&
+                     abs(scaled.coordinateFontPointSize - scaleBase.coordinateFontPointSize) < 0.001)
+        if scaled.lineCount != scaleBase.lineCount || scaled.revision != scaleBase.revision {
+            print("Proportional diagnostic: lineCount \(scaleBase.lineCount)->\(scaled.lineCount), revision \(scaleBase.revision)->\(scaled.revision), height \(scaleBase.height)->\(scaled.height), nativeLayouts \(scaleBase.nativeLayoutCount)->\(scaled.nativeLayoutCount)")
+        }
+        precondition(scaled.lineCount == scaleBase.lineCount && scaled.revision == scaleBase.revision,
+                     "Proportional scaling restarted glyph/row motion")
+        precondition(abs(scaled.height - scaleBase.height * 0.8) < 0.5 &&
+                     abs(model.measuredSize.height - scaled.height) < 0.5,
+                     "Scaled native row height disagrees with the real viewport geometry")
+        for (id, pose) in scaleBase.poses {
+            guard let after = scaled.poses[id] else { fatalError("Proportional scaling lost a shaped cluster") }
+            precondition(hypot(after.origin.x - pose.origin.x * 0.8, after.origin.y - pose.origin.y * 0.8) < 0.75 &&
+                         after.lineIndex == pose.lineIndex && after.opacity == 1 && after.blur == 0,
+                         "A fixed-coordinate glyph moved independently of its text scale")
+        }
+        try save(scaled, "native-scaled-80-percent")
+        model.font = NSFont.systemFont(ofSize: 68, weight: .bold)
+        model.width = 620
+        await pause(0.7); host.layoutSubtreeIfNeeded()
+        let enlarged = current()
+        precondition(abs(enlarged.drawingScale - 2) < 0.001 && abs(enlarged.coordinateFontPointSize - 34) < 0.01)
+        precondition(abs(model.measuredSize.height - enlarged.height) < 0.5 &&
+                     enlarged.poses.values.allSatisfy { $0.opacity == 1 && $0.blur == 0 })
+        try save(enlarged, "native-scaled-200-percent")
+        // Long lines retain the direct, accessible Text degradation path.
+        model.text = String(repeating: "bounded long lyric ", count: 100)
+        await pause(0.15); host.layoutSubtreeIfNeeded()
+        precondition(NativeLyricsReflowCheckEvents.sample == nil && model.measuredSize.height.isFinite,
+                     "Long text did not leave the animated native renderer")
+        model.text = plainFixtureText
+        model.font = NSFont.systemFont(ofSize: 34, weight: .bold)
+        model.width = 620
+        await pause(0.7); host.layoutSubtreeIfNeeded()
 
         // Exercise the full 240ms setting through the production wrapper. The
         // prior 140ms cap would already blur text at +180ms and move height by

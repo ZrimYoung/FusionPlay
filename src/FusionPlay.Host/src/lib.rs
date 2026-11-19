@@ -830,6 +830,9 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 (&mut state.artwork_url, "artwork"),
                 (&mut state.lyrics_text, "lyrics_text"),
             ] {
+                if key == "artist" && value["artist_is_stale"] == true {
+                    continue;
+                }
                 let (source_label, raw_label) = media_info_label(value, key);
                 let caption_header = if caption && !raw_label {
                     match key { "title" => Some("ti"), "artist" => Some("ar"), "album" => Some("al"), _ => None }
@@ -854,7 +857,11 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 state.position_ms = Some(ms);
             }
         }
-        "progress" if state.controls_available => state.position_ms = value["position_ms"].as_u64(),
+        "progress" if state.controls_available => {
+            if let Some(position) = value["position_ms"].as_u64() {
+                state.position_ms = Some(position);
+            }
+        }
         "volume" => state.volume = value["percent"].as_u64().unwrap_or(50).min(100) as u32,
         "audio_output_ready" => state.output = text("device_name"),
         // Discovery/control sockets are independent of the media stream. The
@@ -980,16 +987,26 @@ mod tests {
                 {"event":"media_info","track_id":"wire-one","track_transition":"new",
                  "title":"Night Walk","artist":"Header Artist","album":"Header Album",
                  "raw_title":"we are going home","raw_artist":"Raw Artist","raw_album":"Raw Album",
-                 "display_title":"Night Walk","display_artist":"Header Artist","display_album":"Header Album",
+                 "display_title":"Night Walk","display_artist":"Header Artist","display_album":"Raw Album",
                  "lyrics_text":"[ti:Night Walk]\n[00:10]we are going home","duration_ms":120000},
                 {"event":"media_info","track_id":"wire-one","track_transition":"same","title":"Night Walk",
                  "artist":"Header Artist","album":"Header Album","raw_title":"home","raw_artist":"","raw_album":"",
                  "display_title":"Night Walk"},
                 {"event":"media_info","track_id":"wire-two","track_transition":"new","title":"Home",
-                 "artist":"Next Artist","album":"Next Album","display_title":"Home","duration_ms":240000}
+                 "artist":"Next Artist","album":"Next Album","display_title":"Home","display_album":"Next Album","duration_ms":240000},
+                {"event":"media_info","track_id":"wire-rich","track_transition":"new",
+                 "title":"Night Walk (Live)","artist":"Alpha/Beta","album":"Sender Album",
+                 "raw_title":"Night Walk (Live)","raw_artist":"Alpha/Beta","raw_album":"Sender Album",
+                 "display_title":"Night Walk (Live)","display_album":"Sender Album",
+                 "lyrics_text":"[ti:Night Walk]\n[ar:Alpha]\n[00:10]we are heading home","duration_ms":120000,"position_ms":0},
+                {"event":"media_info","track_id":"wire-rich","track_transition":"same",
+                 "title":"Night Walk","artist":"Alpha","album":"Header Album",
+                 "raw_title":"we are heading home","raw_artist":"Alpha","raw_album":"",
+                 "display_title":"Night Walk (Live)","display_artist":"Alpha/Beta","display_album":"Sender Album",
+                 "lyrics_text":"[ti:Night Walk]\n[ar:Alpha]\n[00:10]we are heading home","duration_ms":120000,"position_ms":10000}
             ])).unwrap()
         };
-        assert_eq!(events.len(), 3);
+        assert_eq!(events.len(), 5);
         let mut state = Snapshot::default();
         state.controls_available = true;
         reduce(&mut state, &events[0]);
@@ -999,7 +1016,7 @@ mod tests {
         assert_eq!((&*state.title, &*state.artist, &*state.album), expected);
         assert_eq!(state.display_title.as_deref(), Some("Night Walk"));
         assert_eq!(state.display_artist.as_deref(), Some("Header Artist"));
-        assert_eq!(state.display_album.as_deref(), Some("Header Album"));
+        assert_eq!(state.display_album.as_deref(), Some("Raw Album"));
         reduce(&mut state, &events[1]);
         assert_eq!(state.title, if apple { "home" } else { "Night Walk" });
         assert_eq!(state.artist, if apple { "Raw Artist" } else { "Header Artist" });
@@ -1012,8 +1029,18 @@ mod tests {
         assert_eq!(state.track_id, "wire-two");
         assert_eq!(state.display_title.as_deref(), Some("Home"));
         assert_eq!(state.display_artist, None);
-        assert_eq!(state.display_album, None);
+        assert_eq!(state.display_album.as_deref(), Some("Next Album"));
         assert!(state.lyrics_text.is_empty());
+        reduce(&mut state, &events[3]);
+        reduce(&mut state, &events[4]);
+        assert_eq!(state.track_id, "wire-rich");
+        assert_eq!(state.title, if apple { "we are heading home" } else { "Night Walk" });
+        assert_eq!(state.artist, "Alpha");
+        assert_eq!(state.album, if apple { "Sender Album" } else { "Header Album" });
+        assert_eq!(state.display_title.as_deref(), Some("Night Walk (Live)"));
+        assert_eq!(state.display_artist.as_deref(), Some("Alpha/Beta"));
+        assert_eq!(state.display_album.as_deref(), Some("Sender Album"));
+        assert_eq!(state.position_ms, Some(10000));
     }
 
     #[test]
@@ -1055,6 +1082,42 @@ mod tests {
         assert!(state.artwork_url.is_empty() && state.lyrics_text.is_empty());
         clear_media(&mut state);
         assert_eq!(state.display_title, None);
+    }
+
+    #[test]
+    fn confirmed_navigation_keeps_the_stale_artist_out_of_the_new_snapshot() {
+        let mut state = Snapshot {
+            track_id: "first".into(),
+            title: "First Song".into(),
+            artist: "First Artist".into(),
+            position_ms: Some(42_000),
+            ..Snapshot::default()
+        };
+        let stale = serde_json::json!({
+            "event": "media_info", "track_id": "second", "track_transition": "new",
+            "title": "Second Song", "raw_title": "Second Song",
+            "raw_artist": "First Song - First Artist", "artist_is_stale": true,
+            "position_ms": 300,
+        });
+        reduce(&mut state, &stale);
+        assert_eq!(state.track_id, "second");
+        assert_eq!(state.title, "Second Song");
+        assert!(state.artist.is_empty());
+        assert_eq!(state.position_ms, Some(300));
+
+        let mut fresh = stale.clone();
+        fresh["track_transition"] = "same".into();
+        fresh["artist_is_stale"] = false.into();
+        fresh["raw_artist"] = "Second Artist".into();
+        fresh["artist"] = "Second Artist".into();
+        reduce(&mut state, &fresh);
+        assert_eq!(state.track_id, "second");
+        assert_eq!(state.artist, "Second Artist");
+
+        let mut delayed = stale;
+        delayed["track_transition"] = "same".into();
+        reduce(&mut state, &delayed);
+        assert_eq!(state.artist, "Second Artist");
     }
 
     #[test]
@@ -1287,6 +1350,15 @@ mod tests {
             &serde_json::json!({"event":"progress", "position_ms":8000}),
         );
         assert_eq!(state.position_ms, Some(8000));
+        for update in [
+            serde_json::json!({"event":"progress"}),
+            serde_json::json!({"event":"progress", "position_ms":null}),
+        ] {
+            reduce(&mut state, &update);
+            assert_eq!(state.position_ms, Some(8000));
+        }
+        reduce(&mut state, &serde_json::json!({"event":"progress", "position_ms":0}));
+        assert_eq!(state.position_ms, Some(0));
         reduce(
             &mut state,
             &serde_json::json!({"event":"media_channel_closed"}),

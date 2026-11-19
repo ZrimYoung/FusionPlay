@@ -55,6 +55,39 @@ import Foundation
         precondition(LyricsStaggerTiming.moveDuration(milliseconds: 9999) == 1.5)
         precondition(LyricsStaggerTiming.clampMoveDuration(.nan) == 0.42)
         precondition(LyricsStaggerTiming.clampMoveDuration(.infinity) == 0.42)
+        // Independent cubic Bezier samples: vertical scrolling must use the
+        // same non-symmetric timing as its wave and row-height interpolation.
+        for (phase, expected) in [(0.25, 0.3004358674), (0.5, 0.7731489248), (0.75, 0.9562768914)] {
+            precondition(abs(LyricsStaggerTiming.verticalMove.value(at: phase) - expected) < 0.00001)
+        }
+        precondition(LyricsStaggerTiming.verticalMove.value(at: 0) == 0)
+        precondition(LyricsStaggerTiming.verticalMove.value(at: 1) == 1)
+
+        var row = LyricsRowFollowRank()
+        precondition(row.position(following: false) == 0)
+        row.observe(24, following: false)
+        row.setFollowing(true)
+        for rank in [20, 16, 12, 8] {
+            row.observe(rank, following: true)
+            row.setFollowing(true) // Replacing an overlapping wave preserves its rank.
+            precondition(row.held == 24 && row.measured == rank)
+            precondition(row.position(following: true) == 0.75,
+                         "Scrolling geometry changed the active wave's delay")
+        }
+        row.setFollowing(false)
+        precondition(row.held == nil && row.position(following: false) == 0.25)
+        row.setFollowing(true)
+        precondition(row.held == 8, "A new follow sequence did not capture the latest viewport rank")
+        row.observe(30, following: false) // Cancellation/disabled motion releases the held rank.
+        precondition(row.held == nil && row.position(following: false) == 30.0 / 32)
+        var lazyRow = LyricsRowFollowRank()
+        lazyRow.setFollowing(true)
+        precondition(lazyRow.held == nil)
+        lazyRow.observe(12, following: true)
+        lazyRow.observe(25, following: true)
+        precondition(lazyRow.held == 12 && lazyRow.position(following: true) == 12.0 / 32,
+                     "A lazy row did not retain its first measured rank")
+
         let start = Date(timeIntervalSinceReferenceDate: 10_000)
         var checks = 0
         for moveMilliseconds in [100, 420, 1500] {
@@ -129,10 +162,12 @@ import Foundation
                                         span: 1, duration: 1.5, previous: old)
         precondition(finished.carrySampleCount == 0)
         let example = LyricsFollowWave(start: start, direction: 1, span: 0.14)
-        precondition(abs(example.offset(at: start.addingTimeInterval(0.21), position: 1) - 46.0 / 3.0) < 0.00001)
+        let expectedCurveOffset = 36 * (LyricsStaggerTiming.verticalMove.value(at: 0.5)
+            - LyricsStaggerTiming.verticalMove.value(at: 1.0 / 6))
+        precondition(abs(example.offset(at: start.addingTimeInterval(0.21), position: 1) - expectedCurveOffset) < 0.00001)
         let invalid = LyricsFollowWave(start: start, direction: 1, span: .infinity)
         precondition(invalid.end.timeIntervalSince(start).isFinite)
         precondition(invalid.offset(at: start.addingTimeInterval(0.2), position: 1) == 0)
-        print("PASS: \(checks) wave samples at 0/140/240/500/1000ms and 100/420/1500ms movement, \(continuityChecks) bounded interruption checks and smooth cancellation tails")
+        print("PASS: \(checks) wave samples at 0/140/240/500/1000ms and 100/420/1500ms movement, \(continuityChecks) bounded interruption checks, unified vertical timing, held viewport ranks and smooth cancellation tails")
     }
 }

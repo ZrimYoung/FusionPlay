@@ -132,18 +132,19 @@ private struct CoreTextLyricsReflowText: View {
         func sample(_ now: TimeInterval) -> Presentation {
             let amount = min(1, max(0, (now - start) / max(0.0001, end - start)))
             let t = amount * amount * (3 - 2 * amount)
+            let vertical = LyricsStaggerTiming.verticalMove.value(at: amount)
             let target = Dictionary(uniqueKeysWithValues: to.sprites.map { ($0.id, $0) })
             let sprites = from.sprites.map { source -> Sprite in
                 guard let destination = target[source.id] else { return source }
                 return Sprite(fragment: t < 1 ? source.fragment : destination.fragment,
                               frame: CGRect(x: source.frame.minX + (destination.frame.minX - source.frame.minX) * t,
-                                            y: source.frame.minY + (destination.frame.minY - source.frame.minY) * t,
+                                            y: source.frame.minY + (destination.frame.minY - source.frame.minY) * vertical,
                                             width: source.frame.width + (destination.frame.width - source.frame.width) * t,
                                             height: source.frame.height + (destination.frame.height - source.frame.height) * t),
                               opacity: source.opacity + (destination.opacity - source.opacity) * t,
                               blur: source.blur + (destination.blur - source.blur) * t)
             }
-            return Presentation(height: from.height + (to.height - from.height) * t, sprites: sprites)
+            return Presentation(height: from.height + (to.height - from.height) * vertical, sprites: sprites)
         }
     }
 

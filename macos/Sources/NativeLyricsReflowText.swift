@@ -21,9 +21,19 @@ struct NativeLyricsReflowText: View {
     @State private var intrinsicGeometry = NativeLyricIntrinsicGeometry()
     @State private var revision: UInt64 = 0
     @State private var clock: Date?
+    @State private var referencePointSize: CGFloat
+    @State private var referenceFont: NSFont
 #if FUSIONPLAY_UI_CHECKS
     @State private var checkOwner = UUID()
 #endif
+
+    init(text: String, font: NSFont, lineSpacing: CGFloat, reduceMotion: Bool,
+         width: CGFloat, motionDelay: Double = 0) {
+        self.text = text; self.font = font; self.lineSpacing = lineSpacing
+        self.reduceMotion = reduceMotion; self.width = width; self.motionDelay = motionDelay
+        _referencePointSize = State(initialValue: max(1, font.pointSize))
+        _referenceFont = State(initialValue: font)
+    }
 
     private var safeWidth: CGFloat { width.isFinite ? max(1, width) : 1 }
     private var allowed: Bool { !reduceMotion && !voiceOver && text.utf8.count <= 1_024 }
@@ -34,28 +44,47 @@ struct NativeLyricsReflowText: View {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: end == nil)) { context in
-            Text(verbatim: text).font(Font(font))
-                .textRenderer(NativeReflowRenderer(target: target, motion: motion, now: context.date,
-                                                  overflow: min(120, max(8, font.pointSize * 2))))
+        let coordinates = NativeLyricCoordinates(font: font, width: safeWidth, referenceSize: referencePointSize, referenceFont: referenceFont)
+        return TimelineView(.animation(minimumInterval: 1.0 / 60, paused: end == nil)) { context in
+            renderedText(text: text, font: coordinates.font,
+                renderer: NativeReflowRenderer(target: target, motion: motion, now: context.date,
+                    overflow: coordinates.overflow, displayScale: coordinates.scale))
                 .lineSpacing(lineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(width: safeWidth, alignment: .topLeading)
+                .frame(width: coordinates.width, alignment: .topLeading)
                 .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                    intrinsicGeometry.size = size
+                    let canonical = size
+                    intrinsicGeometry.size = canonical
                     let topology = intrinsicGeometry.pendingTopology
                     intrinsicGeometry.pendingTopology = false
-                    acceptHeight(size.height, topologyChanged: topology, at: Date())
+                    acceptHeight(canonical.height, topologyChanged: topology, at: Date(), scale: coordinates.scale)
                 }
-                .frame(height: rowMotion?.height(at: context.date) ?? naturalHeight, alignment: .topLeading)
+                .frame(height: (rowMotion?.height(at: context.date) ?? naturalHeight).map { $0 * coordinates.scale },
+                       alignment: .topLeading)
         }
+        .frame(width: safeWidth, alignment: .topLeading)
+        .contentShape(Rectangle())
         .transaction { $0.animation = nil; $0.disablesAnimations = true }
         .onPreferenceChange(Text.LayoutKey.self) { layouts in
             guard let native = layouts.first?.layout else { return }
-            accept(NativeGlyphLayout(native, width: safeWidth, identity: identity))
+            accept(NativeGlyphLayout(native, width: coordinates.width, identity: identity), coordinates: coordinates)
         }
-        .onChange(of: identity) { _, _ in reset(clearLayout: true) }
+        .onChange(of: identity) { _, _ in
+            if referenceFont.fontName != font.fontName ||
+               referenceFont.fontDescriptor.symbolicTraits != font.fontDescriptor.symbolicTraits {
+                referenceFont = font; referencePointSize = max(1, font.pointSize)
+            }
+            reset(clearLayout: true)
+        }
         .onChange(of: allowed) { _, enabled in if !enabled { reset(clearLayout: false) } }
+#if FUSIONPLAY_UI_CHECKS
+        // A proportional font/width change can leave native Text.Layout exactly
+        // unchanged. Keep test samples in visible coordinates without asking
+        // native Text to lay itself out just to update diagnostic state.
+        .onChange(of: NativeLyricInput(text: text, font: font, spacing: lineSpacing, width: safeWidth)) { _, input in
+            intrinsicGeometry.input = input
+        }
+#endif
         .onAppear { installSampler() }
         .task(id: revision) { await finishMotion() }
         .onDisappear { reset(clearLayout: false); removeSampler() }
@@ -63,7 +92,11 @@ struct NativeLyricsReflowText: View {
         .accessibilityLabel(text)
     }
 
-    private func accept(_ measured: NativeGlyphLayout) {
+    private func renderedText(text: String, font: NSFont, renderer: NativeReflowRenderer) -> some View {
+        Text(verbatim: text).font(Font(font)).textRenderer(renderer)
+    }
+
+    private func accept(_ measured: NativeGlyphLayout, coordinates: NativeLyricCoordinates) {
 #if FUSIONPLAY_REFLOW_BENCHMARK
         NativeLyricsReflowBenchmark.hit("layoutCallbacks")
         if let prior = target, prior.width != measured.width, prior.positions == measured.positions,
@@ -96,7 +129,7 @@ struct NativeLyricsReflowText: View {
 #endif
                 clock = start
             }
-            motion = motion.retarget(from: previous, to: measured, now: now, start: start)
+            motion = motion.retarget(from: previous, to: measured, now: now, start: start, scale: coordinates.scale)
         } else {
             motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
 #if FUSIONPLAY_UI_CHECKS
@@ -108,9 +141,9 @@ struct NativeLyricsReflowText: View {
         // Typographic bounds below are used only to describe wrap direction.
         if changedWrap {
             intrinsicGeometry.pendingTopology = true
-            if let size = intrinsicGeometry.size, abs(size.width - safeWidth) < 0.75 {
+            if let size = intrinsicGeometry.size, abs(size.width - coordinates.width) * coordinates.scale < 0.75 {
                 intrinsicGeometry.pendingTopology = false
-                acceptHeight(size.height, topologyChanged: true, at: now)
+                acceptHeight(size.height, topologyChanged: true, at: now, scale: coordinates.scale)
             }
         }
         revision &+= 1
@@ -122,7 +155,7 @@ struct NativeLyricsReflowText: View {
         if changedWrap && allowed { report(phase(at: now)) }
     }
 
-    private func acceptHeight(_ height: CGFloat, topologyChanged: Bool, at now: Date) {
+    private func acceptHeight(_ height: CGFloat, topologyChanged: Bool, at now: Date, scale: CGFloat) {
 #if FUSIONPLAY_REFLOW_BENCHMARK
         NativeLyricsReflowBenchmark.hit("heightCallbacks")
 #endif
@@ -130,13 +163,13 @@ struct NativeLyricsReflowText: View {
         guard let previous = naturalHeight, allowed, target != nil else {
             naturalHeight = height; rowMotion = nil; return
         }
-        guard topologyChanged || abs(previous - height) > 0.25 else { return }
+        guard topologyChanged || abs(previous - height) * scale > 0.25 else { return }
         let visible = rowMotion?.height(at: now) ?? previous
         naturalHeight = height
         if let running = rowMotion, now < running.end, !topologyChanged {
             rowMotion = NativeLyricRowMotion(from: visible, target: height,
                 start: max(now, running.start), end: running.end)
-        } else if topologyChanged || abs(previous - height) >= max(8, font.pointSize * 0.6) {
+        } else if topologyChanged || abs(previous - height) * scale >= max(8, font.pointSize * 0.6) {
             let start = clock ?? now.addingTimeInterval(LyricsStaggerTiming.clampSpan(motionDelay))
             rowMotion = NativeLyricRowMotion(from: visible, target: height,
                 start: start.addingTimeInterval(NativeLyricTiming.duration * NativeLyricTiming.rowStart),
@@ -247,6 +280,8 @@ struct NativeLyricsReflowText: View {
 #if FUSIONPLAY_UI_CHECKS
     private func sample(_ phase: String) -> NativeLyricsReflowCheckEvents.Sample? {
         guard let target, let input = intrinsicGeometry.input else { return nil }
+        let coordinates = NativeLyricCoordinates(font: input.font, width: input.width, referenceSize: referencePointSize, referenceFont: referenceFont)
+        let transform = CGAffineTransform(scaleX: coordinates.scale, y: coordinates.scale)
         let now = Date()
         var poses: [String: NativeLyricsReflowCheckEvents.Pose] = [:]
         var moving = 0, visible = 0
@@ -255,24 +290,66 @@ struct NativeLyricsReflowText: View {
             let changingLine = motion.dissolves[key].map { $0.endsAt > now } ?? false
             if changingLine { moving += 1; if appearance.opacity > 0.02 { visible += 1 } }
             let id = target.id(for: key)
-            poses[id] = NativeLyricsReflowCheckEvents.Pose(id: id, origin: appearance.origin,
-                frame: destination.bounds.offsetBy(dx: appearance.origin.x - destination.origin.x, dy: appearance.origin.y - destination.origin.y), opacity: appearance.opacity,
-                blur: appearance.blur, lineIndex: destination.line, moving: changingLine)
+            poses[id] = NativeLyricsReflowCheckEvents.Pose(id: id, origin: appearance.origin.applying(transform),
+                frame: destination.bounds.offsetBy(dx: appearance.origin.x - destination.origin.x,
+                    dy: appearance.origin.y - destination.origin.y).applying(transform),
+                opacity: appearance.opacity, blur: appearance.blur, lineIndex: destination.line, moving: changingLine)
         }
         let height = rowMotion?.height(at: now) ?? naturalHeight ?? target.height
-        let preview = Text(verbatim: input.text).font(Font(input.font))
-            .textRenderer(NativeReflowRenderer(target: target, motion: motion, now: now,
-                                              overflow: min(120, max(8, input.font.pointSize * 2))))
+        let preview = renderedText(text: input.text, font: coordinates.font,
+            renderer: NativeReflowRenderer(target: target, motion: motion, now: now,
+                overflow: coordinates.overflow, displayScale: coordinates.scale))
             .lineSpacing(input.spacing).fixedSize(horizontal: false, vertical: true)
-            .frame(width: input.width, alignment: .topLeading)
-            .frame(height: height, alignment: .topLeading).foregroundStyle(.white)
+            .frame(width: coordinates.width, alignment: .topLeading)
+            .frame(height: height * coordinates.scale, alignment: .topLeading)
+            .frame(width: input.width, alignment: .topLeading).foregroundStyle(.white)
         return NativeLyricsReflowCheckEvents.Sample(renderer: "native-text-renderer", text: input.text,
             fontName: input.font.fontName, direction: intrinsicGeometry.direction, phase: phase, revision: revision,
-            width: input.width, height: height, targetHeight: naturalHeight ?? target.height,
+            width: input.width, height: height * coordinates.scale, targetHeight: (naturalHeight ?? target.height) * coordinates.scale,
+            fontPointSize: input.font.pointSize, coordinateFontPointSize: coordinates.font.pointSize, drawingScale: coordinates.scale,
             lineCount: target.lineStarts.count, nativeLayoutCount: intrinsicGeometry.layoutCount,
             movingClusterCount: moving, visibleMovingCount: visible, poses: poses, preview: AnyView(preview))
     }
+
 #endif
+}
+
+/// Native glyph positions stay in one font coordinate system while the
+/// complete text scales. No bitmap or drawingGroup is introduced; CoreText's
+/// older-system raster fallback keeps rendering at its actual requested size.
+@MainActor private struct NativeLyricCoordinates {
+    private static let fonts: NSCache<NSFontDescriptor, NSFont> = {
+        let cache = NSCache<NSFontDescriptor, NSFont>(); cache.countLimit = 64; return cache
+    }()
+    let font: NSFont
+    let scale: CGFloat
+    let width: CGFloat
+    var overflow: CGFloat { min(120 / scale, max(8 / scale, font.pointSize * 2)) }
+
+    init(font requested: NSFont, width: CGFloat, referenceSize: CGFloat, referenceFont: NSFont) {
+        // Each text instance keeps its own first actual size. Translation and
+        // primary rows therefore retain their native font coordinates without
+        // inflating every small label to one global large font surface.
+        if requested.pointSize == referenceSize { font = requested }
+        else {
+            // Size is part of the descriptor cache key, so two rows with the
+            // same requested font but different reference sizes cannot collide.
+            let descriptor = requested.fontDescriptor.withSize(referenceSize)
+            // CoreText can consider a reconstructed .SFNS font equal to an
+            // .AppleSystemUIFont while SwiftUI bridges/tracks them differently.
+            // Reuse the original object only with exact normalized descriptor
+            // equality, preserving face, traits, matrices and feature settings.
+            if descriptor == referenceFont.fontDescriptor { font = referenceFont }
+            else if let cached = Self.fonts.object(forKey: descriptor) { font = cached }
+            else {
+                font = NSFont(descriptor: descriptor, size: referenceSize)
+                    ?? NSFontManager.shared.convert(requested, toSize: referenceSize)
+                Self.fonts.setObject(font, forKey: descriptor)
+            }
+        }
+        scale = max(0.01, requested.pointSize / max(1, font.pointSize))
+        self.width = max(1, width / scale)
+    }
 }
 
 /// Intrinsic width/topology are coordination data, not display state. Mutating
@@ -304,7 +381,7 @@ private struct NativeLyricIdentity: Equatable {
         self.text = text; self.font = font.fontName; traits = font.fontDescriptor.symbolicTraits.rawValue
     }
 }
-private struct NativeLyricInput {
+private struct NativeLyricInput: Equatable {
     let text: String
     let font: NSFont
     let spacing: CGFloat
@@ -319,7 +396,7 @@ private struct NativeLyricRowMotion {
         guard now > start else { return from }
         guard now < end else { return target }
         let t = now.timeIntervalSince(start) / max(0.0001, end.timeIntervalSince(start))
-        return from + (target - from) * CGFloat(t * t * (3 - 2 * t))
+        return from + (target - from) * CGFloat(LyricsStaggerTiming.verticalMove.value(at: min(1, max(0, t))))
     }
 }
 
@@ -477,7 +554,7 @@ private struct NativeGlyphMotion {
         return NativeGlyphAppearance(origin: slide.position(at: destination, now: now))
     }
 
-    func retarget(from previous: NativeGlyphLayout, to target: NativeGlyphLayout, now: Date, start: Date) -> Self {
+    func retarget(from previous: NativeGlyphLayout, to target: NativeGlyphLayout, now: Date, start: Date, scale: CGFloat) -> Self {
         var nextDissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve] = [:]
         var nextSlides: [NativeGlyphLayout.Key: NativeGlyphSlide] = [:]
 
@@ -494,13 +571,13 @@ private struct NativeGlyphMotion {
                 // A pixel-width update keeps the existing fade deadline. If
                 // appearance is already visible, retarget its position smoothly.
                 if now.timeIntervalSince(dissolving.startedAt) >= NativeLyricTiming.duration * NativeLyricTiming.showStart,
-                   Self.hasDisplacement(from: visible, to: destination.origin) {
+                   Self.hasDisplacement(from: visible, to: destination.origin, scale: scale) {
                     dissolving.reposition = NativeGlyphSlide(origin: visible, startedAt: now,
                         duration: max(0.001, min(NativeLyricTiming.slideDuration, dissolving.endsAt.timeIntervalSince(now))))
                 }
                 nextDissolves[key] = dissolving
-            } else if Self.hasDisplacement(from: prior.origin, to: destination.origin) {
-                if Self.hasDisplacement(from: visible, to: destination.origin) {
+            } else if Self.hasDisplacement(from: prior.origin, to: destination.origin, scale: scale) {
+                if Self.hasDisplacement(from: visible, to: destination.origin, scale: scale) {
                     nextSlides[key] = NativeGlyphSlide(origin: visible, startedAt: start)
                 }
             } else if let sliding {
@@ -511,8 +588,8 @@ private struct NativeGlyphMotion {
         return NativeGlyphMotion(dissolves: nextDissolves, slides: nextSlides)
     }
 
-    static func hasDisplacement(from origin: CGPoint, to destination: CGPoint) -> Bool {
-        abs(origin.x - destination.x) >= 0.75 || abs(origin.y - destination.y) >= 0.75
+    static func hasDisplacement(from origin: CGPoint, to destination: CGPoint, scale: CGFloat = 1) -> Bool {
+        abs(origin.x - destination.x) * scale >= 0.75 || abs(origin.y - destination.y) * scale >= 0.75
     }
 }
 
@@ -544,12 +621,31 @@ private struct NativeReflowRenderer: TextRenderer {
     let motion: NativeGlyphMotion
     let now: Date
     let overflow: CGFloat
+    let displayScale: CGFloat
 
-    // Vertical room keeps disappearing glyphs from a removed line drawable while
-    // the row shrinks. Horizontal padding would change line breaks.
-    var displayPadding: EdgeInsets { EdgeInsets(top: 4, leading: 0, bottom: overflow, trailing: 0) }
+    // Drawing padding keeps outgoing and scaled glyphs drawable without
+    // changing the native text measurement.
+    var displayPadding: EdgeInsets {
+        guard displayScale > 1 else {
+            return EdgeInsets(top: 4, leading: 0, bottom: overflow * displayScale, trailing: 0)
+        }
+        // Text keeps its full canonical layout. When ink grows beyond that
+        // rectangle, reserve drawing-only space; never shrink/expand its text
+        // measurement through sizeThatFits, which can truncate canonical lines.
+        let growth = displayScale - 1
+        return EdgeInsets(top: 4, leading: 0,
+            bottom: overflow * displayScale + (target?.height ?? 0) * growth,
+            trailing: (target?.lineWidths.max() ?? 0) * growth)
+    }
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
+        if displayScale == 1 { drawCanonical(layout: layout, in: &context); return }
+        var scaled = context
+        scaled.scaleBy(x: displayScale, y: displayScale)
+        drawCanonical(layout: layout, in: &scaled)
+    }
+
+    private func drawCanonical(layout: Text.Layout, in context: inout GraphicsContext) {
 #if FUSIONPLAY_REFLOW_BENCHMARK
         NativeLyricsReflowBenchmark.hit("rendererDraws")
 #endif
@@ -601,7 +697,7 @@ private struct NativeReflowRenderer: TextRenderer {
                         CGPoint(x: nativeOrigin.x - anchor.x, y: nativeOrigin.y - anchor.y)
                     let animated = motion.appearance(key, at: destination.origin, now: now)
                     let paint: GlyphPaint
-                    if animated == nil, !NativeGlyphMotion.hasDisplacement(from: origin, to: destination.origin) {
+                    if animated == nil, !NativeGlyphMotion.hasDisplacement(from: origin, to: destination.origin, scale: displayScale) {
                         paint = GlyphPaint(offset: .zero, opacity: 1, blurStep: 0)
                     } else {
                         // Keep the original shaped run. Combining adjacent
@@ -629,7 +725,7 @@ private struct NativeReflowRenderer: TextRenderer {
             NativeLyricsReflowBenchmark.hit("blurLayers")
 #endif
             var filtered = context
-            filtered.addFilter(.blur(radius: CGFloat(step) / 4))
+            filtered.addFilter(.blur(radius: CGFloat(step) / (4 * displayScale)))
             filtered.drawLayer { layer in
                 for glyph in glyphs { glyph.draw(in: layer) }
             }
@@ -659,6 +755,9 @@ private struct NativeReflowRenderer: TextRenderer {
         let width: CGFloat
         let height: CGFloat
         let targetHeight: CGFloat
+        let fontPointSize: CGFloat
+        let coordinateFontPointSize: CGFloat
+        let drawingScale: CGFloat
         let lineCount: Int
         let nativeLayoutCount: Int
         let movingClusterCount: Int

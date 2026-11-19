@@ -11,9 +11,12 @@ pub(super) struct TrackMetadata {
     explicit_id: Option<String>,
     title: String,
     title_verified: bool,
+    qualified_title: Option<String>,
+    sender_credit: Option<String>,
     artist: String,
     album: String,
     display_artist: Option<String>,
+    stale_compound_artist: Option<String>,
     display_album: Option<String>,
     duration: Option<u64>,
     position: Option<u64>,
@@ -25,7 +28,12 @@ impl TrackMetadata {
         self.position = Some(millis);
     }
 
-    pub(super) fn apply(&mut self, event: &mut Value) {
+    #[cfg(test)]
+    fn apply(&mut self, event: &mut Value) {
+        self.apply_with_navigation(event, false);
+    }
+
+    pub(super) fn apply_with_navigation(&mut self, event: &mut Value, navigation_restarted: bool) {
         let packet_id = text(event, "track_id");
         let packet_source = text(event, "track_id_source");
         let explicit = (packet_source == "explicit" && !packet_id.is_empty()).then_some(packet_id);
@@ -33,13 +41,15 @@ impl TrackMetadata {
         let transport_artist = raw(event, "raw_artist", "artist").to_owned();
         let transport_album = raw(event, "raw_album", "album").to_owned();
         let raw_title = transport_title.trim();
-        let artist = transport_artist.trim();
+        let packet_artist = transport_artist.trim();
+        let repeats_stale_artist = self.stale_compound_artist.as_deref() == Some(packet_artist);
+        let artist = if repeats_stale_artist { "" } else { packet_artist };
         let album = transport_album.trim();
         let duration = event["duration_ms"].as_u64().filter(|ms| *ms > 0);
         let position = event["position_ms"].as_u64();
         let document = text(event, "lyrics_text");
         let same_document = !document.is_empty() && document == self.lyrics.source;
-        let incoming = (!document.is_empty() && !same_document).then(|| Lyrics::parse(document));
+        let mut incoming = (!document.is_empty() && !same_document).then(|| Lyrics::parse(document));
         let incoming_name = incoming.as_ref().and_then(Lyrics::song_title);
         let same_title = !raw_title.is_empty() && equivalent(raw_title, &self.title);
         let same_header = incoming_name.is_some_and(|name| equivalent(name, &self.title));
@@ -56,19 +66,31 @@ impl TrackMetadata {
                     .is_some_and(|title| !equivalent(title, provisional_title))
                     && lyrics.matches_caption(provisional_title, position.or(self.position))
             });
+        // Both parts must match already known labels. Try the original
+        // compound first: a performer's name may itself end with the album.
+        let composite_performer = [
+            composite_artist(artist, &self.title, ""),
+            composite_artist(artist, &self.title, &self.album),
+        ].into_iter().flatten().find(|tail| {
+            equivalent(tail, &self.artist)
+                || self.display_artist.as_ref().is_some_and(|known| equivalent(tail, known))
+        });
+        // Some senders put captions in mTitle without supplying an LRC. A
+        // verified title/performer compound supplies the missing continuity
+        // evidence, but never overrides a new document or an explicit ID.
+        let matching_compound = document.is_empty() && !raw_title.is_empty()
+            && composite_performer.is_some();
+        // A same-session navigation with a separately reported restart is
+        // stronger than the previous song's delayed title/performer field.
+        let stale_compound = navigation_restarted && explicit.is_none() && !same_title && matching_compound;
+        let composite_continuity = matching_compound && !stale_compound;
         let metadata_agrees = compatible(album, &self.album)
             && (compatible(artist, &self.artist)
                 || self
                     .display_artist
                     .as_ref()
                     .is_some_and(|known| equivalent(artist, known))
-                || composite_artist(artist, &self.title, "").is_some_and(|tail| {
-                    equivalent(tail, &self.artist)
-                        || self
-                            .display_artist
-                            .as_ref()
-                            .is_some_and(|known| equivalent(tail, known))
-                }))
+                || composite_performer.is_some())
             && duration
                 .zip(self.duration)
                 .is_none_or(|(new, old)| new.abs_diff(old) <= 2_000);
@@ -78,12 +100,14 @@ impl TrackMetadata {
             && match (explicit, self.explicit_id.as_deref()) {
                 (Some(new), Some(old)) => new == old,
                 (Some(_), None) => metadata_agrees && (same_title || same_document || same_header),
+                (None, _) if stale_compound => false,
                 (None, _) => {
                     metadata_agrees
                         && (same_title
                             || same_document
                             || same_header
                             || late_document
+                            || composite_continuity
                             || (incoming.is_none()
                                 && self
                                     .lyrics
@@ -91,10 +115,22 @@ impl TrackMetadata {
                         || (raw_title.is_empty() && incoming.is_none())
                 }
             };
+        let position_is_caption_placeholder = same && composite_continuity && !same_title
+            && position == Some(0) && self.position.is_some_and(|previous| previous > 1_500);
+        let position = position.filter(|_| !position_is_caption_placeholder);
+        let artist = if repeats_stale_artist && !same { packet_artist } else { artist };
         if !same && !packet_id.is_empty() {
+            // A new identity still owns lyrics explicitly present in this
+            // packet. Reuse the parsed document when it is byte-identical;
+            // resetting below must not discard it just because parsing was
+            // skipped before the identity decision.
+            if same_document {
+                incoming = Some(std::mem::take(&mut self.lyrics));
+            }
             *self = Self {
                 id: packet_id.to_owned(),
                 id_source: packet_source.to_owned(),
+                stale_compound_artist: stale_compound.then(|| packet_artist.to_owned()),
                 ..Self::default()
             };
         }
@@ -121,7 +157,12 @@ impl TrackMetadata {
             lyrics.artist.value.as_deref(),
             album,
             known_album,
-        )).flatten();
+        )).flatten().or_else(|| {
+            // Only reuse cached labels after the same-track decision. A new
+            // explicit identity or conflicting document must not inherit them.
+            composite_performer.filter(|_| same && composite_continuity)
+                .map(|performer| (self.title.clone(), performer.to_owned()))
+        });
         if conflicting_headers && !self.title_verified { self.title.clear(); }
         let candidate = header.or_else(|| composite.as_ref().map(|(name, _)| name.as_str()));
         let agrees_with_title = !raw_title.is_empty()
@@ -129,7 +170,9 @@ impl TrackMetadata {
                 || (self.title_verified && equivalent(raw_title, &self.title)));
         let caption = !agrees_with_title
             && (event["title_is_lyric"].as_bool().unwrap_or(false)
-                || lyrics.matches_caption(raw_title, position.or(self.position)));
+                || lyrics.matches_caption(raw_title, position.or(self.position))
+                || (same && composite_continuity));
+        let previous_title = self.title.clone();
         if let Some(title) =
             candidate.filter(|_| raw_title.is_empty() || caption || agrees_with_title)
         {
@@ -147,11 +190,52 @@ impl TrackMetadata {
         if !conflicting_headers && self.display_album.is_none() && (caption || album.is_empty()) {
             self.display_album = lyrics.album.value.clone();
         }
-        if !artist.is_empty() && (!caption || self.artist.is_empty()) {
+        if !stale_compound && !artist.is_empty() && (!caption || self.artist.is_empty()) {
             self.artist = artist.to_owned();
         }
         if !album.is_empty() {
             self.album = album.to_owned();
+        }
+
+        if !conflicting_headers {
+            // The transport's full labels are presentation data. Keep them out
+            // of the continuity comparisons above, which must still distinguish
+            // a genuine track change from packets carrying the current lyric.
+            let subtitle = sender_subtitle(artist, &self.title);
+            let known_credit = self.sender_credit.as_deref().or(lyrics.artist.value.as_deref()
+                .filter(|_| !self.title.is_empty()));
+            let recovered_subtitle = subtitle.and_then(|(title, credit)| {
+                let known_credit = known_credit?;
+                let without_album = strip_suffix(credit, &self.album);
+                [Some(credit), without_album].into_iter().flatten()
+                    .find(|credit| equivalent(credit, known_credit))
+                    .or_else(|| without_album
+                        .or_else(|| (!credit.contains(is_dash)).then_some(credit))
+                        .filter(|credit| includes_artist(credit, known_credit)))
+                    .map(|credit| (title, credit))
+            });
+            let matches_current_title = !caption && !raw_title.is_empty()
+                && (equivalent(raw_title, &self.title) || has_title_qualifier(raw_title, &self.title));
+            let qualified_title = [
+                matches_current_title.then_some(raw_title),
+                recovered_subtitle.map(|(title, _)| title),
+                self.qualified_title.as_deref(),
+                Some(previous_title.as_str()),
+            ].into_iter().flatten().find(|title| has_title_qualifier(title, &self.title))
+                .map(str::to_owned);
+            self.qualified_title = qualified_title;
+
+            let sender_credit = recovered_subtitle.map(|(_, credit)| credit).or_else(|| {
+                (subtitle.is_none() && !artist.is_empty()
+                    && (matches_current_title || known_credit.is_some_and(|known| includes_artist(artist, known))))
+                    .then_some(artist)
+            });
+            if let Some(credit) = sender_credit.filter(|_| !stale_compound) {
+                // A later lyric packet can repeat only one of the credited artists.
+                if !self.sender_credit.as_deref().is_some_and(|old| includes_artist(old, credit)) {
+                    self.sender_credit = Some(credit.to_owned());
+                }
+            }
         }
 
         if !self.id.is_empty() {
@@ -160,15 +244,26 @@ impl TrackMetadata {
             event["track_transition"] = if same { "same" } else { "new" }.into();
         }
         if !self.title.is_empty() || caption {
-            event["display_title"] = self.title.clone().into();
+            let title = self.qualified_title.as_ref().unwrap_or(&self.title);
+            event["display_title"] = title.clone().into();
         }
-        if let Some(artist) = &self.display_artist {
+        let sender_credit = self.sender_credit.as_ref()
+            .filter(|_| (caption || same) && !stale_compound);
+        if let Some(artist) = sender_credit.or(self.display_artist.as_ref()) {
             event["display_artist"] = artist.clone().into();
         }
-        if let Some(album) = &self.display_album {
+        let sender_album = (!self.album.is_empty()).then_some(&self.album);
+        if let Some(album) = sender_album.or(self.display_album.as_ref()) {
             event["display_album"] = album.clone().into();
         }
         event["title_is_lyric"] = caption.into();
+        if stale_compound || (same && repeats_stale_artist) {
+            event["artist"] = Value::Null;
+            event["artist_is_stale"] = true.into();
+        }
+        if position_is_caption_placeholder {
+            event["position_ms"] = Value::Null;
+        }
         // Keep the SDK's legacy labels unchanged: older Android/desktop
         // reducers do not understand projection fields. Apple Host consumers
         // opt into the exact sender labels through these additive raw fields.
@@ -278,6 +373,48 @@ fn composite_artist<'a>(
         let trailing = source[dash + value.len()..].trim();
         (!trailing.is_empty() && equivalent(leading, expected_title)).then_some(trailing)
     })
+}
+
+fn has_title_qualifier(title: &str, base: &str) -> bool {
+    if base.is_empty() || equivalent(title, base) {
+        return false;
+    }
+    let Some((start, _)) = title.match_indices(['(', '（'])
+        .find(|(start, _)| equivalent(&title[..*start], base))
+    else {
+        return false;
+    };
+    let mut depth = 0;
+    for character in title[start..].chars() {
+        match character {
+            '(' | '（' => depth += 1,
+            ')' | '）' if depth > 0 => depth -= 1,
+            character if depth > 0 || character.is_whitespace() => {},
+            _ => return false,
+        }
+    }
+    depth == 0
+}
+
+fn sender_subtitle<'a>(source: &'a str, title: &str) -> Option<(&'a str, &'a str)> {
+    if title.is_empty() {
+        return None;
+    }
+    source.match_indices(is_dash).find_map(|(dash, value)| {
+        let leading = source[..dash].trim();
+        let trailing = source[dash + value.len()..].trim();
+        (!trailing.is_empty() && (equivalent(leading, title) || has_title_qualifier(leading, title)))
+            .then_some((leading, trailing))
+    })
+}
+
+fn includes_artist(credit: &str, artist: &str) -> bool {
+    if artist.is_empty() {
+        return false;
+    }
+    // Preserve the complete sender string, including slashes inside names.
+    // A slash only supplies evidence that a shorter header names one credit.
+    equivalent(credit, artist) || credit.split('/').any(|part| equivalent(part, artist))
 }
 
 fn recover_composite(
@@ -557,6 +694,138 @@ mod tests {
     }
 
     #[test]
+    fn lyric_headers_do_not_replace_richer_sender_labels() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha][al:Night Walk]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let mut first = packet("track", "explicit", "Night Walk (Live)", DOCUMENT, Some(0));
+        first["raw_artist"] = "Alpha/Beta".into();
+        first["raw_album"] = "Sender Album".into();
+        track.apply(&mut first);
+
+        let mut caption = packet("track", "explicit", "we are heading home", DOCUMENT, Some(10_000));
+        caption["raw_artist"] = "Alpha".into();
+        caption["raw_album"] = "".into();
+        track.apply(&mut caption);
+        assert_eq!(caption["track_transition"], "same");
+        assert_eq!(caption["display_title"], "Night Walk (Live)");
+        assert_eq!(caption["display_artist"], "Alpha/Beta");
+        assert_eq!(caption["display_album"], "Sender Album");
+
+        let mut next = packet("next", "explicit", "Night Walk", DOCUMENT, Some(0));
+        next["raw_artist"] = "Alpha".into();
+        next["raw_album"] = "Different Album".into();
+        track.apply(&mut next);
+        assert_eq!(next["track_transition"], "new");
+        assert_eq!(next["display_title"], "Night Walk");
+        assert!(next["display_artist"].is_null());
+        assert_eq!(next["display_album"], "Different Album");
+    }
+
+    #[test]
+    fn first_lyric_caption_can_recover_a_qualified_title_with_multiple_artists() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha][al:Night Walk]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let mut caption = packet("track", "explicit", "we are heading home", DOCUMENT, Some(10_000));
+        caption["raw_artist"] = "Night Walk (Live) - Alpha/Beta - Sender Album".into();
+        caption["raw_album"] = "Sender Album".into();
+        track.apply(&mut caption);
+        assert_eq!(caption["display_title"], "Night Walk (Live)");
+        assert_eq!(caption["display_artist"], "Alpha/Beta");
+        assert_eq!(caption["display_album"], "Sender Album");
+    }
+
+    #[test]
+    fn known_title_prefix_is_not_cached_as_part_of_the_credit() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let mut first = packet("track", "explicit", "Night Walk", DOCUMENT, Some(0));
+        first["raw_artist"] = "Night Walk - Alpha".into();
+        track.apply(&mut first);
+        assert_eq!(first["display_artist"], "Alpha");
+
+        let mut caption = packet("track", "explicit", "we are heading home", DOCUMENT, Some(10_000));
+        caption["raw_artist"] = "Night Walk - Alpha".into();
+        track.apply(&mut caption);
+        assert_eq!(caption["display_artist"], "Alpha");
+    }
+
+    #[test]
+    fn partial_credit_cannot_reclassify_an_unknown_album_as_an_artist() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let mut caption = packet("track", "explicit", "we are heading home", DOCUMENT, Some(10_000));
+        caption["raw_artist"] = "Night Walk - Alpha/Beta - Mystery suffix".into();
+        caption["raw_album"] = "".into();
+        track.apply(&mut caption);
+        assert_eq!(caption["display_artist"], "Alpha");
+        assert!(caption["display_album"].is_null());
+    }
+
+    #[test]
+    fn late_sender_album_replaces_the_lyric_album_fallback() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha][al:Night Walk]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let mut first = packet("track", "explicit", "we are heading home", DOCUMENT, Some(10_000));
+        first["raw_artist"] = "Alpha/Beta".into();
+        first["raw_album"] = "".into();
+        track.apply(&mut first);
+        assert_eq!(first["display_artist"], "Alpha/Beta");
+        assert_eq!(first["display_album"], "Night Walk");
+
+        let mut later = packet("track", "explicit", "we are heading home", "", Some(10_500));
+        later["raw_artist"] = "Alpha".into();
+        later["raw_album"] = "Sender Album".into();
+        track.apply(&mut later);
+        assert_eq!(later["display_artist"], "Alpha/Beta");
+        assert_eq!(later["display_album"], "Sender Album");
+    }
+
+    #[test]
+    fn qualified_titles_and_credits_preserve_exact_raw_transport_labels() {
+        const DOCUMENT: &str = "[ti:Night Walk][ar:Alpha][al:Header Album]\n[00:10]we are heading home";
+        let mut track = TrackMetadata::default();
+        let raw_title = "  we are heading home  ";
+        let raw_artist = "  Night Walk (Explicit) - Alpha/Beta - Sender Album  ";
+        let raw_album = "  Sender Album  ";
+        let mut caption = packet("track", "explicit", raw_title, DOCUMENT, Some(10_000));
+        caption["raw_artist"] = raw_artist.into();
+        caption["raw_album"] = raw_album.into();
+        track.apply(&mut caption);
+        assert_eq!(caption["display_title"], "Night Walk (Explicit)");
+        assert_eq!(caption["display_artist"], "Alpha/Beta");
+        assert_eq!(caption["display_album"], "Sender Album");
+        assert_eq!(caption["raw_title"], raw_title);
+        assert_eq!(caption["raw_artist"], raw_artist);
+        assert_eq!(caption["raw_album"], raw_album);
+        assert_eq!(caption["title"], raw_title);
+    }
+
+    #[test]
+    fn conflicting_lyric_headers_do_not_infer_rich_titles_or_credits() {
+        for headers in ["[ti:First][ti:Other][ar:Artist]", "[ti:First][ar:Artist][ar:Other]"] {
+            let mut track = TrackMetadata::default();
+            let mut caption = packet("track", "explicit", "touch her",
+                &format!("{headers}\n[00:10]Someone may touch her tonight"), Some(10_000));
+            caption["raw_artist"] = "First (Live) - Artist/Partner - Sender Album".into();
+            caption["raw_album"] = "Sender Album".into();
+            track.apply(&mut caption);
+            assert_eq!(caption["display_title"], "");
+            assert!(caption["display_artist"].is_null());
+            assert_eq!(caption["display_album"], "Sender Album");
+        }
+    }
+
+    #[test]
+    fn title_qualifiers_must_be_complete_suffixes_of_the_known_song() {
+        for value in ["Night Walk (Live)", "Night Walk（Explicit）", "Night Walk (Live) (Remastered)"] {
+            assert!(has_title_qualifier(value, "Night Walk"));
+        }
+        for value in ["Night Walk", "Night Walker (Live)", "Other (Live)", "Night Walk (Live", "Night Walk (Live) extra"] {
+            assert!(!has_title_qualifier(value, "Night Walk"));
+        }
+    }
+
+    #[test]
     fn short_caption_keeps_identity_then_explicit_single_word_song_wins() {
         let mut track = TrackMetadata::default();
         let mut first = packet(
@@ -653,6 +922,154 @@ mod tests {
         assert_eq!(next["track_transition"], "new");
         assert_eq!(next["track_id"], "next");
         assert_eq!(next["display_title"], "Home");
+    }
+
+    #[test]
+    fn caption_without_lrc_keeps_verified_compound_labels_and_identity() {
+        for (title, artist, album, compound) in [
+            ("Synthetic", "Artist", "Record", "Synthetic-Artist"),
+            ("A-B", "C-D", "Record", "A-B-C-D"),
+            ("X", "Y-Z", "Record", "X—Y-Z"),
+            ("T—One", "Artist – Two", "Album-1", "T—One - Artist – Two - Album-1"),
+            ("Night Walk", "Example - Record", "Record", "Night Walk - Example - Record"),
+        ] {
+            let mut track = TrackMetadata::default();
+            let mut first = packet("stable", "metadata", title, "", None);
+            first["raw_artist"] = artist.into(); first["raw_album"] = album.into();
+            first["duration_ms"] = 167_000.into();
+            track.apply(&mut first);
+            for (i, caption) in ["one", "A changing line", "home", "Another changing line"].iter().enumerate() {
+                let mut next = packet(&format!("caption-{i}"), "metadata", caption, "", None);
+                next["raw_artist"] = compound.into(); next["raw_album"] = album.into();
+                next["duration_ms"] = 167_000.into();
+                track.apply(&mut next);
+                assert_eq!(next["track_transition"], "same", "{title} / {artist}");
+                assert_eq!(next["track_id"], "stable");
+                assert_eq!(next["display_title"], title);
+                assert_eq!(next["display_artist"], artist);
+                assert_eq!(next["title_is_lyric"], true);
+                assert_eq!(next["raw_title"], *caption);
+                assert_eq!(next["title"], *caption);
+                assert_eq!(next["raw_artist"], compound);
+                assert_eq!(track.artist, artist);
+                assert!(track.lyrics.source.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn caption_compound_does_not_replace_stronger_new_track_evidence() {
+        for (id, source, title, artist, lyrics, album, duration) in [
+            ("next", "explicit", "Next song", "Synthetic-Artist", "", "Record", 167_000),
+            ("next", "metadata", "Next song", "Artist", "", "Record", 167_000),
+            ("next", "metadata", "Next song", "Next song-Artist", "", "Record", 167_000),
+            ("next", "metadata", "caption", "Unknown-Artist", "", "Record", 167_000),
+            ("next", "metadata", "caption", "Synthetic-Stranger", "", "Record", 167_000),
+            ("next", "metadata", "caption", "Synthetic-Artist", "[ti:Next song]\n[00:00]caption", "Record", 167_000),
+            ("next", "metadata", "caption", "Synthetic-Artist", "", "Other album", 167_000),
+            ("next", "metadata", "caption", "Synthetic-Artist", "", "Record", 171_000),
+        ] {
+            let mut track = TrackMetadata::default();
+            let mut first = packet("stable", "explicit", "Synthetic", "", None);
+            first["raw_artist"] = "Artist".into(); first["duration_ms"] = 167_000.into();
+            track.apply(&mut first);
+            let mut verified = packet("first-caption", "metadata", "first line", "", None);
+            verified["raw_artist"] = "Synthetic-Artist".into();
+            verified["duration_ms"] = 167_000.into();
+            track.apply(&mut verified);
+            assert_eq!(verified["track_transition"], "same");
+            assert!(track.title_verified);
+            let mut next = packet(id, source, title, lyrics, None);
+            next["raw_artist"] = artist.into(); next["raw_album"] = album.into();
+            next["duration_ms"] = duration.into();
+            track.apply(&mut next);
+            assert_eq!(next["track_transition"], "new", "{source} / {title} / {artist}");
+            assert_eq!(next["track_id"], "next");
+            assert_eq!(next["raw_title"], title);
+            assert_eq!(next["raw_artist"], artist);
+            assert_ne!(next["display_title"], "Synthetic");
+            assert!(next["display_artist"].is_null());
+        }
+    }
+
+    #[test]
+    fn known_album_suffix_in_composite_artist_keeps_the_track() {
+        let mut track = TrackMetadata::default();
+        track.apply(&mut packet("stable", "explicit", "home", LYRICS, Some(11_000)));
+        let mut composite = packet("caption-hash", "metadata", "home", "", Some(11_100));
+        composite["raw_artist"] = "Night Walk - Example Artist - Record".into();
+        track.apply(&mut composite);
+        assert_eq!(composite["track_transition"], "same");
+        assert_eq!(composite["track_id"], "stable");
+        assert_eq!(composite["display_title"], "Night Walk");
+        assert_eq!(composite["display_artist"], "Example Artist");
+        assert_eq!(track.lyrics.source, LYRICS);
+
+        let mut next = packet("next-hash", "metadata", "Next song", "", Some(0));
+        next["raw_artist"] = "Next song - Example Artist - Record".into();
+        track.apply(&mut next);
+        assert_eq!(next["track_transition"], "new");
+        assert_eq!(next["track_id"], "next-hash");
+        assert!(track.lyrics.source.is_empty());
+    }
+
+    #[test]
+    fn composite_artist_does_not_guess_unknown_or_conflicting_album_suffixes() {
+        for (known_album, incoming_album, suffix) in [
+            ("Record", "Record", "Other record"),
+            ("", "", "Record"),
+            ("Record", "Other record", "Record"),
+        ] {
+            let mut track = TrackMetadata::default();
+            let mut first = packet("stable", "explicit", "home", LYRICS, Some(11_000));
+            first["raw_album"] = known_album.into();
+            track.apply(&mut first);
+            let mut next = packet("different", "metadata", "home", "", Some(11_100));
+            next["raw_album"] = incoming_album.into();
+            next["raw_artist"] = format!("Night Walk - Example Artist - {suffix}").into();
+            track.apply(&mut next);
+            assert_eq!(next["track_transition"], "new");
+            assert_eq!(next["track_id"], "different");
+        }
+    }
+
+    #[test]
+    fn repeated_document_survives_an_explicit_identity_change() {
+        repeated_document_survives_identity_reset("explicit", false);
+    }
+
+    #[test]
+    fn repeated_document_survives_incompatible_inferred_metadata() {
+        repeated_document_survives_identity_reset("lyrics_metadata", true);
+    }
+
+    fn repeated_document_survives_identity_reset(source: &str, change_album: bool) {
+        let mut track = TrackMetadata::default();
+        track.apply(&mut packet("old", "explicit", "home", LYRICS, Some(11_000)));
+
+        let mut next = packet("next", source, "home", LYRICS, Some(11_100));
+        if change_album { next["raw_album"] = "Other edition".into(); }
+        track.apply(&mut next);
+        // Different explicit IDs remain authoritative; incompatible inferred
+        // metadata still starts a new identity. Neither policy is relaxed.
+        assert_eq!(next["track_transition"], "new");
+        assert_eq!(next["track_id"], "next");
+        assert_eq!(track.lyrics.source, LYRICS);
+        assert_eq!(next["display_title"], "Night Walk");
+
+        let mut caption = packet("caption-hash", "metadata", "home", "", Some(11_200));
+        if change_album { caption["raw_album"] = "Other edition".into(); }
+        track.apply(&mut caption);
+        assert_eq!(caption["track_transition"], "same");
+        assert_eq!(caption["track_id"], "next");
+        assert_eq!(caption["display_title"], "Night Walk");
+
+        // An actual new song without a document must not inherit old lyrics.
+        let mut without_document = packet("following", "explicit", "Next song", "", None);
+        track.apply(&mut without_document);
+        assert_eq!(without_document["track_transition"], "new");
+        assert!(track.lyrics.source.is_empty());
+        assert_eq!(without_document["display_title"], "Next song");
     }
 
     #[test]
