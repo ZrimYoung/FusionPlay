@@ -814,6 +814,9 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 (&mut state.artwork_url, "artwork"),
                 (&mut state.lyrics_text, "lyrics_text"),
             ] {
+                if key == "artist" && value["artist_is_stale"] == true {
+                    continue;
+                }
                 let caption_header = if caption {
                     match key { "title" => Some("ti"), "artist" => Some("ar"), "album" => Some("al"), _ => None }
                 } else { None };
@@ -986,6 +989,42 @@ mod tests {
         assert!(state.artwork_url.is_empty() && state.lyrics_text.is_empty());
         clear_media(&mut state);
         assert_eq!(state.display_title, None);
+    }
+
+    #[test]
+    fn confirmed_navigation_keeps_the_stale_artist_out_of_the_new_snapshot() {
+        let mut state = Snapshot {
+            track_id: "first".into(),
+            title: "First Song".into(),
+            artist: "First Artist".into(),
+            position_ms: Some(42_000),
+            ..Snapshot::default()
+        };
+        let stale = serde_json::json!({
+            "event": "media_info", "track_id": "second", "track_transition": "new",
+            "title": "Second Song", "raw_title": "Second Song",
+            "raw_artist": "First Song - First Artist", "artist_is_stale": true,
+            "position_ms": 300,
+        });
+        reduce(&mut state, &stale);
+        assert_eq!(state.track_id, "second");
+        assert_eq!(state.title, "Second Song");
+        assert!(state.artist.is_empty());
+        assert_eq!(state.position_ms, Some(300));
+
+        let mut fresh = stale.clone();
+        fresh["track_transition"] = "same".into();
+        fresh["artist_is_stale"] = false.into();
+        fresh["raw_artist"] = "Second Artist".into();
+        fresh["artist"] = "Second Artist".into();
+        reduce(&mut state, &fresh);
+        assert_eq!(state.track_id, "second");
+        assert_eq!(state.artist, "Second Artist");
+
+        let mut delayed = stale;
+        delayed["track_transition"] = "same".into();
+        reduce(&mut state, &delayed);
+        assert_eq!(state.artist, "Second Artist");
     }
 
     #[test]
