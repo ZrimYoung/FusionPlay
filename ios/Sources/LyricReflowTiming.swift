@@ -1,11 +1,6 @@
 import SwiftUI
 
 enum LyricReflowTiming {
-    static let hideEnd = 0.31
-    static let rowStart = 0.34
-    static let rowEnd = 0.64
-    static let showStart = 0.68
-
     // Use the same vertical easing for the scroll and its per-row delay.
     static let verticalMove = UnitCurve.bezier(
         startControlPoint: UnitPoint(x: 0.32, y: 0),
@@ -32,14 +27,6 @@ enum LyricReflowTiming {
         TimeInterval(clampMoveMilliseconds(milliseconds)) / 1_000
     }
 
-    static func reflowDuration(moveDuration: TimeInterval) -> TimeInterval {
-        0.48 * moveDuration / defaultMoveDuration
-    }
-
-    static func slideDuration(moveDuration: TimeInterval) -> TimeInterval {
-        0.19 * moveDuration / defaultMoveDuration
-    }
-
     static func clampedStaggerMilliseconds(_ value: Int) -> Int {
         min(staggerRange.upperBound, max(staggerRange.lowerBound, value))
     }
@@ -51,6 +38,62 @@ enum LyricReflowTiming {
     static func staggerDelay(span: TimeInterval, position: Double) -> TimeInterval {
         guard span.isFinite, position.isFinite else { return 0 }
         return min(1, max(0, position)) * min(maximumStaggerSpan, max(0, span))
+    }
+}
+
+struct LyricResizeTiming {
+    static let duration: TimeInterval = 0.40
+    static let maximumDelay: TimeInterval = 0.035
+    static let fadeOutEnd = 0.40
+    private static let invisibleDuration: TimeInterval = 0.024
+    static let revealStart = fadeOutEnd + invisibleDuration / duration
+    static let slideDuration: TimeInterval = 0.19
+
+    let start: Date
+
+    var end: Date { start.addingTimeInterval(Self.duration) }
+    var reveal: Date { start.addingTimeInterval(Self.duration * Self.revealStart) }
+
+    func heightWindow(expanding: Bool) -> ClosedRange<Date> {
+        let phases = expanding ? (0.05, Self.revealStart) : (Self.fadeOutEnd, 0.92)
+        let first = start.addingTimeInterval(Self.duration * phases.0)
+        let last = start.addingTimeInterval(Self.duration * phases.1)
+        return first...last
+    }
+
+    static func staggerSpan(playbackSpan: TimeInterval) -> TimeInterval {
+        min(maximumDelay, playbackSpan * 0.25)
+    }
+
+    static func ease(_ progress: Double) -> Double {
+        let t = min(1, max(0, progress))
+        return t * t * (3 - 2 * t)
+    }
+}
+
+/// Text layout and row geometry are reported separately during the same frame.
+final class LyricResizeClock {
+    private var lastMeasurement: Date?
+
+    func timing(at now: Date, delay: TimeInterval) -> LyricResizeTiming {
+        let epoch: Date
+        if let lastMeasurement, abs(now.timeIntervalSince(lastMeasurement)) < 1.0 / 60 {
+            epoch = lastMeasurement
+        } else {
+            lastMeasurement = now
+            epoch = now
+        }
+        return LyricResizeTiming(start: epoch.addingTimeInterval(delay))
+    }
+}
+
+struct LyricResizeContext {
+    var isVisible = true
+    var delay: TimeInterval = 0
+    var clock: LyricResizeClock?
+
+    func timing(at now: Date) -> LyricResizeTiming {
+        clock?.timing(at: now, delay: delay) ?? LyricResizeTiming(start: now)
     }
 }
 

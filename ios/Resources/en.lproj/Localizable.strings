@@ -92,6 +92,7 @@
 "暂无诊断日志。" = "No diagnostic log yet.";
 "无法分享诊断日志。" = "Could not share the diagnostic log.";
 "进度条颜色" = "Progress Bar Color";
+"背景模糊程度" = "Background Blur";
 "白色" = "White";
 "跟随系统" = "System";
 "自定义" = "Custom";

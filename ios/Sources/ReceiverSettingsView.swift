@@ -208,6 +208,7 @@ struct ReceiverSettingsView: View {
             Section("播放显示") {
                 Toggle("显示进度与时间", isOn: $showProgress)
                 ReceiverProgressColorSettings()
+                ReceiverBackdropBlurSettings()
                 Toggle("显示播放控制", isOn: $showPlaybackControls)
                 Toggle("允许歌名和艺人信息换行", isOn: $wrapPlayerMetadata)
                 Toggle("始终显示顶部按钮", isOn: $toolbarAlwaysVisible)

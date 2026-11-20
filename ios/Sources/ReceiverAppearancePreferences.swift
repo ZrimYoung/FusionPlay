@@ -47,6 +47,20 @@ enum ReceiverProgressAppearance {
     }
 }
 
+enum ReceiverBackdropAppearance {
+    static let blurKey = "playerBackdropBlurPercent"
+    static let defaultBlurPercent = 50
+    static let blurRange = 0...100
+
+    static func clampedBlurPercent(_ value: Int) -> Int {
+        min(blurRange.upperBound, max(blurRange.lowerBound, value))
+    }
+
+    static func blurRadius(percent: Int) -> Double {
+        14 * Double(clampedBlurPercent(percent)) / 100
+    }
+}
+
 struct LyricsShadowAppearance {
     static let enabledKey = "lyricShadowEnabled"
     static let opacityKey = "lyricShadowOpacityPercent"

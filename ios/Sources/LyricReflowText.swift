@@ -1,7 +1,7 @@
 import SwiftUI
 
-private struct LyricMotionDelayKey: EnvironmentKey {
-    static let defaultValue: TimeInterval = 0
+private struct LyricResizeContextKey: EnvironmentKey {
+    static let defaultValue = LyricResizeContext()
 }
 
 private struct LyricLineMoveDurationKey: EnvironmentKey {
@@ -14,9 +14,9 @@ extension EnvironmentValues {
         set { self[LyricLineMoveDurationKey.self] = newValue }
     }
 
-    var lyricMotionDelay: TimeInterval {
-        get { self[LyricMotionDelayKey.self] }
-        set { self[LyricMotionDelayKey.self] = newValue }
+    var lyricResizeContext: LyricResizeContext {
+        get { self[LyricResizeContextKey.self] }
+        set { self[LyricResizeContextKey.self] = newValue }
     }
 }
 
@@ -80,8 +80,7 @@ private struct ScaledLyricTextLayout: Layout {
 
 @available(iOS 18.0, *)
 private struct AnimatedLyricText: View {
-    @Environment(\.lyricMotionDelay) private var motionDelay
-    @Environment(\.lyricLineMoveDuration) private var moveDuration
+    @Environment(\.lyricResizeContext) private var resizeContext
     let text: Text
     let overflow: CGFloat
     @State private var target: GlyphLayout?
@@ -89,11 +88,15 @@ private struct AnimatedLyricText: View {
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 60, paused: motion.endsAt == nil)) { context in
-            text.textRenderer(ReflowRenderer(target: target, motion: motion, now: context.date, overflow: overflow))
+            text.textRenderer(ReflowRenderer(target: resizeContext.isVisible ? target : nil,
+                                             motion: motion, now: context.date, overflow: overflow))
         }
         .onPreferenceChange(Text.LayoutKey.self) { layouts in
             guard let layout = layouts.first?.layout else { return }
             accept(GlyphLayout(layout))
+        }
+        .onChange(of: resizeContext.isVisible) { _, visible in
+            if !visible { motion = GlyphMotion() }
         }
         .task(id: motion.endsAt) {
             guard let end = motion.endsAt else { return }
@@ -104,9 +107,13 @@ private struct AnimatedLyricText: View {
 
     private func accept(_ measured: GlyphLayout) {
         guard target != measured else { return }
-        if let previous = target {
-            motion = motion.retarget(from: previous, to: measured, now: Date(), delay: motionDelay,
-                                     moveDuration: moveDuration)
+        if let previous = target, resizeContext.isVisible,
+           previous.lineStarts != measured.lineStarts || motion.endsAt != nil {
+            let now = Date()
+            motion = motion.retarget(from: previous, to: measured, now: now,
+                                     timing: resizeContext.timing(at: now))
+        } else {
+            motion = GlyphMotion()
         }
         target = measured
     }
@@ -118,6 +125,11 @@ private struct GlyphLayout: Equatable {
     struct Position: Equatable {
         let origin: CGPoint
         let line: Int
+    }
+
+    private struct LinePair: Hashable {
+        let old: Int
+        let new: Int
     }
 
     let lineStarts: [Text.Layout.CharacterIndex?]
@@ -148,6 +160,36 @@ private struct GlyphLayout: Equatable {
         self.positions = positions
     }
 
+    /// Match continuing visual lines by the native clusters they share. A row
+    /// pushed down wholesale still belongs to the same fragment of the lyric.
+    func continuingLines(from previous: Self) -> [Int: Int] {
+        var overlap: [LinePair: Int] = [:]
+        for (key, position) in positions {
+            guard let prior = previous.positions[key] else { continue }
+            overlap[LinePair(old: prior.line, new: position.line), default: 0] += key.count
+        }
+
+        func preferred(_ candidate: LinePair, over current: LinePair?) -> Bool {
+            guard let current else { return true }
+            let candidateKeepsStart = previous.lineStarts[candidate.old] == lineStarts[candidate.new]
+            let currentKeepsStart = previous.lineStarts[current.old] == lineStarts[current.new]
+            if candidateKeepsStart != currentKeepsStart { return candidateKeepsStart }
+            let candidateOverlap = overlap[candidate, default: 0]
+            let currentOverlap = overlap[current, default: 0]
+            if candidateOverlap != currentOverlap { return candidateOverlap > currentOverlap }
+            if candidate.old != current.old { return candidate.old < current.old }
+            return candidate.new < current.new
+        }
+
+        var bestFromOld: [Int: LinePair] = [:]
+        var bestFromNew: [Int: LinePair] = [:]
+        for pair in overlap.keys {
+            if preferred(pair, over: bestFromOld[pair.old]) { bestFromOld[pair.old] = pair }
+            if preferred(pair, over: bestFromNew[pair.new]) { bestFromNew[pair.new] = pair }
+        }
+        return bestFromOld.compactMapValues { bestFromNew[$0.new] == $0 ? $0.new : nil }
+    }
+
     func matches(_ layout: Text.Layout) -> Bool {
         lineStarts == Self.starts(in: layout)
             && zip(lineWidths, layout).allSatisfy { abs($0 - $1.typographicBounds.width) < 0.75 }
@@ -169,100 +211,102 @@ private struct GlyphAppearance {
 }
 
 @available(iOS 18.0, *)
-private struct GlyphDissolve {
-    private static let maximumBlur: CGFloat = 4
-    private static let blurLead = 0.24
+private struct GlyphTransition {
+    static let maximumBlur: CGFloat = 3
+    static let blurSteps = 3
+    private static let minimumRetargetTime: TimeInterval = 0.065
+
     let from: GlyphAppearance
-    let startedAt: Date
-    let duration: TimeInterval
-    var endsAt: Date { startedAt.addingTimeInterval(duration) }
+    let destination: CGPoint
+    let start: Date
+    let end: Date
+    var wrap: LyricResizeTiming?
+    var hasWrapped = false
 
-    func appearance(at destination: CGPoint, now: Date) -> GlyphAppearance? {
-        let elapsed = max(0, now.timeIntervalSince(startedAt))
-        let progress = elapsed / duration
-        if progress < LyricReflowTiming.hideEnd {
-            let phase = progress / LyricReflowTiming.hideEnd
-            let fade = Self.ease((phase - Self.blurLead) / (1 - Self.blurLead))
-            let blur = from.blur + (Self.maximumBlur - from.blur) * CGFloat(Self.ease(phase))
-            return GlyphAppearance(origin: from.origin, opacity: from.opacity * (1 - fade), blur: blur)
+    func appearance(at now: Date) -> GlyphAppearance {
+        if wrap != nil {
+            let progress = now.timeIntervalSince(start) / LyricResizeTiming.duration
+            if progress < LyricResizeTiming.fadeOutEnd {
+                let phase = progress / LyricResizeTiming.fadeOutEnd
+                let fade = LyricResizeTiming.ease(phase)
+                // Soften the ink while it is still visible.
+                let softening = CGFloat(LyricResizeTiming.ease(phase / 0.72))
+                return GlyphAppearance(origin: from.origin, opacity: from.opacity * (1 - fade),
+                                       blur: from.blur + (Self.maximumBlur - from.blur) * softening)
+            }
+            let phase = (progress - LyricResizeTiming.revealStart) / (1 - LyricResizeTiming.revealStart)
+            let reveal = LyricResizeTiming.ease(phase)
+            let sharpening = LyricResizeTiming.ease((phase - 0.14) / 0.86)
+            return GlyphAppearance(origin: destination, opacity: reveal,
+                                   blur: Self.maximumBlur * CGFloat(1 - sharpening))
         }
-        if progress < LyricReflowTiming.showStart {
-            return GlyphAppearance(origin: destination, opacity: 0, blur: Self.maximumBlur)
-        }
-        guard progress < 1 else { return nil }
-        let phase = Self.ease((progress - LyricReflowTiming.showStart) / (1 - LyricReflowTiming.showStart))
-        return GlyphAppearance(origin: destination, opacity: phase, blur: Self.maximumBlur * CGFloat(1 - phase))
+
+        let progress = LyricResizeTiming.ease(now.timeIntervalSince(start) / end.timeIntervalSince(start))
+        let offset = CGFloat(1 - progress)
+        return GlyphAppearance(origin: CGPoint(x: destination.x + (from.origin.x - destination.x) * offset,
+                                               y: destination.y + (from.origin.y - destination.y) * offset),
+                               opacity: 1 + (from.opacity - 1) * (1 - progress), blur: from.blur * offset)
     }
 
-    private static func ease(_ progress: Double) -> Double {
-        let t = min(1, max(0, progress))
-        return t * t * (3 - 2 * t)
-    }
-}
-
-private struct GlyphSlide {
-    let origin: CGPoint
-    let startedAt: Date
-    let duration: TimeInterval
-    var endsAt: Date { startedAt.addingTimeInterval(duration) }
-
-    func position(at destination: CGPoint, now: Date) -> CGPoint {
-        let remaining = 1 - min(1, max(0, now.timeIntervalSince(startedAt) / duration))
-        let ease = CGFloat(remaining * remaining * remaining)
-        return CGPoint(x: destination.x + (origin.x - destination.x) * ease,
-                       y: destination.y + (origin.y - destination.y) * ease)
+    func retarget(to next: CGPoint, at now: Date) -> Self {
+        if let wrap, now < wrap.reveal, GlyphMotion.hasDisplacement(from: from.origin, to: next) {
+            // The outgoing ink still occupies its old location. The new
+            // placement can change freely before the fragment becomes visible.
+            return Self(from: from, destination: next, start: start, end: end, wrap: wrap, hasWrapped: true)
+        }
+        let sample = appearance(at: now)
+        let nextStart = max(now, start)
+        return Self(from: sample, destination: next, start: nextStart,
+                    end: max(end, nextStart.addingTimeInterval(Self.minimumRetargetTime)), hasWrapped: hasWrapped)
     }
 }
 
 @available(iOS 18.0, *)
 private struct GlyphMotion {
-    var dissolves: [GlyphLayout.Key: GlyphDissolve] = [:]
-    var slides: [GlyphLayout.Key: GlyphSlide] = [:]
+    private let transitions: [GlyphLayout.Key: GlyphTransition]
+    let endsAt: Date?
 
-    var endsAt: Date? {
-        let slideEnd = slides.values.lazy.map(\.endsAt).max()
-        let dissolveEnd = dissolves.values.lazy.map(\.endsAt).max()
-        if let slideEnd, let dissolveEnd { return max(slideEnd, dissolveEnd) }
-        return slideEnd ?? dissolveEnd
+    init(_ transitions: [GlyphLayout.Key: GlyphTransition] = [:]) {
+        self.transitions = transitions
+        endsAt = transitions.values.lazy.map(\.end).max()
     }
 
-    func appearance(_ key: GlyphLayout.Key, at destination: CGPoint, now: Date) -> GlyphAppearance? {
-        if let fading = dissolves[key]?.appearance(at: destination, now: now) { return fading }
-        guard let slide = slides[key], slide.endsAt > now else { return nil }
-        return GlyphAppearance(origin: slide.position(at: destination, now: now))
+    func appearance(_ key: GlyphLayout.Key, now: Date) -> GlyphAppearance? {
+        guard let transition = transitions[key], now < transition.end else { return nil }
+        return transition.appearance(at: now)
     }
 
     func retarget(from previous: GlyphLayout, to target: GlyphLayout, now: Date,
-                  delay: TimeInterval, moveDuration: TimeInterval) -> Self {
-        let start = now.addingTimeInterval(LyricReflowTiming.staggerDelay(span: delay, position: 1))
-        let dissolveDuration = LyricReflowTiming.reflowDuration(moveDuration: moveDuration)
-        let slideDuration = LyricReflowTiming.slideDuration(moveDuration: moveDuration)
-        var nextDissolves: [GlyphLayout.Key: GlyphDissolve] = [:]
-        var nextSlides: [GlyphLayout.Key: GlyphSlide] = [:]
+                  timing: LyricResizeTiming) -> Self {
+        let continuingLines = target.continuingLines(from: previous)
+        var next: [GlyphLayout.Key: GlyphTransition] = [:]
 
         for (key, destination) in target.positions {
             guard let prior = previous.positions[key] else { continue }
-            let dissolving = dissolves[key].flatMap { $0.endsAt > now ? $0 : nil }
-            let sliding = slides[key].flatMap { $0.endsAt > now ? $0 : nil }
-            let visible = sliding?.position(at: prior.origin, now: now) ?? prior.origin
-            if let dissolving {
-                // Keep the reveal deadline when the glyph wraps again during
-                // a drag. Restarting an invisible glyph would extend the gap.
-                nextDissolves[key] = dissolving
-            } else if prior.line != destination.line {
-                nextDissolves[key] = GlyphDissolve(
-                    from: GlyphAppearance(origin: visible), startedAt: start, duration: dissolveDuration
-                )
-            } else if Self.hasDisplacement(from: prior.origin, to: destination.origin) {
-                if Self.hasDisplacement(from: visible, to: destination.origin) {
-                    nextSlides[key] = GlyphSlide(origin: visible, startedAt: start, duration: slideDuration)
-                }
-            } else if let sliding {
-                nextSlides[key] = sliding
+            let running = transitions[key].flatMap { $0.end > now ? $0 : nil }
+            if let running, running.destination == destination.origin {
+                next[key] = running
+                continue
+            }
+            let crossesLine = continuingLines[prior.line] != destination.line
+            let visible = running?.appearance(at: now) ?? GlyphAppearance(origin: prior.origin)
+            guard running != nil || Self.hasDisplacement(from: visible.origin, to: destination.origin) else {
+                continue
+            }
+
+            // A first wrap fades the fragment's native clusters in phase.
+            // A second wrap during the same gesture continues their visible motion.
+            if crossesLine, running?.hasWrapped != true {
+                next[key] = GlyphTransition(from: visible, destination: destination.origin,
+                                            start: timing.start, end: timing.end, wrap: timing, hasWrapped: true)
+            } else if let running {
+                next[key] = running.retarget(to: destination.origin, at: now)
+            } else {
+                next[key] = GlyphTransition(from: visible, destination: destination.origin, start: timing.start,
+                                            end: timing.start.addingTimeInterval(LyricResizeTiming.slideDuration))
             }
         }
-
-        return GlyphMotion(dissolves: nextDissolves, slides: nextSlides)
+        return Self(next)
     }
 
     static func hasDisplacement(from origin: CGPoint, to destination: CGPoint) -> Bool {
@@ -305,6 +349,7 @@ private struct ReflowRenderer: TextRenderer {
             return
         }
         let anchor = layout.first?.origin ?? .zero
+        let blurIncrement = GlyphTransition.maximumBlur / CGFloat(GlyphTransition.blurSteps)
         var blurLayers: [Int: [GlyphDraw]] = [:]
         for line in layout {
             for run in line {
@@ -317,7 +362,7 @@ private struct ReflowRenderer: TextRenderer {
                     let nativeOrigin = slice.typographicBounds.origin
                     let origin = matches ? destination.origin :
                         CGPoint(x: nativeOrigin.x - anchor.x, y: nativeOrigin.y - anchor.y)
-                    let animated = motion.appearance(key, at: destination.origin, now: now)
+                    let animated = motion.appearance(key, now: now)
                     if animated == nil, !GlyphMotion.hasDisplacement(from: origin, to: destination.origin) {
                         context.draw(slice)
                         continue
@@ -329,7 +374,7 @@ private struct ReflowRenderer: TextRenderer {
                     let glyph = GlyphDraw(slice: slice,
                         offset: CGPoint(x: appearance.origin.x - origin.x, y: appearance.origin.y - origin.y),
                         opacity: appearance.opacity)
-                    let blurStep = Int((appearance.blur * 4).rounded())
+                    let blurStep = Int((appearance.blur / blurIncrement).rounded())
                     if blurStep == 0 {
                         glyph.draw(in: context)
                     } else {
@@ -340,7 +385,7 @@ private struct ReflowRenderer: TextRenderer {
         }
         for (step, glyphs) in blurLayers.sorted(by: { $0.key < $1.key }) {
             var filtered = context
-            filtered.addFilter(.blur(radius: CGFloat(step) / 4))
+            filtered.addFilter(.blur(radius: CGFloat(step) * blurIncrement))
             filtered.drawLayer { layer in
                 for glyph in glyphs { glyph.draw(in: layer) }
             }

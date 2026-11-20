@@ -22,6 +22,30 @@ struct ReceiverProgressColorSettings: View {
     }
 }
 
+struct ReceiverBackdropBlurSettings: View {
+    @AppStorage(ReceiverBackdropAppearance.blurKey) private var blurPercent = ReceiverBackdropAppearance.defaultBlurPercent
+
+    var body: some View {
+        let range = ReceiverBackdropAppearance.blurRange
+        let percent = ReceiverBackdropAppearance.clampedBlurPercent(blurPercent)
+        let value = Text(Double(percent) / 100, format: .percent.precision(.fractionLength(0)))
+        VStack(alignment: .leading, spacing: 7) {
+            LabeledContent("背景模糊程度") { value.monospacedDigit() }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(ReceiverBackdropAppearance.clampedBlurPercent(blurPercent)) },
+                    set: { blurPercent = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: 1
+            )
+            .accessibilityLabel("背景模糊程度")
+            .accessibilityValue(value)
+        }
+    }
+}
+
 struct ReceiverLyricsShadowSettings: View {
     @AppStorage(LyricsShadowAppearance.enabledKey) private var enabled = false
     @AppStorage(LyricsShadowAppearance.opacityKey) private var opacity = LyricsShadowAppearance.defaultOpacity

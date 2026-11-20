@@ -773,8 +773,8 @@ private struct ReceiverLyricsView: View {
             guard prior != layout || isSettlingLayout else { return }
             if !reduceMotion && !voiceOver {
                 isSettlingLayout = true
-                let reflowDuration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
-                do { try await Task.sleep(for: .seconds(reflowDuration + staggerSpan + 0.05)) }
+                let resizeDelay = LyricResizeTiming.staggerSpan(playbackSpan: staggerSpan)
+                do { try await Task.sleep(for: .seconds(LyricResizeTiming.duration + resizeDelay + 0.05)) }
                 catch { return }
             }
             isSettlingLayout = false
@@ -902,33 +902,43 @@ private struct LyricRowStagger: ViewModifier {
     let viewportHeight: CGFloat
     let wave: LyricFollowWave?
 
-    @State private var rank: Int?
+    private struct Location: Equatable {
+        let rank: Int
+        let isVisible: Bool
+    }
+
+    @State private var location = Location(rank: 0, isVisible: true)
     @State private var followRank: Int?
+    @State private var resizeClock = LyricResizeClock()
 
     func body(content: Content) -> some View {
         let steps = Double(LyricReflowTiming.viewportSteps)
-        let position = Double(rank ?? 0) / steps
-        let delay = LyricReflowTiming.staggerDelay(span: span, position: position)
+        let position = Double(location.rank) / steps
+        let resize = LyricResizeContext(isVisible: location.isVisible,
+                                       delay: LyricResizeTiming.staggerSpan(playbackSpan: span) * position,
+                                       clock: resizeClock)
         let activeWave = span > 0 ? wave : nil
-        let followPosition = Double(followRank ?? rank ?? 0) / steps
+        let followPosition = Double(followRank ?? location.rank) / steps
         TimelineView(.animation(minimumInterval: 1.0 / 60, paused: activeWave == nil)) { context in
             content
-                .environment(\.lyricMotionDelay, delay)
+                .environment(\.lyricResizeContext, resize)
                 .offset(y: activeWave?.offset(at: context.date, position: followPosition) ?? 0)
         }
         .onChange(of: activeWave != nil, initial: true) { _, isFollowing in
             // Keep each row's delay stable while its viewport position is changing.
-            followRank = isFollowing ? rank : nil
+            followRank = isFollowing ? location.rank : nil
         }
-        .onGeometryChange(for: Int.self) { geometry in
-            guard span > 0, viewportHeight.isFinite, viewportHeight > 0 else { return 0 }
-            let center = geometry.frame(in: .named(viewport)).midY
-            guard center.isFinite else { return 0 }
-            let position = min(1, max(0, center / viewportHeight))
-            return Int((position * CGFloat(LyricReflowTiming.viewportSteps)).rounded())
-        } action: { measuredRank in
-            rank = measuredRank
-            if activeWave != nil, followRank == nil { followRank = measuredRank }
+        .onGeometryChange(for: Location.self) { geometry in
+            let frame = geometry.frame(in: .named(viewport))
+            guard viewportHeight.isFinite, viewportHeight > 0, frame.midY.isFinite else {
+                return Location(rank: 0, isVisible: true)
+            }
+            let position = span > 0 ? min(1, max(0, frame.midY / viewportHeight)) : 0
+            let rank = Int((position * CGFloat(LyricReflowTiming.viewportSteps)).rounded())
+            return Location(rank: rank, isVisible: frame.maxY > 0 && frame.minY < viewportHeight)
+        } action: { measured in
+            location = measured
+            if activeWave != nil, followRank == nil { followRank = measured.rank }
         }
     }
 }
@@ -938,7 +948,7 @@ struct PlayerTextHeightMotion: ViewModifier {
     let stagesEnabled: Bool
     let animateContentChanges: Bool
     var verticalCurve: UnitCurve? = nil
-    @Environment(\.lyricMotionDelay) private var delay
+    @Environment(\.lyricResizeContext) private var resizeContext
     @Environment(\.lyricLineMoveDuration) private var lineMoveDuration
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -958,6 +968,9 @@ struct PlayerTextHeightMotion: ViewModifier {
                     .frame(height: motion?.height(at: context.date, curve: verticalCurve) ?? staticHeight,
                            alignment: .topLeading)
             }
+            .onChange(of: resizeContext.isVisible) { _, visible in
+                if !visible { settleHeight() }
+            }
             .task(id: motion?.end) {
                 guard let end = motion?.end else { return }
                 do { try await Task.sleep(for: .seconds(max(0, end.timeIntervalSinceNow))) } catch { return }
@@ -976,6 +989,10 @@ struct PlayerTextHeightMotion: ViewModifier {
     private func updateHeight(_ size: CGSize) {
         let previous = previousSize
         previousSize = size
+        guard resizeContext.isVisible else {
+            settleHeight()
+            return
+        }
         guard size.height != previous?.height else { return }
         let isWrap = previous.map {
             (animateContentChanges || $0.width != size.width)
@@ -985,24 +1002,27 @@ struct PlayerTextHeightMotion: ViewModifier {
         let visible = motion?.height(at: now, curve: verticalCurve) ?? staticHeight ?? size.height
 
         if isWrap {
-            if #available(iOS 18.0, *), stagesEnabled {
-                let duration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
-                motion = RowHeightMotion(
-                    from: visible, target: size.height,
-                    start: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowStart),
-                    end: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowEnd)
-                )
+            if #available(iOS 18.0, *), stagesEnabled, resizeContext.clock != nil {
+                let window = resizeContext.timing(at: now).heightWindow(expanding: size.height > visible)
+                motion = RowHeightMotion(from: visible, target: size.height,
+                                         start: max(now, window.lowerBound), end: window.upperBound)
             } else {
-                let duration = 0.22 * lineMoveDuration / LyricReflowTiming.defaultMoveDuration
+                let duration = resizeContext.clock == nil
+                    ? 0.22 * lineMoveDuration / LyricReflowTiming.defaultMoveDuration
+                    : LyricResizeTiming.slideDuration
                 motion = RowHeightMotion(from: visible, target: size.height,
                                          start: now, end: now.addingTimeInterval(duration))
             }
         } else if let current = motion, now < current.end {
             motion = RowHeightMotion(from: visible, target: size.height, start: max(now, current.start), end: current.end)
         } else {
-            staticHeight = size.height
-            motion = nil
+            settleHeight()
         }
+    }
+
+    private func settleHeight() {
+        staticHeight = previousSize?.height
+        motion = nil
     }
 }
 
