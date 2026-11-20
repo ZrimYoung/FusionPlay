@@ -719,6 +719,21 @@ fn matches_expected_track(state: &Snapshot, id: &str, title: &str) -> bool {
     else { state.track_id.is_empty() && state.title == title }
 }
 
+/// Apple presentation can opt out of title correction without changing the
+/// SDK event contract or existing Windows/Android legacy-label consumers.
+fn media_info_label<'a>(value: &'a Value, key: &str) -> (Option<&'a str>, bool) {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let raw_key = match key {
+            "title" => Some("raw_title"), "artist" => Some("raw_artist"), "album" => Some("raw_album"), _ => None,
+        };
+        if let Some(raw) = raw_key.and_then(|key| value[key].as_str()) {
+            return (Some(raw), true);
+        }
+    }
+    (value[key].as_str(), false)
+}
+
 fn reduce(state: &mut Snapshot, value: &Value) {
     let text = |key| value[key].as_str().unwrap_or("").to_owned();
     match value["event"].as_str().unwrap_or("") {
@@ -801,12 +816,15 @@ fn reduce(state: &mut Snapshot, value: &Value) {
             let changed_lyrics = incoming_lyrics.is_some_and(|text| !state.lyrics_text.is_empty() && text != state.lyrics_text);
             let projected = matches!(value["track_transition"].as_str(), Some("same" | "new"));
             let fallback = !projected && value["track_id_source"].as_str().is_some_and(|source| source != "explicit");
-            let same_metadata = !state.title.is_empty() && value["title"].as_str() == Some(state.title.as_str())
+            let same_metadata = !state.title.is_empty() && media_info_label(value, "title").0 == Some(state.title.as_str())
                 && [("artist", &state.artist), ("album", &state.album)].into_iter().all(|(key, existing)| {
-                    value[key].as_str().is_none_or(|text| text.is_empty() || existing.is_empty() || text == existing)
+                    media_info_label(value, key).0.is_none_or(|text| text.is_empty() || existing.is_empty() || text == existing)
                 });
-            let caption = !projected && !changed_lyrics && (fallback || id.is_empty() || id == state.track_id)
-                && fusionplay_miplay_sdk::protocol::is_lyric_caption(value["title"].as_str().unwrap_or(""), &state.lyrics_text);
+            // Existing non-Apple Host clients still depend on cached LRC
+            // labels; only Apple consumes the separate display projection.
+            let legacy_labels = !cfg!(any(target_os = "macos", target_os = "ios")) || !projected;
+            let caption = legacy_labels && !changed_lyrics && (fallback || id.is_empty() || id == state.track_id)
+                && fusionplay_miplay_sdk::protocol::is_lyric_caption(media_info_label(value, "title").0.unwrap_or(""), &state.lyrics_text);
             // A phone can omit id/mLrc in its per-line caption refresh. Keep the
             // current identity rather than treating the caption hash as a song.
             if fallback && !state.track_id.is_empty() && !changed_lyrics && (same_metadata || caption
@@ -837,12 +855,13 @@ fn reduce(state: &mut Snapshot, value: &Value) {
                 if key == "artist" && value["artist_is_stale"] == true {
                     continue;
                 }
-                let caption_header = if caption {
+                let (source_label, raw_label) = media_info_label(value, key);
+                let caption_header = if caption && !raw_label {
                     match key { "title" => Some("ti"), "artist" => Some("ar"), "album" => Some("al"), _ => None }
                 } else { None };
                 if let Some(header) = caption_header {
                     if let Some(canonical) = fusionplay_miplay_sdk::protocol::lyric_header(&caption_lyrics, header) { *field = canonical.into(); }
-                } else if let Some(value) = value[key].as_str().filter(|v| !v.is_empty()) {
+                } else if let Some(value) = source_label.filter(|v| !v.is_empty()) {
                     *field = value.into();
                 }
             }
@@ -983,6 +1002,84 @@ fn write_diagnostic(dir: &Path, event: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn projected_metadata_pipeline_keeps_raw_fields_and_track_state() {
+        let events: Vec<Value> = if let Ok(path) = std::env::var("FUSIONPLAY_PROJECTED_METADATA_FIXTURE") {
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+        } else {
+            serde_json::from_value(serde_json::json!([
+                {"event":"media_info","track_id":"wire-one","track_transition":"new",
+                 "title":"Night Walk","artist":"Header Artist","album":"Header Album",
+                 "raw_title":"we are going home","raw_artist":"Raw Artist","raw_album":"Raw Album",
+                 "display_title":"Night Walk","display_artist":"Header Artist","display_album":"Raw Album",
+                 "lyrics_text":"[ti:Night Walk]\n[00:10]we are going home","duration_ms":120000},
+                {"event":"media_info","track_id":"wire-one","track_transition":"same","title":"Night Walk",
+                 "artist":"Header Artist","album":"Header Album","raw_title":"home","raw_artist":"","raw_album":"",
+                 "display_title":"Night Walk"},
+                {"event":"media_info","track_id":"wire-two","track_transition":"new","title":"Home",
+                 "artist":"Next Artist","album":"Next Album","display_title":"Home","display_album":"Next Album","duration_ms":240000},
+                {"event":"media_info","track_id":"wire-rich","track_transition":"new",
+                 "title":"Night Walk (Live)","artist":"Alpha/Beta","album":"Sender Album",
+                 "raw_title":"Night Walk (Live)","raw_artist":"Alpha/Beta","raw_album":"Sender Album",
+                 "display_title":"Night Walk (Live)","display_album":"Sender Album",
+                 "lyrics_text":"[ti:Night Walk]\n[ar:Alpha]\n[00:10]we are heading home","duration_ms":120000,"position_ms":0},
+                {"event":"media_info","track_id":"wire-rich","track_transition":"same",
+                 "title":"Night Walk","artist":"Alpha","album":"Header Album",
+                 "raw_title":"we are heading home","raw_artist":"Alpha","raw_album":"",
+                 "display_title":"Night Walk (Live)","display_artist":"Alpha/Beta","display_album":"Sender Album",
+                 "lyrics_text":"[ti:Night Walk]\n[ar:Alpha]\n[00:10]we are heading home","duration_ms":120000,"position_ms":10000}
+            ])).unwrap()
+        };
+        assert_eq!(events.len(), 5);
+        let mut state = Snapshot::default();
+        state.controls_available = true;
+        reduce(&mut state, &events[0]);
+        let apple = cfg!(any(target_os = "macos", target_os = "ios"));
+        let expected = if apple { ("we are going home", "Raw Artist", "Raw Album") }
+            else { ("Night Walk", "Header Artist", "Header Album") };
+        assert_eq!((&*state.title, &*state.artist, &*state.album), expected);
+        assert_eq!(state.display_title.as_deref(), Some("Night Walk"));
+        assert_eq!(state.display_artist.as_deref(), Some("Header Artist"));
+        assert_eq!(state.display_album.as_deref(), Some("Raw Album"));
+        reduce(&mut state, &events[1]);
+        assert_eq!(state.title, if apple { "home" } else { "Night Walk" });
+        assert_eq!(state.artist, if apple { "Raw Artist" } else { "Header Artist" });
+        assert_eq!(state.album, if apple { "Raw Album" } else { "Header Album" });
+        assert_eq!(state.track_id, "wire-one");
+        assert_eq!(state.duration_ms, Some(120000));
+        assert!(!state.lyrics_text.is_empty());
+        reduce(&mut state, &events[2]);
+        assert_eq!((&*state.title, &*state.artist, &*state.album), ("Home", "Next Artist", "Next Album"));
+        assert_eq!(state.track_id, "wire-two");
+        assert_eq!(state.display_title.as_deref(), Some("Home"));
+        assert_eq!(state.display_artist, None);
+        assert_eq!(state.display_album.as_deref(), Some("Next Album"));
+        assert!(state.lyrics_text.is_empty());
+        reduce(&mut state, &events[3]);
+        reduce(&mut state, &events[4]);
+        assert_eq!(state.track_id, "wire-rich");
+        assert_eq!(state.title, if apple { "we are heading home" } else { "Night Walk" });
+        assert_eq!(state.artist, "Alpha");
+        assert_eq!(state.album, if apple { "Sender Album" } else { "Header Album" });
+        assert_eq!(state.display_title.as_deref(), Some("Night Walk (Live)"));
+        assert_eq!(state.display_artist.as_deref(), Some("Alpha/Beta"));
+        assert_eq!(state.display_album.as_deref(), Some("Sender Album"));
+        assert_eq!(state.position_ms, Some(10000));
+    }
+
+    #[test]
+    fn raw_labels_are_opt_in_and_empty_raw_does_not_fall_back_to_legacy() {
+        let value = serde_json::json!({"title":"Canonical", "raw_title":"", "artist":"Header Artist", "raw_artist":"Raw Artist"});
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            assert_eq!(media_info_label(&value, "title"), (Some(""), true));
+            assert_eq!(media_info_label(&value, "artist"), (Some("Raw Artist"), true));
+        } else {
+            assert_eq!(media_info_label(&value, "title"), (Some("Canonical"), false));
+            assert_eq!(media_info_label(&value, "artist"), (Some("Header Artist"), false));
+        }
+        assert_eq!(media_info_label(&serde_json::json!({"title":"Legacy"}), "title"), (Some("Legacy"), false));
+    }
+
     #[test]
     fn projected_lyrics_title_keeps_raw_and_resets_with_the_track() {
         let mut state = Snapshot::default();

@@ -4084,6 +4084,58 @@ mod tests {
     }
 
     #[test]
+    fn projected_metadata_wire_pipeline_fixture() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let first = hub.project_media_info(41, source, br#"{"mAudioId":"wire-one","mTitle":"we are going home","mArtist":"Raw Artist","mAlbum":"Raw Album","mDuration":120000,"mPosition":10000,"lyrics":"[ti:Night Walk]\n[ar:Header Artist]\n[al:Header Album]\n[00:10]we are going home\n[00:11]home"}"#).unwrap();
+        let (outgoing, _incoming) = mpsc::channel();
+        hub.activate(42, source, outgoing, control_notification_sequence());
+        let caption = hub.project_media_info(41, source,
+            br#"{"mTitle":"home","mPosition":11000,"lyrics":"[ti:Night Walk]\n[ar:Header Artist]\n[al:Header Album]\n[00:10]we are going home\n[00:11]home"}"#).unwrap();
+        let next = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-two","mTitle":"Home","mArtist":"Next Artist","mAlbum":"Next Album","mDuration":240000,"mPosition":0}"#).unwrap();
+        // Legacy reducers still see the same canonical labels across these
+        // caption updates; only the additive raw fields retain phone text.
+        assert_eq!(first["title"], "Night Walk");
+        assert_eq!(first["artist"], "Header Artist");
+        assert_eq!(first["album"], "Header Album");
+        assert_eq!(first["raw_title"], "we are going home");
+        assert_eq!(first["raw_artist"], "Raw Artist");
+        assert_eq!(first["raw_album"], "Raw Album");
+        assert_eq!(first["display_title"], "Night Walk");
+        assert_eq!(first["display_artist"], "Header Artist");
+        assert_eq!(first["display_album"], "Raw Album");
+        assert_eq!(caption["title"], first["title"]);
+        assert_eq!(caption["artist"], first["artist"]);
+        assert_eq!(caption["album"], first["album"]);
+        assert_eq!(caption["raw_title"], "home");
+        assert_eq!(caption["track_id"], "wire-one");
+        assert_eq!(caption["track_transition"], "same");
+        assert_eq!(next["title"], "Home");
+        assert_eq!(next["track_transition"], "new");
+        assert_eq!(next["display_album"], "Next Album");
+        let rich_first = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-rich","mTitle":"Night Walk (Live)","mArtist":"Alpha/Beta","mAlbum":"Sender Album","mDuration":120000,"mPosition":0,"lyrics":"[ti:Night Walk]\n[ar:Alpha]\n[al:Header Album]\n[00:10]we are heading home"}"#).unwrap();
+        let rich_caption = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-rich","mTitle":"we are heading home","mArtist":"Alpha","mAlbum":"","mDuration":120000,"mPosition":10000,"lyrics":"[ti:Night Walk]\n[ar:Alpha]\n[al:Header Album]\n[00:10]we are heading home"}"#).unwrap();
+        assert_eq!(rich_caption["track_id"], rich_first["track_id"]);
+        assert_eq!(rich_caption["track_transition"], "same");
+        assert_eq!(rich_caption["display_title"], "Night Walk (Live)");
+        assert_eq!(rich_caption["display_artist"], "Alpha/Beta");
+        assert_eq!(rich_caption["display_album"], "Sender Album");
+        assert_eq!(rich_caption["raw_title"], "we are heading home");
+        assert_eq!(rich_caption["raw_artist"], "Alpha");
+        assert_eq!(rich_caption["title"], "Night Walk");
+        assert_eq!(rich_caption["artist"], "Alpha");
+        assert_eq!(rich_caption["album"], "Header Album");
+        // The integration script passes these actual production-pipeline
+        // events to the Host reducer test without adding a product test API.
+        if let Ok(path) = std::env::var("FUSIONPLAY_PROJECTED_METADATA_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec(&[first, caption, next, rich_first, rich_caption]).unwrap()).unwrap();
+        }
+    }
+
+    #[test]
     fn pre_open_metadata_follows_its_source_across_companion_and_media_routes() {
         let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
         let source = Ipv4Addr::LOCALHOST.into();

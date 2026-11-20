@@ -496,6 +496,7 @@ dependencies = [
  "if-addrs",
  "libc",
  "md-5",
+ "objc2-core-foundation",
  "oboe",
  "p256",
  "rand",
