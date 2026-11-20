@@ -245,12 +245,14 @@ private struct GlyphMotion {
             let dissolving = dissolves[key].flatMap { $0.endsAt > now ? $0 : nil }
             let sliding = slides[key].flatMap { $0.endsAt > now ? $0 : nil }
             let visible = sliding?.position(at: prior.origin, now: now) ?? prior.origin
-            if prior.line != destination.line {
-                let from = dissolving?.appearance(at: prior.origin, now: now) ?? GlyphAppearance(origin: visible)
-                nextDissolves[key] = GlyphDissolve(from: from, startedAt: start, duration: dissolveDuration)
-            } else if let dissolving {
-                // Another glyph can wrap without restarting this glyph's fade.
+            if let dissolving {
+                // Keep the reveal deadline when the glyph wraps again during
+                // a drag. Restarting an invisible glyph would extend the gap.
                 nextDissolves[key] = dissolving
+            } else if prior.line != destination.line {
+                nextDissolves[key] = GlyphDissolve(
+                    from: GlyphAppearance(origin: visible), startedAt: start, duration: dissolveDuration
+                )
             } else if Self.hasDisplacement(from: prior.origin, to: destination.origin) {
                 if Self.hasDisplacement(from: visible, to: destination.origin) {
                     nextSlides[key] = GlyphSlide(origin: visible, startedAt: start, duration: slideDuration)

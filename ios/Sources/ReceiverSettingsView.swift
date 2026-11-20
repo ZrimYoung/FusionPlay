@@ -220,6 +220,7 @@ struct ReceiverSettingsView: View {
                     }
                 }
                 lyricScaleControl
+                ReceiverLyricsShadowSettings()
                 lyricMoveControl
                 Toggle("修正歌词标题", isOn: $correctLyricTitles)
                     .onChange(of: correctLyricTitles) { _, _ in model.refreshDisplayPresentation() }

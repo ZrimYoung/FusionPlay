@@ -22,6 +22,42 @@ struct ReceiverProgressColorSettings: View {
     }
 }
 
+struct ReceiverLyricsShadowSettings: View {
+    @AppStorage(LyricsShadowAppearance.enabledKey) private var enabled = false
+    @AppStorage(LyricsShadowAppearance.opacityKey) private var opacity = LyricsShadowAppearance.defaultOpacity
+    @AppStorage(LyricsShadowAppearance.spreadKey) private var spread = LyricsShadowAppearance.defaultSpread
+
+    var body: some View {
+        Toggle("歌词投影", isOn: $enabled)
+        if enabled {
+            let percent = LyricsShadowAppearance.clamp(opacity, to: LyricsShadowAppearance.opacityRange)
+            let points = LyricsShadowAppearance.clamp(spread, to: LyricsShadowAppearance.spreadRange)
+            control("投影浓度", value: $opacity, range: LyricsShadowAppearance.opacityRange,
+                    readout: Text(Double(percent) / 100, format: .percent.precision(.fractionLength(0))))
+            control("投影弥散", value: $spread, range: LyricsShadowAppearance.spreadRange,
+                    readout: Text(verbatim: "\(points) pt"))
+        }
+    }
+
+    private func control(_ label: LocalizedStringKey, value: Binding<Int>,
+                         range: ClosedRange<Int>, readout: Text) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            LabeledContent(label) { readout.monospacedDigit() }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(LyricsShadowAppearance.clamp(value.wrappedValue, to: range)) },
+                    set: { value.wrappedValue = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: 1
+            )
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(readout)
+        }
+    }
+}
+
 struct ReceiverFontSettingsSection: View {
     @AppStorage(ReceiverTypography.familyKey) private var family = ""
     @State private var showingFonts = false

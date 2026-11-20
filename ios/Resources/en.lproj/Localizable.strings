@@ -77,6 +77,9 @@
 "始终开启" = "Always Show";
 "始终关闭" = "Always Hide";
 "歌词字号" = "Lyrics Text Size";
+"歌词投影" = "Lyrics Shadow";
+"投影浓度" = "Shadow Opacity";
+"投影弥散" = "Shadow Blur";
 "同步诊断" = "Sync Diagnostics";
 "输出设备" = "Output Device";
 "尚未输出" = "No Audio Output Yet";
