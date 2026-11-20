@@ -59,6 +59,8 @@
 "始终显示顶部按钮" = "Always Show Top Controls";
 "允许歌名和艺人信息换行" = "Wrap Song Details";
 "窄窗左右分页" = "Swipe Between Pages in Narrow Windows";
+"查看歌词" = "View Lyrics";
+"返回播放页" = "Back to Player";
 "歌词页显示小封面" = "Show Artwork on Lyrics Page";
 "歌词页显示歌曲信息" = "Show Song Details on Lyrics Page";
 "播放页" = "Player Page";

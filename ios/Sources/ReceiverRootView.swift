@@ -107,7 +107,9 @@ struct ReceiverRootView: View {
         .preferredColorScheme(.dark)
         .receiverTypography()
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
-        .onChange(of: lyricsDisplayMode) { _, _ in lyricVisibilityOverride = nil }
+        .onChange(of: lyricsDisplayMode) { _, mode in
+            if mode == .never { lyricVisibilityOverride = nil }
+        }
         .onChange(of: trackKey) { _, _ in
             if !model.lyricsLoading || lyricVisibilityOverride?.visible != false {
                 lyricVisibilityOverride = nil
@@ -250,13 +252,21 @@ struct ReceiverRootView: View {
         let showsHeader = mode == .paged && (lyricsPageShowsArtwork || hasTrackInfo)
 
         return VStack(spacing: 0) {
-            CompactLyricsTrackHeader(
-                artwork: model.artwork,
-                title: title,
-                subtitle: subtitle,
-                showsArtwork: lyricsPageShowsArtwork,
-                showsTrackInfo: lyricsPageShowsTrackInfo
-            )
+            Button { selectPage(.player) } label: {
+                CompactLyricsTrackHeader(
+                    artwork: model.artwork,
+                    title: title,
+                    subtitle: subtitle,
+                    showsArtwork: lyricsPageShowsArtwork,
+                    showsTrackInfo: lyricsPageShowsTrackInfo
+                )
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("返回播放页")
+            .accessibilityValue(Text(verbatim: hasTrackInfo ? [title, subtitle].filter { !$0.isEmpty }.joined(separator: ", ") : ""))
+            .accessibilityIdentifier("player.lyrics.return")
             .fixedSize(horizontal: false, vertical: true)
             .padding(.bottom, 12)
             .opacity(showsHeader ? 1 : 0)
@@ -311,11 +321,10 @@ struct ReceiverRootView: View {
                         } else {
                             let visible = !lyricsSelected
                             withAnimation(displayAnimation) {
-                                if lyricsDisplayMode == .automatic {
-                                    lyricVisibilityOverride = (trackKey, visible)
-                                } else {
-                                    lyricsDisplayMode = visible ? .always : .never
+                                if lyricsDisplayMode == .never {
+                                    lyricsDisplayMode = .automatic
                                 }
+                                lyricVisibilityOverride = (trackKey, visible)
                             }
                         }
                     }
@@ -437,6 +446,9 @@ struct ReceiverRootView: View {
     private func playbackDetails(paged: Bool, compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 13) {
             PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
+            if paged {
+                lyricPageLink
+            }
             if showProgress {
                 ReceiverProgressView(model: model, prioritizesScrubbing: paged)
                     .transition(.opacity)
@@ -451,6 +463,33 @@ struct ReceiverRootView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var lyricPageLink: some View {
+        let document = model.lyrics
+        let live = selectedPage == .player && model.snapshot?.phase == .playing && document.isTimed
+        return TimelineView(.animation(minimumInterval: 0.25, paused: !live)) { _ in
+            let active = model.displayedPositionMs.flatMap { document.activeLineIndex(at: $0) }
+            let current = active.map { document.lines[$0].text }
+            let caption = current.map { $0.isEmpty ? "•••" : $0.replacingOccurrences(of: "\n", with: " ") }
+            Button { selectPage(.lyrics) } label: {
+                Group {
+                    if model.lyricsLoading { Text("正在载入歌词…") }
+                    else if let caption { Text(verbatim: caption) }
+                    else { Text("查看歌词") }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.76))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看歌词")
+            .accessibilityValue(Text(verbatim: caption ?? ""))
+            .accessibilityIdentifier("player.lyrics.open")
+        }
+        .accessibilityHidden(selectedPage != .player)
     }
 
     private func cover(side: CGFloat) -> some View {

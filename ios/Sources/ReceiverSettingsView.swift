@@ -224,7 +224,7 @@ struct ReceiverSettingsView: View {
             Section("歌词") {
                 let visibility: LocalizedStringKey = isPad && narrowPlayerPaging ? "非分页时显示歌词" : "显示歌词"
                 Picker(visibility, selection: $lyricsDisplayMode) {
-                    ForEach(LyricsDisplayMode.allCases, id: \.self) { mode in
+                    ForEach([LyricsDisplayMode.automatic, .never], id: \.self) { mode in
                         Text(LocalizedStringKey(mode.title)).tag(mode)
                     }
                 }
