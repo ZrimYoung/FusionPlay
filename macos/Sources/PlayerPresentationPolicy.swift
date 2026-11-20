@@ -83,14 +83,32 @@ struct PagedPlaybackLayout: Equatable {
     let artworkSide: CGFloat
     let contentHeight: CGFloat
     let topInset: CGFloat = 44
-    let bottomInset: CGFloat = 20
-    init(size: CGSize, metadataHeight: CGFloat, showsProgress: Bool, showsTransport: Bool) {
-        horizontalInset = size.width < 320 ? 18 : 24
-        contentWidth = max(0, size.width - horizontalInset * 2)
-        let details = metadataHeight + 8 + 18 + (showsProgress ? 48 : 0)
-            + (showsTransport ? 52 : 0) + 48
-        let availableArtworkHeight = size.height - topInset - bottomInset - details
-        artworkSide = min(contentWidth, max(120, availableArtworkHeight))
-        contentHeight = topInset + artworkSide + details + bottomInset
+    let bottomInset: CGFloat = 44
+    let viewportHeight: CGFloat
+
+    static func maximumContentWidth(for width: CGFloat) -> CGFloat {
+        let inset = width < 320 ? CGFloat(24) : min(48, 32 + (width - 320) * 0.04)
+        return max(0, width - inset * 2)
+    }
+    init(size: CGSize, metadataHeight: CGFloat, showsProgress: Bool, showsTransport: Bool,
+         metadataHeightForWidth: ((CGFloat) -> CGFloat)? = nil) {
+        viewportHeight = max(0, size.height - topInset - bottomInset)
+        let maximum = Self.maximumContentWidth(for: size.width)
+        // Keep one centered column for cover, text, lyric and progress. Very
+        // short windows scroll rather than squeezing that column unreadably.
+        let minimum = min(maximum, 180)
+        let controls: CGFloat = 18 + 12 + 34 + (showsProgress ? 48 : 0) + (showsTransport ? 52 : 0)
+        var column = maximum
+        var measured = metadataHeightForWidth?(column) ?? metadataHeight
+        for _ in 0..<4 {
+            let next = max(minimum, min(column, viewportHeight - controls - measured))
+            if abs(next - column) < 0.5 { break }
+            column = next
+            measured = metadataHeightForWidth?(column) ?? metadataHeight
+        }
+        contentWidth = column
+        artworkSide = column
+        horizontalInset = max(0, (size.width - column) / 2)
+        contentHeight = topInset + column + controls + measured + bottomInset
     }
 }

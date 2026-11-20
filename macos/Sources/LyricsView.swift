@@ -11,6 +11,7 @@ struct LyricsView: View {
     let compact: Bool
     let canSeek: Bool
     var presentationActive = true
+    var geometryInteractionActive = false
     let seek: (UInt64) -> Void
 #if FUSIONPLAY_UI_CHECKS
     var checkReduceMotion: Bool? = nil
@@ -40,6 +41,8 @@ struct LyricsView: View {
     @State private var needsPresentationFollow = false
     @State private var followWave: LyricsFollowWave?
     @StateObject private var viewportAnchor = LyricsViewportAnchor()
+
+    private var resizing: Bool { liveResizing || geometryInteractionActive }
 
     private var lineMoveDuration: TimeInterval {
         LyricsStaggerTiming.moveDuration(milliseconds: lyricLineMoveMilliseconds)
@@ -121,6 +124,7 @@ struct LyricsView: View {
                     .background {
                         LyricsScrollActivity(anchor: viewportAnchor, activeID: activeID,
                                              browsing: browsing, anchoringEnabled: !voiceOver && (presentationActive || browsing),
+                                             geometryInteractionActive: geometryInteractionActive,
                                              onScroll: { userBeganBrowsing() }, onLiveResize: { resizing in
                             guard liveResizing != resizing else { return }
                             liveResizing = resizing
@@ -145,7 +149,7 @@ struct LyricsView: View {
                     .onChange(of: activeID) { previous, _ in
                         // VoiceOver owns its reading position; do not scroll its
                         // focused line away when playback advances.
-                        if !browsing && !dragging && !voiceOver && !liveResizing && !viewportSettling {
+                        if !browsing && !dragging && !voiceOver && !resizing && !viewportSettling {
                             follow(proxy, animated: true, reason: "playback", previousID: previous)
                         }
                     }
@@ -174,19 +178,20 @@ struct LyricsView: View {
                             do { try await Task.sleep(for: .milliseconds(20)) }
                             catch { return }
                         }
-                        guard !Task.isCancelled, presentationActive, !liveResizing else { return }
+                        guard !Task.isCancelled, presentationActive, !resizing else { return }
                         presentationFollowRequest = presentationRevision
                     }
                     .onChange(of: presentationFollowRequest) { _, revision in
                         guard revision == presentationRevision, presentationActive, needsPresentationFollow,
-                              !viewportSettling, !liveResizing else { return }
+                              !viewportSettling, !resizing else { return }
                         needsPresentationFollow = false
                         viewportAnchor.cancel()
                         follow(proxy, animated: false, reason: "presentation")
                     }
+                    .onChange(of: geometryInteractionActive) { _, _ in viewportChanged() }
                     .onChange(of: geometry.size) { _, _ in viewportChanged() }
                     .task(id: viewportRevision) {
-                        guard viewportRevision > 0, presentationActive, !liveResizing else { return }
+                        guard viewportRevision > 0, presentationActive, !resizing else { return }
                         // Let the final word reflow and row-height move finish before
                         // restoring the reading anchor, as on the iPad player.
                         let settle = reduceMotion ? 0.18 : LyricsReflowText.transitionDuration + staggerSpan + 0.05
@@ -200,14 +205,14 @@ struct LyricsView: View {
                             do { try await Task.sleep(for: .milliseconds(20)) }
                             catch { return }
                         }
-                        guard !Task.isCancelled, presentationActive, !liveResizing else { return }
+                        guard !Task.isCancelled, presentationActive, !resizing else { return }
                         viewportSettling = false
                         // Trigger a fresh view callback after the quiet period;
                         // an async task's captured playback position can be old.
                         viewportFollowRequest = viewportRevision
                     }
                     .onChange(of: viewportFollowRequest) { _, revision in
-                        guard revision == viewportRevision, presentationActive, !viewportSettling, !liveResizing else { return }
+                        guard revision == viewportRevision, presentationActive, !viewportSettling, !resizing else { return }
                         let presentationFollow = needsPresentationFollow
                         let preserved: Bool
                         if presentationFollow { viewportAnchor.cancel(); preserved = false }
@@ -224,14 +229,14 @@ struct LyricsView: View {
                     }
                     .onChange(of: document) { _, _ in
                         DispatchQueue.main.async {
-                            if !liveResizing && !viewportSettling { follow(proxy, animated: false, reason: "document") }
+                            if !resizing && !viewportSettling { follow(proxy, animated: false, reason: "document") }
                         }
                     }
                     .onChange(of: followRequestRevision) { _, revision in
                         guard let revision, revision == browsingRevision, !browsing, !voiceOver else { return }
                         // Resolve the target from the latest playback value,
                         // not the view captured before the inactivity delay.
-                        guard !liveResizing && !viewportSettling else { return }
+                        guard !resizing && !viewportSettling else { return }
                         follow(proxy, animated: true, reason: "resume")
                     }
                     .task(id: browsingRevision) {
@@ -240,7 +245,7 @@ struct LyricsView: View {
                         catch { return }
                         // A held drag may be stationary for longer than the
                         // delay. Its end starts a fresh inactivity countdown.
-                        guard !Task.isCancelled, !dragging, !liveResizing, !viewportSettling else { return }
+                        guard !Task.isCancelled, !dragging, !resizing, !viewportSettling else { return }
                         browsing = false
                         followRequestRevision = browsingRevision
                     }
@@ -384,7 +389,8 @@ struct LyricsView: View {
             if !browsing { viewportAnchor.cancel() }
             return
         }
-        viewportAnchor.configure(activeID: activeID, browsing: browsing, enabled: !voiceOver)
+        viewportAnchor.configure(activeID: activeID, browsing: browsing, enabled: !voiceOver,
+                                 synchronousGeometry: geometryInteractionActive)
         viewportAnchor.beginIfNeeded(retryWhenReady: true)
         if !viewportSettling {
             if let wave = followWave {
@@ -420,7 +426,7 @@ struct LyricsView: View {
                         previousID: Int? = nil) {
         // Respect native browsing and accessibility even for asynchronous
         // appear/document callbacks captured before the activity began.
-        guard presentationActive, !browsing, !dragging, !voiceOver, !liveResizing, !viewportSettling else { return }
+        guard presentationActive, !browsing, !dragging, !voiceOver, !resizing, !viewportSettling else { return }
         // Unknown progress is not an instruction to jump to the first line.
         guard document.isTimed, followPosition.current(positionMs, connected: connected) != nil else { return }
         guard let id = activeID ?? document.lines.first?.id else { return }
@@ -477,19 +483,22 @@ private struct LyricsScrollActivity: NSViewRepresentable {
     let activeID: Int?
     let browsing: Bool
     let anchoringEnabled: Bool
+    let geometryInteractionActive: Bool
     let onScroll: () -> Void
     let onLiveResize: (Bool) -> Void
     func makeNSView(context: Context) -> ActivityView {
         let view = ActivityView()
         view.anchor = anchor
-        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled)
+        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled,
+                         synchronousGeometry: geometryInteractionActive)
         view.onScroll = onScroll
         view.onLiveResize = onLiveResize
         return view
     }
     func updateNSView(_ view: ActivityView, context: Context) {
         view.anchor = anchor
-        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled)
+        anchor.configure(activeID: activeID, browsing: browsing, enabled: anchoringEnabled,
+                         synchronousGeometry: geometryInteractionActive)
         view.onScroll = onScroll; view.onLiveResize = onLiveResize
         view.bindScrollView()
     }

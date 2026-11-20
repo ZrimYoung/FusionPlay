@@ -12,6 +12,11 @@ struct MenuPanelNativeSmoke {
             do {
                 try await runChecks()
                 let visual = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_VISUAL_CHECK"] == "1"
+                let focus = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_FOCUS_CHECK"] == "1"
+                if focus {
+                    print("PASS: menu opens without automatic cover focus, Tab reaches controls, keyboard activates cover, and reopening clears stale focus")
+                    exit(0)
+                }
                 print(visual
                     ? "PASS: visual native menu materials, retained host, positioning, entry points, quit sheet and dismissal"
                     : "PASS: hidden native menu materials, retained host, positioning, shadows and preference compatibility")
@@ -49,9 +54,11 @@ struct MenuPanelNativeSmoke {
         let model = ReceiverModel.preview(state, artwork: art, root: root)
         let defaults = UserDefaults(suiteName: "tech.zrim.fusionplay.menu-native-check.isolated")!
         let visual = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_VISUAL_CHECK"] == "1"
+        let focus = ProcessInfo.processInfo.environment["FUSIONPLAY_MENU_FOCUS_CHECK"] == "1"
+        let interactive = visual || focus
         func preference(_ style: MenuPanelBackgroundStyle, visible: Bool? = nil) {
             defaults.setVolatileDomain([
-                "showMenuBarIcon": visible ?? visual, "appLanguage": "en",
+                "showMenuBarIcon": visible ?? interactive, "appLanguage": "en",
                 MenuPanelBackgroundStyle.storageKey: style.rawValue
             ], forName: UserDefaults.argumentDomain)
         }
@@ -72,10 +79,10 @@ struct MenuPanelNativeSmoke {
         // A transparent window can still take keyboard focus when made key.
         // The default mode never calls show()/makeKeyAndOrderFront, creates no
         // status item, never presents a sheet and never asks for screen access.
-        menu.testPanel.alphaValue = visual ? 1 : 0
-        menu.testPanel.ignoresMouseEvents = !visual
+        menu.testPanel.alphaValue = interactive ? 1 : 0
+        menu.testPanel.ignoresMouseEvents = !interactive
         let host = menu.testHostIdentity
-        precondition(menu.testHasStatusItem == visual)
+        precondition(menu.testHasStatusItem == interactive)
         precondition(!menu.testPanel.isOpaque && menu.testPanel.backgroundColor.alphaComponent == 0)
         precondition(menu.testPanel.level == .statusBar)
 
@@ -105,6 +112,39 @@ struct MenuPanelNativeSmoke {
 #endif
             precondition(defaults.string(forKey: MenuPanelBackgroundStyle.storageKey) == style.rawValue,
                          "Changing native material rewrote the user's selection")
+        }
+
+        if focus {
+            // This opt-in check briefly opens only this isolated preview; it
+            // never captures the desktop, starts a receiver or edits user settings.
+            menu.show(); await pause(0.3)
+            precondition(menu.testPanel.isVisible)
+            precondition(menu.testPanel.firstResponder === menu.testPanel,
+                         "Opening the menu selected its first control automatically")
+            menu.testPanel.selectNextKeyView(nil)
+            await pause(0.1)
+            precondition(menu.testPanel.firstResponder != nil && menu.testPanel.firstResponder !== menu.testPanel,
+                         "Tab cannot enter the menu controls")
+            for type in [NSEvent.EventType.keyDown, .keyUp] {
+                let space = NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
+                    windowNumber: menu.testPanel.windowNumber, context: nil, characters: " ",
+                    charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!
+                NSApp.postEvent(space, atStart: false)
+            }
+            await pause(0.2)
+            precondition(destinations == ["player"] && !menu.testPanel.isVisible,
+                         "Keyboard activation of the cover failed")
+            precondition(model.miniPlayerRequest == 1,
+                         "The cover no longer requests the mini player")
+            menu.show(); await pause(0.2)
+            precondition(menu.testPanel.firstResponder === menu.testPanel,
+                         "Reopening the menu restored a stale control highlight")
+            menu.close()
+            try JSONSerialization.data(withJSONObject: ["passed": true, "mode": "keyboard-focus",
+                "tabNavigation": true, "coverKeyboardActivation": true, "receiverStarted": false,
+                "realPreferencesChanged": false], options: [.prettyPrinted, .sortedKeys])
+                .write(to: output.appendingPathComponent("native-menu-focus-check.json"), options: .atomic)
+            return
         }
 
         if !visual {

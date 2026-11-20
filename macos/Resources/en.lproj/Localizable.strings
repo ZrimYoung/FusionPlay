@@ -189,7 +189,7 @@
 
 "歌词快捷按钮" = "Lyrics Shortcut Button";
 
-"仅临时切换当前歌曲的歌词显示，不改变自动、始终开启或始终关闭设置。" = "Temporarily toggle lyrics for the current song without changing Automatic, Always On or Always Off.";
+"仅临时切换当前歌曲的歌词显示，不改变自动开启或始终关闭设置。" = "Temporarily toggle lyrics for the current song without changing Automatic or Always Off.";
 
 "窄窗左右分页" = "Page Narrow Windows Horizontally";
 
@@ -209,7 +209,7 @@
 
 "窄窗布局" = "Narrow Window Layout";
 
-"原有布局" = "Original Layout";
+"封面模式" = "Cover Mode";
 
 "分页布局" = "Paged Layout";
 
@@ -225,10 +225,25 @@
 
 "切换到歌词页" = "Go to Lyrics";
 
-"此设置控制原有布局。分页时可滑动或点击当前歌词与歌曲摘要切换页面，不改变此设置。" = "This controls the original layout. In paging, swipe or click the lyric and song summaries to change pages without changing this setting.";
+"此设置控制封面模式的歌词展开。收起后仍可左右滑动切换到歌词页。" = "This controls expanded lyrics in Cover Mode. When collapsed, swipe horizontally to open the lyric page.";
 
-"方形分页" = "Square Paging";
 
-"独立播放页" = "Separate Playback Page";
+"专辑模式" = "Album Mode";
 
-"原有布局保留上下封面与歌词；方形分页保持窗口方形；独立播放页显示封面、播放信息与当前歌词。" = "Original keeps artwork above lyrics. Square Paging keeps the window square. Separate Playback Page shows artwork, playback information and the current lyric.";
+"封面模式：拖动底边展开歌词，缩到最小时收起并左右翻页；专辑模式：独立的封面播放页与歌词页。" = "Cover Mode: drag the bottom edge to reveal lyrics; collapse to a square and swipe between pages. Album Mode: separate album playback and lyric pages.";
+
+"拖动底边展开或收起歌词" = "Drag the bottom edge to expand or collapse lyrics";
+
+"自动开启" = "Automatic";
+
+"调整歌词区域" = "Resize Lyrics Pane";
+
+"播放器" = "Player";
+
+"通用" = "General";
+
+"外观设置" = "Appearance Settings";
+
+"播放器布局" = "Player Layout";
+
+"两种模式的播放控制和进度显示分别保存。" = "Playback controls and progress visibility are saved separately for each mode.";

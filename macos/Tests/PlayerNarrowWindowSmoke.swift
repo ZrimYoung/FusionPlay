@@ -1,12 +1,16 @@
 import AppKit
+import Combine
 import Darwin
 import ScreenCaptureKit
 import SwiftUI
 
+private let interactiveUI = ProcessInfo.processInfo.environment["FUSIONPLAY_UI_INTERACTIVE"] == "1"
+
 @main struct PlayerNarrowWindowSmoke: App {
     @StateObject private var model: ReceiverModel
     init() {
-        precondition(Bundle.main.bundleIdentifier == "tech.zrim.fusionplay.narrow-ui-check")
+        requireCheck(Bundle.main.bundleIdentifier == "tech.zrim.fusionplay.narrow-ui-check")
+        if !interactiveUI { NSApplication.shared.setActivationPolicy(.prohibited) }
         let defaults = UserDefaults.standard
         defaults.removePersistentDomain(forName: Bundle.main.bundleIdentifier!)
         defaults.register(defaults: ["appLanguage": "en", NarrowPlayerLayout.storageKey: NarrowPlayerLayout.ipadPaged.rawValue,
@@ -48,8 +52,10 @@ private struct NarrowWindowProbe: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             guard let window, !started else { return }; started = true
-            NSApp.setActivationPolicy(.accessory)
-            window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            NSApp.setActivationPolicy(interactiveUI ? .accessory : .prohibited)
+            if interactiveUI {
+                window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            } else { window.alphaValue = 0; window.orderBack(nil) }
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 300_000_000)
                 await check(window)
@@ -60,7 +66,7 @@ private struct NarrowWindowProbe: NSViewRepresentable {
             let output = URL(fileURLWithPath: ProcessInfo.processInfo.environment["FUSIONPLAY_NARROW_CHECK_OUTPUT"]!)
             let defaults = UserDefaults.standard
             var records: [[String: Any]] = []
-            var compositorAvailable = true
+            var compositorAvailable = interactiveUI
             var initialScrollIDs: Set<ObjectIdentifier>?
             func attribute(_ object: NSObject, _ key: String) -> Any? {
                 let getter = "is" + key.prefix(1).uppercased() + key.dropFirst()
@@ -131,39 +137,74 @@ private struct NarrowWindowProbe: NSViewRepresentable {
                 let scrollViews = nativeScrolls()
                 if !name.hasPrefix("stacked"), let root = window.contentView,
                    let region = nativeDescendants(root).first(where: { $0.identifier?.rawValue == "fusionplay.player.horizontal-paging-region" }) {
-                    precondition(region.bounds.width >= window.contentRect(forFrameRect: window.frame).width,
+                    requireCheck(region.bounds.width >= window.contentRect(forFrameRect: window.frame).width,
                                  "Paging input region has no usable width")
-                    precondition(region.hitTest(NSPoint(x: region.bounds.midX, y: region.bounds.midY)) == nil,
+                    requireCheck(region.hitTest(NSPoint(x: region.bounds.midX, y: region.bounds.midY)) == nil,
                                  "Transparent paging monitor intercepted native mouse controls")
                     entry["pagingMonitorPassesMouseInput"] = true
                 }
                 if !name.hasPrefix("stacked"), !name.contains("lyrics"), let artwork = button("fusionplay.player.paged-artwork"),
                    let frame = (attribute(artwork, "accessibilityFrame") as? NSValue)?.rectValue {
-                    precondition(abs(frame.width - frame.height) < 1, "Paged artwork was distorted into a rectangle")
+                    requireCheck(abs(frame.width - frame.height) < 1, "Paged artwork was distorted into a rectangle")
                     entry["squareArtwork"] = NSStringFromRect(frame)
                 }
                 let scrollIDs = Set(scrollViews.map(ObjectIdentifier.init))
                 if name.hasPrefix("paged-"), !name.hasPrefix("paged-empty"), let initialScrollIDs {
-                    precondition(initialScrollIDs.isSubset(of: scrollIDs), "Page activation recreated the original lyric scroll view")
+                    requireCheck(initialScrollIDs.isSubset(of: scrollIDs), "Page activation recreated the original lyric scroll view")
                 } else if initialScrollIDs == nil, !scrollIDs.isEmpty { initialScrollIDs = scrollIDs }
+                if name == "paged-420-tall-centered-playback" || name == "paged-547-aligned-playback" {
+                    func frame(_ id: String) -> NSRect {
+                        guard let node = button(id),
+                              let value = attribute(node, "accessibilityFrame") as? NSValue else {
+                            failCheck("Missing assembled playback element: " + id)
+                        }
+                        return value.rectValue
+                    }
+                    let artwork = frame("fusionplay.player.paged-artwork")
+                    let metadata = frame("fusionplay.player.paged-metadata")
+                    let summary = frame("fusionplay.player.lyric-summary")
+                    let progress = frame("fusionplay.player.paged-progress")
+                    requireCheck(abs(metadata.minX - artwork.minX) < 1.5 && metadata.maxX <= artwork.maxX + 1.5,
+                                 "Metadata is outside album edges: artwork=\(artwork), metadata=\(metadata)")
+                    for rect in [summary, progress] {
+                        requireCheck(abs(rect.minX - artwork.minX) < 1.5 && abs(rect.maxX - artwork.maxX) < 1.5,
+                                     "Album control edges differ: artwork=\(artwork), control=\(rect)")
+                    }
+                    entry["albumAndControlsShareEdges"] = true
+                    requireCheck(artwork.minY >= metadata.maxY - 1 && metadata.minY >= summary.maxY - 1
+                                 && summary.minY >= progress.maxY - 1,
+                                 "The current lyric must sit between song metadata and progress")
+                    let transport = nodes().filter { attribute($0, "accessibilityLabel") as? String == L("暂停") }
+                        .compactMap { (attribute($0, "accessibilityFrame") as? NSValue)?.rectValue }
+                        .first { !$0.isEmpty }
+                    guard let transport, let content = window.contentView else {
+                        failCheck("No assembled playback transport or content bounds")
+                    }
+                    let viewport = window.convertToScreen(content.convert(content.bounds, to: nil))
+                    let groupCenter = (artwork.maxY + transport.minY) / 2
+                    let centerError = abs(groupCenter - viewport.midY)
+                    requireCheck(centerError < 3, "Tall playback content is not vertically centered: \(centerError)")
+                    entry["playbackCenterError"] = centerError
+                    entry["inlineLyricBetweenMetadataAndProgress"] = true
+                }
                 if name == "paged-260-current-lyric-summary" {
                     guard let summary = button("fusionplay.player.lyric-summary"),
                           let frame = (attribute(summary, "accessibilityFrame") as? NSValue)?.rectValue,
-                          let scroll = scrollForRow(frame, in: scrollViews) else { preconditionFailure("No reachable current lyric summary") }
+                          let scroll = scrollForRow(frame, in: scrollViews) else { failCheck("No reachable current lyric summary") }
                     let viewport = viewportScreen(scroll)
-                    precondition(frame.minY >= viewport.minY - 1 && frame.maxY <= viewport.maxY + 1,
+                    requireCheck(frame.minY >= viewport.minY - 1 && frame.maxY <= viewport.maxY + 1,
                                  "The short playback page could not scroll its lyric summary fully into view")
-                    precondition(scroll.documentVisibleRect.minY > 0, "The short playback column did not scroll")
+                    requireCheck(scroll.documentVisibleRect.minY > 0, "The short playback column did not scroll")
                     entry["summaryFullyVisibleAfterNativeScroll"] = true
                 }
                 if name.hasSuffix("-settled") {
-                    precondition(currentRows.count == 1 && !scrollViews.isEmpty, "Expected a real current lyric and viewport")
+                    requireCheck(currentRows.count == 1 && !scrollViews.isEmpty, "Expected a real current lyric and viewport")
                     let row = (attribute(currentRows[0], "accessibilityFrame") as? NSValue)?.rectValue ?? .zero
                     let viewport = viewportScreen(scrollForRow(row, in: scrollViews)!)
                     let fraction = (viewport.maxY - row.maxY) / viewport.height
-                    precondition(row.minY >= viewport.minY - 1 && row.maxY <= viewport.maxY + 1,
+                    requireCheck(row.minY >= viewport.minY - 1 && row.maxY <= viewport.maxY + 1,
                                  "Current lyric is clipped outside the presented viewport")
-                    precondition(fraction >= 0.05 && fraction < 0.42,
+                    requireCheck(fraction >= 0.05 && fraction < 0.42,
                                  "Current lyric is outside the clear upper reading region: \(fraction)")
                     entry["currentLyricInClearReadingRegion"] = true
                 }
@@ -216,7 +257,7 @@ private struct NarrowWindowProbe: NSViewRepresentable {
             revealSummary(); await settle()
             await capture("paged-260-current-lyric-summary")
             let pageAction = press("fusionplay.player.lyric-summary"); await settle()
-            precondition(button("fusionplay.player.lyrics.header") != nil,
+            requireCheck(button("fusionplay.player.lyrics.header") != nil,
                          "Clicking the actual current-lyric summary did not open the lyrics page")
             await capture("paged-260-lyrics-header", action: pageAction)
             try? await Task.sleep(nanoseconds: 1_200_000_000)
@@ -231,11 +272,174 @@ private struct NarrowWindowProbe: NSViewRepresentable {
             try? await Task.sleep(nanoseconds: 1_200_000_000)
             await capture("paged-420-lyrics-header-settled")
             let backAction = press("fusionplay.player.lyrics.header"); await settle()
-            precondition(button("fusionplay.player.lyric-summary") != nil,
+            requireCheck(button("fusionplay.player.lyric-summary") != nil,
                          "Clicking the actual song header did not return to playback")
             await capture("paged-420-wrap-playback", action: backAction)
+            defaults.set(false, forKey: "wrapPlayerMetadata")
+            window.setContentSize(NSSize(width: 420, height: 870)); await settle()
+            await capture("paged-420-tall-centered-playback")
+            window.setContentSize(NSSize(width: 547, height: 634)); await settle()
+            await capture("paged-547-aligned-playback")
+            window.setContentSize(NSSize(width: 420, height: 870)); await settle()
+            // Exercise the production progress gesture with the paging monitor mounted.
+            guard let progressNode = button("fusionplay.player.paged-progress"),
+                  let progressValue = attribute(progressNode, "accessibilityFrame") as? NSValue else {
+                failCheck("No production progress control for the mouse regression check")
+            }
+            let progressFrame = progressValue.rectValue
+            let windowBeforeScrub = window.frame
+            func scrubEvent(_ type: NSEvent.EventType, fraction: CGFloat) {
+                let screen = NSPoint(x: progressFrame.minX + progressFrame.width * fraction,
+                                     y: progressFrame.maxY - 9)
+                let local = window.convertPoint(fromScreen: screen)
+                guard let event = NSEvent.mouseEvent(with: type, location: local, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1) else {
+                    failCheck("Could not create own-window progress event")
+                }
+                NSApp.postEvent(event, atStart: false)
+            }
+            if interactiveUI {
+            if interactiveUI { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+            await settle()
+            requireCheck(model?.canSeek == true, "Preview timeline cannot seek")
+            var observedScrubbing = false
+            let scrubbingObservation = model?.$scrubbing.sink { observedScrubbing = observedScrubbing || $0 }
+            // Keep the complete event sequence queued so AppKit controls may run
+            // their native tracking loop without starving the synthetic mouse-up.
+            scrubEvent(.leftMouseDown, fraction: 0.85)
+            for step in 1...8 { scrubEvent(.leftMouseDragged, fraction: 0.85 - CGFloat(step) * 0.06) }
+            scrubEvent(.leftMouseUp, fraction: 0.37); await settle()
+            scrubbingObservation?.cancel()
+            requireCheck(observedScrubbing, "The production progress gesture did not receive the queued mouse sequence")
+            requireCheck(button("fusionplay.player.lyric-summary") != nil,
+                         "Seeking incorrectly switched from playback to the lyric page")
+            requireCheck(window.frame == windowBeforeScrub, "Seeking moved the player window")
+            requireCheck(model?.playerInteractionActive == false, "Progress interaction remained active after mouse up")
+            print("PASS: production timeline dragging retains scrub ownership without paging or moving the window")
+            } else {
+                requireCheck(model?.canSeek == true, "Silent preview progress is unavailable")
+                print("PASS: silent progress layout/availability; native pointer test remains opt-in")
+            }
             defaults.set(NarrowPlayerLayout.original.rawValue, forKey: NarrowPlayerLayout.storageKey); await settle()
             await capture("stacked-restored-never")
+            func coverGrip() -> CoverLyricsResizeGrip {
+                guard let root = window.contentView,
+                      let grip = nativeDescendants(root).compactMap({ $0 as? CoverLyricsResizeGrip }).first else {
+                    failCheck("No bottom grip in the assembled cover mode")
+                }
+                requireCheck(abs(grip.bounds.height - 14) < 1, "Bottom grip has no usable hit area")
+                let center = NSPoint(x: grip.bounds.midX, y: grip.bounds.midY)
+                guard let root = window.contentView, let parent = root.superview else {
+                    failCheck("Detached bottom grip")
+                }
+                requireCheck(root.hitTest(grip.convert(center, to: parent)) === grip,
+                             "The assembled bottom grip cannot receive mouse input")
+                return grip
+            }
+            func dragCoverGrip(by delta: CGFloat) async {
+                let grip = coverGrip()
+                if !interactiveUI {
+                    requireCheck(delta > 0 ? grip.accessibilityPerformIncrement() : grip.accessibilityPerformDecrement(),
+                                 "Silent lyric resize action failed")
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    return
+                }
+                // Use the actual native border, not the content grip's center.
+                let start = NSPoint(x: window.frame.midX, y: window.frame.minY + 1)
+                func send(_ type: NSEvent.EventType, y: CGFloat) {
+                    let local = window.convertPoint(fromScreen: NSPoint(x: start.x, y: y))
+                    let event = NSEvent.mouseEvent(with: type, location: local, modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)!
+                    NSApp.postEvent(event, atStart: false)
+                }
+                send(.leftMouseDown, y: start.y)
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                for step in 1...8 {
+                    send(.leftMouseDragged, y: start.y - delta * CGFloat(step) / 8)
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+                send(.leftMouseUp, y: start.y - delta)
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            let collapsedSize = window.contentRect(forFrameRect: window.frame).size
+            let retainedGrip = ObjectIdentifier(coverGrip())
+            let coverAppearancesBeforeOpen = PlayerCoverLifecycleCheck.appearances
+            requireCheck(coverAppearancesBeforeOpen > 0, "Cover lifecycle probe never appeared")
+            await dragCoverGrip(by: 180)
+            let expandedSize = window.contentRect(forFrameRect: window.frame).size
+            requireCheck(defaults.string(forKey: NarrowPlayerLayout.storageKey) == NarrowPlayerLayout.original.rawValue
+                         && expandedSize.height >= expandedSize.width + 136
+                         && abs(window.contentAspectRatio.width / window.contentAspectRatio.height
+                                - expandedSize.width / expandedSize.height) < 0.00001,
+                         "Pulling the bottom edge did not expand the lower lyric pane")
+            requireCheck(ObjectIdentifier(coverGrip()) == retainedGrip, "Expanding replaced the active resize grip")
+            requireCheck(PlayerCoverLifecycleCheck.appearances == coverAppearancesBeforeOpen,
+                         "Opening recreated the visible cover")
+            await capture("cover-grip-expanded-lyrics")
+            if let model, var nextTrack = model.snapshot {
+                nextTrack.trackId = "narrow-next-preview"; model.previewLyricsUpdate(nextTrack)
+            }
+            await settle()
+            requireCheck(window.contentRect(forFrameRect: window.frame).size == expandedSize,
+                         "Changing tracks collapsed the manually expanded lyric pane")
+            if let model, let track = model.snapshot {
+                var idle = track
+                idle.controlsAvailable = false; idle.phase = .stopped; idle.trackId = ""; idle.title = ""; idle.lyricsText = ""
+                model.previewLyricsUpdate(idle); await settle()
+                requireCheck(window.contentRect(forFrameRect: window.frame).size == expandedSize,
+                             "Stopping media resized the manually expanded player")
+                window.setContentSize(NSSize(width: expandedSize.width, height: expandedSize.width)); await settle()
+                requireCheck(abs(window.contentRect(forFrameRect: window.frame).height - expandedSize.width) < 1
+                             && window.contentAspectRatio == .zero,
+                             "Idle player retained an uncloseable lyric minimum")
+                model.previewLyricsUpdate(track); await settle()
+                requireCheck(window.contentRect(forFrameRect: window.frame).size == expandedSize,
+                             "Resuming media lost the remembered lyric height")
+                print("PASS: idle player resizes freely and resumes the remembered expanded lyric pane")
+            }
+            // Disconnect removes the entire media grip; compare identity only
+            // across the following expanded-to-square presentation change.
+            let gripAfterResume = ObjectIdentifier(coverGrip())
+            let coverAppearancesAfterResume = PlayerCoverLifecycleCheck.appearances
+            var collapseHeights: [CGFloat] = [expandedSize.height]
+            let collapseObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification,
+                object: window, queue: .main) { _ in
+                    collapseHeights.append(window.contentRect(forFrameRect: window.frame).height)
+                }
+            await dragCoverGrip(by: -(expandedSize.height - expandedSize.width - 30))
+            NotificationCenter.default.removeObserver(collapseObserver)
+            requireCheck(zip(collapseHeights.dropFirst(), collapseHeights).allSatisfy { $0 <= $1 + 0.75 },
+                         "The closing snap rebounded or restored a leftover lyric strip: \(collapseHeights)")
+            let snappedSize = window.contentRect(forFrameRect: window.frame).size
+            requireCheck(defaults.string(forKey: NarrowPlayerLayout.storageKey) == NarrowPlayerLayout.squarePaged.rawValue
+                         && abs(snappedSize.width - snappedSize.height) < 1
+                         && abs(snappedSize.width - collapsedSize.width) < 1,
+                         "Shrinking the lyric pane did not snap back to square cover paging")
+            requireCheck(ObjectIdentifier(coverGrip()) == gripAfterResume, "Collapsing replaced the active resize grip")
+            requireCheck(PlayerCoverLifecycleCheck.appearances == coverAppearancesAfterResume,
+                         "Closing recreated the visible cover")
+            await capture("cover-grip-collapsed-square")
+            await dragCoverGrip(by: 180)
+            requireCheck(window.contentRect(forFrameRect: window.frame).height >= snappedSize.width + 136,
+                         "The real bottom border could not reopen after snapping closed")
+            await dragCoverGrip(by: -(window.contentRect(forFrameRect: window.frame).height - snappedSize.width - 20))
+            requireCheck(abs(window.contentRect(forFrameRect: window.frame).height - snappedSize.width) < 1,
+                         "The reopened cover could not snap closed a second time")
+            requireCheck(PlayerCoverLifecycleCheck.appearances == coverAppearancesAfterResume,
+                         "Repeated border gestures recreated the visible cover")
+            print(interactiveUI ? "PASS: actual native border reopen and stable cover" : "PASS: silent lyric resize/snap actions, stable cover and cross-track size")
+            defaults.set(NarrowPlayerLayout.ipadPaged.rawValue, forKey: NarrowPlayerLayout.storageKey)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            await capture("style-cover-to-album-mid")
+            await settle()
+            await capture("style-album-settled-playback")
+            defaults.set(NarrowPlayerLayout.squarePaged.rawValue, forKey: NarrowPlayerLayout.storageKey)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            await capture("style-album-to-cover-mid")
+            await settle()
+            await capture("style-cover-restored-playback")
             defaults.set(NarrowPlayerLayout.ipadPaged.rawValue, forKey: NarrowPlayerLayout.storageKey)
             if let model, var empty = model.snapshot {
                 empty.trackId = "narrow-empty-preview"; empty.lyricsText = ""
@@ -246,23 +450,23 @@ private struct NarrowWindowProbe: NSViewRepresentable {
             await capture("paged-empty-loading-summary")
             try? await Task.sleep(nanoseconds: 2_200_000_000)
             if let emptySummary = button("fusionplay.player.lyric-summary") {
-                precondition(attribute(emptySummary, "accessibilityValue") as? String == L("暂无歌词"),
+                requireCheck(attribute(emptySummary, "accessibilityValue") as? String == L("暂无歌词"),
                              "Empty source did not show the local no-lyrics caption")
-            } else { preconditionFailure("No clickable summary in the empty-source playback page") }
+            } else { failCheck("No clickable summary in the empty-source playback page") }
             await capture("paged-empty-lyric-summary")
             let emptyAction = press("fusionplay.player.lyric-summary"); await settle()
-            precondition(button("fusionplay.player.lyrics.header") != nil, "Empty lyric summary could not navigate to lyrics")
+            requireCheck(button("fusionplay.player.lyrics.header") != nil, "Empty lyric summary could not navigate to lyrics")
             await capture("paged-empty-lyrics-page", action: emptyAction)
             defaults.set(NarrowPlayerLayout.squarePaged.rawValue, forKey: NarrowPlayerLayout.storageKey); await settle()
             let squareLyricsSize = window.contentRect(forFrameRect: window.frame).size
-            precondition(window.contentAspectRatio == NSSize(width: 1, height: 1)
+            requireCheck(window.contentAspectRatio == NSSize(width: 1, height: 1)
                          && abs(squareLyricsSize.width - squareLyricsSize.height) < 1,
                          "Square paging did not keep the lyrics page square")
             await capture("square-paged-lyrics-page")
             let squareBack = press("fusionplay.player.lyrics.toggle"); await settle()
-            precondition(window.contentRect(forFrameRect: window.frame).size == squareLyricsSize,
+            requireCheck(window.contentRect(forFrameRect: window.frame).size == squareLyricsSize,
                          "Square page navigation resized the native window")
-            precondition(button("fusionplay.player.lyric-summary") == nil,
+            requireCheck(button("fusionplay.player.lyric-summary") == nil,
                          "Square cover paging unexpectedly used the separate playback column")
             await capture("square-paged-cover-playback", action: squareBack)
             if let model, var stopped = model.snapshot {
@@ -270,17 +474,21 @@ private struct NarrowWindowProbe: NSViewRepresentable {
                 model.previewLyricsUpdate(stopped)
             }
             await settle()
-            precondition(window.contentRect(forFrameRect: window.frame).size == squareLyricsSize,
+            requireCheck(window.contentRect(forFrameRect: window.frame).size == squareLyricsSize,
                          "Stopping media resized square paging")
             await capture("square-paged-idle")
             defaults.set(NarrowPlayerLayout.ipadPaged.rawValue, forKey: NarrowPlayerLayout.storageKey); await settle()
             window.setContentSize(NSSize(width: 420, height: 300)); await settle()
-            precondition(window.contentAspectRatio == .zero
+            requireCheck(window.contentAspectRatio == .zero
                          && window.contentRect(forFrameRect: window.frame).size == NSSize(width: 420, height: 300),
                          "Separate playback mode retained the square constraint")
             await capture("ipad-restored-idle")
-            precondition(defaults.string(forKey: "playerLyricsDisplayMode") == "never", "Page navigation rewrote the saved lyric policy")
-            let report: [String: Any] = ["captures": records, "noReceiverStarted": true, "pageAction": pageAction,
+            requireCheck(defaults.string(forKey: "playerLyricsDisplayMode") == "never", "Page navigation rewrote the saved lyric policy")
+            if !interactiveUI {
+                requireCheck(window.alphaValue == 0 && NSWorkspace.shared.frontmostApplication?.processIdentifier != getpid(),
+                             "Silent UI check changed foreground focus or showed its window")
+            }
+            let report: [String: Any] = ["silent": !interactiveUI, "captures": records, "noReceiverStarted": true, "pageAction": pageAction,
                 "note": "Inspect screenshots to confirm virtual AX navigation; event submission alone is not an interaction pass."]
             try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
                 .write(to: output.appendingPathComponent("assembled-player-check.json"))
@@ -288,4 +496,12 @@ private struct NarrowWindowProbe: NSViewRepresentable {
             window.orderOut(nil); exit(0)
         }
     }
+}
+
+private func requireCheck(_ condition: @autoclosure () -> Bool, _ message: @autoclosure () -> String = "Check failed") {
+    if !condition() { failCheck(message()) }
+}
+private func failCheck(_ message: String) -> Never {
+    FileHandle.standardError.write(Data(("FAIL: " + message + "\n").utf8))
+    exit(1)
 }

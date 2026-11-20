@@ -13,6 +13,7 @@ struct PlayerTrackMetadataView: View {
     let titleSize: CGFloat
     let subtitleSize: CGFloat
     var spacing: CGFloat = 4
+    // Retained for caller compatibility; disabled wrapping always means one line.
     var defaultTitleLines = 1
     var wrappedTitleLines = 3
     var wrappedSubtitleLines = 2
@@ -44,7 +45,7 @@ struct PlayerTrackMetadataView: View {
 
     @ViewBuilder private var titleText: some View {
         let text = Text(verbatim: title).font(typography.font(size: titleSize, weight: .semibold))
-            .lineLimit(wraps ? wrappedTitleLines : defaultTitleLines)
+            .lineLimit(wraps ? wrappedTitleLines : 1)
             .fixedSize(horizontal: false, vertical: true).help(title).contentTransition(.opacity)
         if allowsSelection { text.textSelection(.enabled) } else { text }
     }
@@ -71,7 +72,7 @@ struct PlayerTrackMetadataView: View {
             }
             return ceil(max(baseLineHeight, height))
         }
-        let titleHeight = measured(title, font: titleFont, lines: wraps ? wrappedTitleLines : defaultTitleLines)
+        let titleHeight = measured(title, font: titleFont, lines: wraps ? wrappedTitleLines : 1)
         return titleHeight + (subtitle.isEmpty ? 0 : spacing + measured(subtitle, font: subtitleFont, lines: wraps ? wrappedSubtitleLines : 1))
     }
 }

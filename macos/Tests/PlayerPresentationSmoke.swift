@@ -48,15 +48,17 @@ import Foundation
                                                      spacing: 5, hasSubtitle: true)
         precondition(compactBudget.titleLines == 2 && compactBudget.subtitleLines == 1,
                      "Minimum-height paged playback must reserve its progress and transport controls")
-        let tall = PagedPlaybackLayout(size: CGSize(width: 420, height: 700), metadataHeight: 80,
+        let tall = PagedPlaybackLayout(size: CGSize(width: 420, height: 740), metadataHeight: 80,
                                        showsProgress: true, showsTransport: true)
-        precondition(tall.artworkSide == tall.contentWidth && tall.contentHeight <= 700)
+        precondition(tall.artworkSide == tall.contentWidth && tall.contentHeight <= 740)
+        precondition(tall.topInset == tall.bottomInset && tall.viewportHeight == 740 - tall.topInset - tall.bottomInset,
+                     "Paged playback must center inside equal top and bottom safe insets")
         let shorter = PagedPlaybackLayout(size: CGSize(width: 420, height: 560), metadataHeight: 80,
                                           showsProgress: true, showsTransport: true)
         precondition(shorter.artworkSide < tall.artworkSide && shorter.contentHeight <= 560)
         let minimum = PagedPlaybackLayout(size: CGSize(width: 260, height: 260), metadataHeight: 80,
                                           showsProgress: true, showsTransport: true)
-        precondition(minimum.artworkSide == 120 && minimum.contentHeight > 260,
+        precondition(minimum.artworkSide == 180 && minimum.contentHeight > 260,
                      "Very short playback pages must scroll rather than distort the square artwork")
         let lyrics = LyricsDocument("[00:00]Opening line\n[00:06]A new line to read\n[00:12]Another line")
         precondition(PlayerCurrentLyricSummary.text(document: lyrics, positionMs: 8_000) == "A new line to read")

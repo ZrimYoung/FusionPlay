@@ -15,6 +15,9 @@ struct PlayerWindowBehavior: NSViewRepresentable {
     // callers. New player code always passes the explicit three-way layout.
     var pagingEnabled = false
     var layoutMode: NarrowPlayerLayout? = nil
+    var coverLyricsResizing = false
+    var hasTrack = true
+    var scalesCoverProportionally = false
 
     final class WindowAttachmentView: NSView {
         weak var coordinator: Coordinator?
@@ -167,6 +170,26 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 releaseFullScreenSizing(window)
                 return
             }
+            if !policy.hasTrack {
+                // Idle keeps the user's last lyric height for the next stream,
+                // while releasing square and stacked-pane size constraints.
+                if lastLyricsPreference == true { rememberLyricsPane(in: window) }
+                lastLyricsPreference = false
+                lastLayoutMode = layout
+                lastMiniRequest = policy.miniRequest
+                releaseFullScreenSizing(window)
+                return
+            }
+            if policy.coverLyricsResizing {
+                // The bottom grip and native live resize own geometry until
+                // they settle on a stacked pane or the square cover state.
+                expandLyricsAfterResize = false
+                normalizeSquareAfterResize = false
+                lastLyricsPreference = policy.miniLyrics && layout == .original
+                lastLayoutMode = layout
+                setSquare(false, window: window)
+                return
+            }
             // Capture the user's lyric area before a no-lyrics transition can
             // normalize the cover to a square. Keep its height independent of
             // whether the next track sends its metadata immediately.
@@ -202,16 +225,19 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             // matching width. Use it rather than a stale full-screen policy.
             let shouldBeSquare = compact && (layout == .squarePaged || (layout == .original && !policy.miniLyrics))
             let squareRatio = NSSize(width: 1, height: 1)
+            let proportionalCover = policy.scalesCoverProportionally && miniLyrics
             let nativeConstraintChanged = shouldBeSquare
                 ? window.contentAspectRatio != squareRatio
-                : window.aspectRatio != .zero || window.contentAspectRatio != .zero ||
+                : window.aspectRatio != .zero || (!proportionalCover && window.contentAspectRatio != .zero) ||
                   window.resizeIncrements != squareRatio || window.contentResizeIncrements != squareRatio
             if appliedSquare != shouldBeSquare || nativeConstraintChanged {
                 setSquare(shouldBeSquare, window: window)
             }
+            if proportionalCover { applyCoverScaleAspect(window) }
             guard !window.inLiveResize else { return }
             let minimumHeight = applyMinimumSize(lyrics: miniLyrics, width: content.width, window: window)
-            if miniLyrics && content.height < minimumHeight {
+            if miniLyrics && content.height < minimumHeight
+                && (!proportionalCover || content.height <= content.width + 1) {
                 // Cover and its controls occupy a square; only grow enough to
                 // leave a real lyric pane underneath, not to a preferred ratio.
                 window.setContentSize(NSSize(width: content.width, height: minimumHeight))
@@ -228,6 +254,18 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 window.setContentSize(NSSize(width: width, height: width))
             }
             if miniLyrics { rememberLyricsPane(in: window) }
+            if proportionalCover { applyCoverScaleAspect(window) }
+        }
+        private func applyCoverScaleAspect(_ window: NSWindow) {
+            let size = window.contentRect(forFrameRect: window.frame).size
+            guard size.width > 0, size.height > 0 else { return }
+            let current = window.contentAspectRatio
+            let ratio = size.width / size.height
+            if current.height <= 0 || abs(current.width / current.height - ratio) > 0.00001 {
+                // The bottom edge temporarily releases this ratio; all other
+                // native resize edges scale the settled cover presentation.
+                window.contentAspectRatio = size
+            }
         }
         @discardableResult private func applyMinimumSize(lyrics: Bool, width: CGFloat, window: NSWindow) -> CGFloat {
             let height = lyrics ? width + 136 : 260

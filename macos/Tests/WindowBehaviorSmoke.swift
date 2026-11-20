@@ -243,7 +243,83 @@ private final class FullScreenTestWindow: NSWindow {
         modePolicy(.original, lyrics: true); settle(); assertFree()
         precondition(contentSize() == NSSize(width: 420, height: 556))
         modesCoordinator.dismantle()
+        // Settled cover windows scale their complete presentation on native
+        // top/side edges; only the lower lyric-edge interaction owns pane height.
+        let coverScaleCoordinator = PlayerWindowBehavior.Coordinator()
+        view.coordinator = coverScaleCoordinator
+        func coverScalePolicy(resizing: Bool = false, hasTrack: Bool = true, pinned: Bool = false) {
+            coverScaleCoordinator.update(view, policy: PlayerWindowBehavior(square: false, miniRequest: 0,
+                miniLyrics: true, dimButtons: false, pinned: pinned, duration: 0, layoutMode: .original,
+                coverLyricsResizing: resizing, hasTrack: hasTrack, scalesCoverProportionally: true))
+        }
+        func assertCoverAspect(_ expected: NSSize) {
+            let ratio = window.contentAspectRatio
+            precondition(window.aspectRatio == .zero && ratio.width > 0 && ratio.height > 0,
+                         "The settled cover lost its native proportional resizing constraint")
+            precondition(abs(ratio.width / ratio.height - expected.width / expected.height) < 0.00001,
+                         "Native scaling used a square or stale pane-height aspect")
+            precondition(window.contentMinSize == NSSize(width: 260, height: 260),
+                         "Proportional cover scaling published a second pane-dependent minimum")
+        }
+        window.setContentSize(NSSize(width: 420, height: 640))
+        coverScalePolicy(); settle()
+        let settledCover = contentSize()
+        precondition(settledCover == NSSize(width: 420, height: 640))
+        assertCoverAspect(settledCover)
+        for pinned in [true, false, true] {
+            coverScalePolicy(pinned: pinned); settle()
+            precondition(contentSize() == settledCover, "A media/pin refresh changed the settled cover size")
+            assertCoverAspect(settledCover)
+        }
+        coverScalePolicy(resizing: true); settle(); assertFree()
+        window.setContentSize(NSSize(width: 420, height: 455))
+        coverScalePolicy(resizing: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 420, height: 455),
+                     "Live lyric-edge shrinking was clamped before it could reach the collapse threshold")
+        window.setContentSize(NSSize(width: 420, height: 600))
+        coverScalePolicy(resizing: true); settle(); assertFree()
+        coverScalePolicy(); settle()
+        let newlySettledCover = contentSize()
+        precondition(newlySettledCover == NSSize(width: 420, height: 600),
+                     "Finishing a lyric-edge resize reapplied the previous pane height")
+        assertCoverAspect(newlySettledCover)
+        // A side/top resize reduces the entire 420:600 presentation. The lyric
+        // pane is then naturally less than 136pt and must not jump back open.
+        window.setContentSize(NSSize(width: 260, height: 260 * 600 / 420))
+        let proportionallySmall = contentSize()
+        precondition(proportionallySmall.height - proportionallySmall.width > 1
+                     && proportionallySmall.height - proportionallySmall.width < 136)
+        for _ in 0..<3 {
+            coverScalePolicy(); settle()
+            precondition(contentSize() == proportionallySmall,
+                         "A proportionally scaled lyric pane was forced back to 136pt")
+            assertCoverAspect(proportionallySmall)
+        }
+        fullScreenEvent(NSWindow.willEnterFullScreenNotification); assertFree()
+        window.simulatedFullScreen = true
+        window.setContentSize(NSSize(width: 1440, height: 900))
+        fullScreenEvent(NSWindow.didEnterFullScreenNotification)
+        coverScalePolicy(resizing: true); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 1440, height: 900),
+                     "The proportional-cover policy resized a native full-screen window")
+        fullScreenEvent(NSWindow.willExitFullScreenNotification)
+        window.simulatedFullScreen = false
+        window.setContentSize(NSSize(width: 420, height: 600))
+        fullScreenEvent(NSWindow.didExitFullScreenNotification)
+        coverScalePolicy(); settle()
+        precondition(contentSize() == NSSize(width: 420, height: 600))
+        assertCoverAspect(contentSize())
+        coverScalePolicy(hasTrack: false); settle(); assertFree()
+        window.setContentSize(NSSize(width: 310, height: 280))
+        coverScalePolicy(resizing: true, hasTrack: false); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 310, height: 280),
+                     "Idle cover state still enforced a stored expanded lyric height")
+        window.setContentSize(NSSize(width: 840, height: 430))
+        coverScalePolicy(); settle(); assertFree()
+        precondition(contentSize() == NSSize(width: 840, height: 430),
+                     "Crossing to the wide player retained the compact proportional constraint")
+        coverScaleCoordinator.dismantle()
         window.contentView = nil; window.close()
-        print("PASS: native aspect reset, coalesced geometry, square-cover mini, portrait lyrics, independent large resizing, boundary crossing, restored geometry and primary full-screen transition policies")
+        print("PASS: native aspect reset, coalesced geometry, square-cover mini, portrait lyrics, independent large resizing, boundary crossing, restored geometry, proportional cover scaling and primary full-screen/idle transition policies")
     }
 }

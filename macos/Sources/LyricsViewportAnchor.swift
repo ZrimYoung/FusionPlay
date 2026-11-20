@@ -26,19 +26,24 @@ import SwiftUI
     private var activeID: Int?
     private var browsing = false
     private var enabled = true
+    private var synchronousGeometry = false
     private(set) var lastGeometryChange = Date.distantPast
     var isHolding: Bool { readingPoint != nil }
 #if FUSIONPLAY_UI_CHECKS
+    var boundScrollForCheck: NSScrollView? { scroll }
+    private(set) var bindingChangesForCheck = 0
     var heldReadingPoint: (id: Int, rowFraction: CGFloat, viewportFraction: CGFloat)? {
         readingPoint.map { ($0.id, $0.rowFraction, $0.viewportFraction) }
     }
 #endif
 
-    func configure(activeID: Int?, browsing: Bool, enabled: Bool) {
+    func configure(activeID: Int?, browsing: Bool, enabled: Bool, synchronousGeometry: Bool = false) {
         self.activeID = activeID
         self.browsing = browsing
         self.enabled = enabled
+        self.synchronousGeometry = synchronousGeometry
         if !enabled { cancel() }
+        else if synchronousGeometry { beginIfNeeded(retryWhenReady: true) }
     }
     func attach(_ scroll: NSScrollView?, owner: AnyObject) {
         bindingOwner = ObjectIdentifier(owner)
@@ -46,6 +51,9 @@ import SwiftUI
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         self.scroll = scroll
+#if FUSIONPLAY_UI_CHECKS
+        bindingChangesForCheck += 1
+#endif
         guard let scroll else { readingPoint = nil; return }
         for view in [scroll.contentView, scroll.documentView].compactMap({ $0 }) {
             view.postsFrameChangedNotifications = true
@@ -109,7 +117,11 @@ import SwiftUI
         return clip.isFlipped ? rect.minY - clip.bounds.minY : clip.bounds.maxY - rect.maxY
     }
     private func scheduleCorrection() {
-        guard readingPoint != nil, !correctionScheduled else { return }
+        guard readingPoint != nil else { return }
+        // Height-only pointer resizing must compensate in this layout pass;
+        // waiting for the next main-loop turn paints one displaced frame.
+        if synchronousGeometry { correct(); return }
+        guard !correctionScheduled else { return }
         correctionScheduled = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

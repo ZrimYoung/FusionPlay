@@ -27,6 +27,6 @@ xcrun swiftc -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos
   "$REPO/macos/Sources/NarrowPlayerLayout.swift" "$REPO/macos/Sources/LyricsDocument.swift" "$REPO/macos/Sources/PlayerCurrentLyricSummary.swift" \
   "$REPO/macos/Sources/LyricsDisplayMode.swift" "$REPO/macos/Sources/PlayerPresentationPolicy.swift" \
   "$REPO/macos/Sources/AppTypography.swift" "$REPO/macos/Sources/PlayerTrackMetadataView.swift" \
-  "$REPO/macos/Sources/PlayerNarrowPager.swift" "$REPO/macos/Tests/PlayerPresentationUISmoke.swift" \
+  "$REPO/macos/Sources/PlayerPagingDragExclusion.swift" "$REPO/macos/Sources/PlayerNarrowPager.swift" "$REPO/macos/Tests/PlayerPresentationUISmoke.swift" \
   -o "$CHECK/Contents/MacOS/PlayerPresentationCheck"
 CFFIXED_USER_HOME="$CHECK_DIR/home" "$CHECK/Contents/MacOS/PlayerPresentationCheck" "$OUTPUT"

@@ -17,7 +17,7 @@ private final class MemoryDefaults: UserDefaults {
         for legacy in [false, true] {
             preferences.values = ["playerShowsLyrics": legacy, "unrelated": "preserved"]
             LyricsDisplayMode.migrateLegacyPreference(in: preferences)
-            let expected: LyricsDisplayMode = legacy ? .always : .never
+            let expected: LyricsDisplayMode = legacy ? .automatic : .never
             precondition(preferences.object(forKey: key) as? String == expected.rawValue)
             precondition(preferences.object(forKey: "playerShowsLyrics") as? Bool == legacy)
             precondition(preferences.object(forKey: "unrelated") as? String == "preserved")
@@ -26,12 +26,16 @@ private final class MemoryDefaults: UserDefaults {
             LyricsDisplayMode.migrateLegacyPreference(in: preferences)
             precondition(preferences.object(forKey: key) as? String == "automatic")
         }
+        preferences.values = [key: "always", "unrelated": "preserved"]
+        LyricsDisplayMode.migrateLegacyPreference(in: preferences)
+        precondition(preferences.object(forKey: key) as? String == "automatic")
+        precondition(preferences.object(forKey: "unrelated") as? String == "preserved")
+        precondition(LyricsDisplayMode.allCases == [.automatic, .never])
         preferences.values = [key: "future-value", "playerShowsLyrics": true]
         LyricsDisplayMode.migrateLegacyPreference(in: preferences)
         precondition(preferences.object(forKey: key) as? String == "future-value")
         for hasLyrics in [false, true] {
             precondition(LyricsDisplayMode.automatic.isVisible(hasLyrics: hasLyrics) == hasLyrics)
-            precondition(LyricsDisplayMode.always.isVisible(hasLyrics: hasLyrics))
             precondition(!LyricsDisplayMode.never.isVisible(hasLyrics: hasLyrics))
         }
         var visible = false

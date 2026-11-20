@@ -1,28 +1,29 @@
 import Foundation
 
 enum LyricsDisplayMode: String, CaseIterable {
-    case automatic, always, never
+    case automatic, never
 
     static let storageKey = "playerLyricsDisplayMode"
 
     var title: String {
         switch self {
-        case .automatic: return "自动"
-        case .always: return "始终开启"
+        case .automatic: return "自动开启"
         case .never: return "始终关闭"
         }
     }
 
     static func migrateLegacyPreference(in defaults: UserDefaults = .standard) {
-        guard defaults.object(forKey: storageKey) == nil,
-              let legacy = defaults.object(forKey: "playerShowsLyrics") as? Bool else { return }
-        defaults.set((legacy ? Self.always : Self.never).rawValue, forKey: storageKey)
+        if let stored = defaults.object(forKey: storageKey) {
+            if stored as? String == "always" { defaults.set(Self.automatic.rawValue, forKey: storageKey) }
+            return
+        }
+        guard let legacy = defaults.object(forKey: "playerShowsLyrics") as? Bool else { return }
+        defaults.set((legacy ? Self.automatic : Self.never).rawValue, forKey: storageKey)
     }
 
     func isVisible(hasLyrics: Bool) -> Bool {
         switch self {
         case .automatic: return hasLyrics
-        case .always: return true
         case .never: return false
         }
     }

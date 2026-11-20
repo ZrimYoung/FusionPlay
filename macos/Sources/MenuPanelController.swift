@@ -90,6 +90,10 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
         position(relativeTo: window.convertToScreen(button.convert(button.bounds, to: nil)),
                  visibleFrame: (window.screen ?? NSScreen.main)?.visibleFrame)
         panel.makeKeyAndOrderFront(nil)
+        // AppKit otherwise focuses the first SwiftUI button automatically and
+        // paints a blue ring around the cover when keyboard navigation is on.
+        // Start without a selected control; Tab still enters the normal key loop.
+        panel.makeFirstResponder(nil)
         button.highlight(true)
         installEventMonitors()
     }

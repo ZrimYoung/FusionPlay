@@ -7,11 +7,13 @@ enum NarrowPlayerLayout: String, CaseIterable, Sendable {
     static let storageKey = "narrowPlayerLayout"
     static let legacyStorageKey = "narrowPlayerPaging"
     var isPaged: Bool { self != .original }
+    var isCover: Bool { self != .ipadPaged }
+    static let settingsChoices: [Self] = [.squarePaged, .ipadPaged]
+    var settingsSelection: Self { isCover ? .squarePaged : .ipadPaged }
     var title: String {
         switch self {
-        case .original: return "原有布局"
-        case .squarePaged: return "方形分页"
-        case .ipadPaged: return "独立播放页"
+        case .original, .squarePaged: return "封面模式"
+        case .ipadPaged: return "专辑模式"
         }
     }
     static func resolve(_ rawValue: String) -> Self { Self(rawValue: rawValue) ?? .original }
