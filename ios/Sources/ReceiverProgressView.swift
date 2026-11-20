@@ -40,26 +40,33 @@ struct ReceiverProgressView: View {
             VStack(spacing: 0) {
                 GeometryReader { geometry in
                     let width = geometry.size.width
-                    let track = progressTrack(width: width, fraction: preview ?? liveFraction)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    let hitArea = Color.clear
                         .contentShape(Rectangle())
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel("播放进度")
                         .accessibilityValue(Self.time(displayedPosition))
 
-                    if hasSeekTarget {
-                        let interaction = scrubGesture(width: width, identity: identity)
-                            .exclusively(before: SpatialTapGesture().onEnded { event in
-                                seek(to: fraction(at: event.location.x, width: width), for: identity)
-                            })
-                        interactiveTrack(track, gesture: interaction)
-                            .allowsHitTesting(seekable)
-                            .disabled(!seekable)
-                            .accessibilityAdjustableAction { adjust($0, for: identity) }
-                    } else {
-                        track
+                    // Keep the drawn bar mounted when only the gesture priority
+                    // changes between a paged and non-paged layout.
+                    ZStack {
+                        progressTrack(width: width, fraction: preview ?? liveFraction)
                             .allowsHitTesting(false)
-                            .accessibilityAddTraits(.updatesFrequently)
+                            .accessibilityHidden(true)
+
+                        if hasSeekTarget {
+                            let interaction = scrubGesture(width: width, identity: identity)
+                                .exclusively(before: SpatialTapGesture().onEnded { event in
+                                    seek(to: fraction(at: event.location.x, width: width), for: identity)
+                                })
+                            interactiveTrack(hitArea, gesture: interaction)
+                                .allowsHitTesting(seekable)
+                                .disabled(!seekable)
+                                .accessibilityAdjustableAction { adjust($0, for: identity) }
+                        } else {
+                            hitArea
+                                .allowsHitTesting(false)
+                                .accessibilityAddTraits(.updatesFrequently)
+                        }
                     }
                 }
                 .frame(height: 44)

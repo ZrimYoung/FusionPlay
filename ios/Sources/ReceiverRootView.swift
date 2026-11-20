@@ -445,12 +445,20 @@ struct ReceiverRootView: View {
 
     private func playbackDetails(paged: Bool, compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
-            if paged {
-                lyricPageLink
+            VStack(alignment: .leading, spacing: 0) {
+                PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
+                lyricPageLink(visible: paged)
+                    .padding(.top, 13)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: paged ? nil : 0, alignment: .top)
+                    .clipped()
+                    .opacity(paged ? 1 : 0)
+                    .allowsHitTesting(paged)
+                    .accessibilityHidden(!paged || selectedPage != .player)
             }
             if showProgress {
                 ReceiverProgressView(model: model, prioritizesScrubbing: paged)
+                    .geometryGroup()
                     .transition(.opacity)
             }
             if showPlaybackControls {
@@ -465,9 +473,9 @@ struct ReceiverRootView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var lyricPageLink: some View {
+    private func lyricPageLink(visible: Bool) -> some View {
         let document = model.lyrics
-        let live = selectedPage == .player && model.snapshot?.phase == .playing && document.isTimed
+        let live = visible && selectedPage == .player && model.snapshot?.phase == .playing && document.isTimed
         return TimelineView(.animation(minimumInterval: 0.25, paused: !live)) { _ in
             let active = model.displayedPositionMs.flatMap { document.activeLineIndex(at: $0) }
             let current = active.map { document.lines[$0].text }
@@ -489,7 +497,6 @@ struct ReceiverRootView: View {
             .accessibilityValue(Text(verbatim: caption ?? ""))
             .accessibilityIdentifier("player.lyrics.open")
         }
-        .accessibilityHidden(selectedPage != .player)
     }
 
     private func cover(side: CGFloat) -> some View {
