@@ -99,11 +99,13 @@ struct ReceiverRootView: View {
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture().onEnded { revealToolbar() })
             .background { playerBackground }
+            .tint(PlayerPalette.accent)
+            .sheet(isPresented: $showingSettings) {
+                ReceiverSettingsView(model: model, windowWidth: proxy.size.width)
+            }
         }
         .preferredColorScheme(.dark)
-        .tint(PlayerPalette.accent)
         .receiverTypography()
-        .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
         .onChange(of: lyricsDisplayMode) { _, _ in lyricVisibilityOverride = nil }
         .onChange(of: trackKey) { _, _ in
@@ -317,8 +319,8 @@ struct ReceiverRootView: View {
                             }
                         }
                     }
-                    ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
                 }
+                ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
                 headerButton("gearshape", label: "接收设置") { showingSettings = true }
             }
             .opacity(toolbarVisible ? 1 : 0)

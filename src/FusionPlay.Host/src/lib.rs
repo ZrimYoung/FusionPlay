@@ -542,14 +542,34 @@ impl Receiver {
                 .set_volume(volume as u8)
                 .map_err(receiver_error)?;
         }
-        let mut settings = self.settings.lock().unwrap();
-        settings.volume = volume;
-        save_json(&self.data.join("settings.json"), &*settings)?;
+        self.store_volume(volume)?;
         self.emit(serde_json::json!({"event":"volume", "percent":volume}));
+        Ok(())
+    }
+
+    /// Remember the live receiver gain without sending it back to the sender.
+    /// An observer may be behind, so read the current gain rather than its snapshot.
+    pub fn remember_current_volume(&self) -> Result<()> {
+        let _operation = self.operations.lock().map_err(storage)?;
+        let volume = self.core.lock().map_err(storage)?.as_ref()
+            .map(|core| core.controller().volume_percent());
+        if let Some(volume) = volume {
+            self.store_volume(volume)?;
+        }
         Ok(())
     }
 }
 impl Receiver {
+    fn store_volume(&self, volume: u32) -> Result<()> {
+        let mut settings = self.settings.lock().map_err(storage)?;
+        if settings.volume != volume {
+            let updated = Settings { volume, ..settings.clone() };
+            save_json(&self.data.join("settings.json"), &updated)?;
+            *settings = updated;
+        }
+        Ok(())
+    }
+
     fn start_inner(&self, settings: Settings) -> Result<()> {
         let interface = network_interfaces()?
             .into_iter()

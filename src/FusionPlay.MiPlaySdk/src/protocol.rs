@@ -550,16 +550,21 @@ impl ControlHub {
     }
 
     /// Publishes a receiver-originated volume change to the active MiPlay
-    /// source. HyperOS consumes the same type-7 `volume` notification that is
-    /// used to confirm a sender-originated SET_VOLUME command.
+    /// source. Before a source connects, this sets the receiver gain for the
+    /// upcoming route. HyperOS consumes the same type-7 notification used to
+    /// confirm a sender-originated SET_VOLUME command.
     pub fn set_volume(&self, percent: u8) -> Result<()> {
         let percent = u32::from(percent.min(100));
-        let active = self
-            .active
-            .lock()
-            .map_err(|_| anyhow::anyhow!("MiPlay control lock poisoned"))?
-            .clone()
-            .context("no active Xiaomi MiPlay source")?;
+        let active = {
+            let route = self.active
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MiPlay control lock poisoned"))?;
+            let Some(active) = route.as_ref() else {
+                self.volume_percent.store(percent, Ordering::Release);
+                return Ok(());
+            };
+            active.clone()
+        };
         let control_route = self.preferred_control_route(&active);
         let control_sender = control_route
             .as_ref()
@@ -579,6 +584,10 @@ impl ControlHub {
             .context("send Xiaomi MiPlay receiver-volume notification")?;
         self.volume_percent.store(percent, Ordering::Release);
         Ok(())
+    }
+
+    pub(crate) fn volume_percent(&self) -> u32 {
+        self.volume_percent.load(Ordering::Acquire)
     }
 
     fn activate(
@@ -1637,7 +1646,7 @@ fn run_session(
                 ))?;
             }
             GET_VOLUME => {
-                let percent = hub.volume_percent.load(Ordering::Acquire).min(100);
+                let percent = hub.volume_percent();
                 tx.send(Outgoing::encrypted(
                     GET_VOLUME_ACK,
                     frame.sequence,
@@ -1808,11 +1817,21 @@ fn run_session(
                 }));
             }
             SET_VOLUME => {
-                let percent = decode_volume_percent(&frame.body);
+                // On iOS the saved receiver level owns startup. An incomplete
+                // request or a source that has not opened playback can only
+                // synchronize with the current level.
+                let percent = if cfg!(target_os = "ios")
+                    && (frame.body.len() < 4 || hub.active_source_session_id(session_id, remote.ip()).is_none())
+                {
+                    hub.volume_percent()
+                } else {
+                    let percent = decode_volume_percent(&frame.body);
+                    hub.volume_percent.store(percent, Ordering::Release);
+                    percent
+                };
                 // MiPCAudio acknowledges SET_VOLUME with an empty body. HyperOS
                 // treats this command as a status-only acknowledgement, so the
                 // applied value must not be placed in the ACK body.
-                hub.volume_percent.store(percent, Ordering::Release);
                 tx.send(Outgoing::encrypted(
                     SET_VOLUME_ACK,
                     frame.sequence,
@@ -1828,9 +1847,6 @@ fn run_session(
                     sequence,
                     volume_notification(percent),
                 ))?;
-                // HyperOS may set the remote volume while the media route is
-                // still opening. Preserve that value so the first PCM samples
-                // and every later GET_VOLUME observe one coherent state.
                 emit_volume(percent, &events);
             }
             SET_MEDIA_INFO => {
@@ -2761,6 +2777,16 @@ mod tests {
                 ) => {}
             result => panic!("MiPlay peer should observe immediate disconnect, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn receiver_volume_can_be_set_before_a_source_connects() {
+        let volume = Arc::new(AtomicU32::new(100));
+        let hub = ControlHub::new(Arc::clone(&volume));
+        hub.set_volume(23).unwrap();
+        assert_eq!(volume.load(Ordering::Acquire), 23);
+        hub.set_volume(0).unwrap();
+        assert_eq!(volume.load(Ordering::Acquire), 0);
     }
 
     #[test]
