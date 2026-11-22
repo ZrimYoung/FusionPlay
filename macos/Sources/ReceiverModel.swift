@@ -86,6 +86,7 @@ final class ReceiverModel: ObservableObject {
     static func preview(_ state: Snapshot, artwork: NSImage?, root: URL) -> ReceiverModel {
         ReceiverModel(preview: state, artwork: artwork, root: root)
     }
+    var previewControlCommand: ((PlaybackCommand) -> Void)?
     func previewLyricsUpdate(_ state: Snapshot) {
         snapshot = state
         updateLyrics(state)
@@ -177,6 +178,13 @@ final class ReceiverModel: ObservableObject {
     var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
     func control(_ command: PlaybackCommand) {
+#if FUSIONPLAY_UI_CHECKS
+        // A fixture records the real button-to-command route without a receiver.
+        if receiver == nil, canControl, let previewControlCommand {
+            previewControlCommand(command)
+            return
+        }
+#endif
         guard let receiver, canControl, !terminating else { return }
         controlBusy = true; controlMessage = "正在发送到手机…"
         if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artworkLoading ? nil : artwork, canSeek: false) }

@@ -20,6 +20,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var invalidated = false
+#if FUSIONPLAY_UI_CHECKS
+    var testReducedTransparencyOverride: Bool?
+#endif
 
     init(model: ReceiverModel, openWindow: @escaping (String) -> Void,
          defaults: UserDefaults = .standard) {
@@ -87,6 +90,9 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
     func show() {
         guard !invalidated, let button = statusItem?.button, let window = button.window else { return }
+        // This method is a user action; background installation may have left
+        // the application hidden. Reveal without taking foreground focus.
+        if NSApp.isHidden { NSApp.unhideWithoutActivation() }
         position(relativeTo: window.convertToScreen(button.convert(button.bounds, to: nil)),
                  visibleFrame: (window.screen ?? NSScreen.main)?.visibleFrame)
         panel.makeKeyAndOrderFront(nil)
@@ -131,7 +137,12 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 
     private func updateMaterial() {
         let style = MenuPanelBackgroundStyle.resolve(defaults.string(forKey: MenuPanelBackgroundStyle.storageKey) ?? MenuPanelBackgroundStyle.defaultValue.rawValue)
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let reduced: Bool
+#if FUSIONPLAY_UI_CHECKS
+        reduced = testReducedTransparencyOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+#else
+        reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+#endif
         let key = "\(style.rawValue):\(reduced)"
         guard key != materialKey else { return }
         materialKey = key
@@ -158,6 +169,13 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
 #endif
         root.frame = NSRect(origin: .zero, size: panel.frame.size)
         root.autoresizingMask = [.width, .height]
+        // Glass cornerRadius shapes the material, but does not guarantee that
+        // hosted backing content is clipped. Mask the complete surface so a
+        // rectangular hosting/backdrop layer cannot paint outside its corners.
+        root.wantsLayer = true
+        root.layer?.isOpaque = false
+        root.layer?.cornerRadius = 18
+        root.layer?.masksToBounds = true
         if host.superview == nil { root.addSubview(host) }
         host.frame = root.bounds
         material = root; panel.contentView = root
@@ -228,6 +246,7 @@ final class MenuPanelController: NSObject, NSWindowDelegate {
     var testMaterial: NSView? { material }
     var testHasStatusItem: Bool { statusItem != nil }
     func testOpenDestination(_ id: String) { openDestination(id) }
+    func testSetHeight(_ height: CGFloat) { updateHeight(height) }
 #endif
 }
 

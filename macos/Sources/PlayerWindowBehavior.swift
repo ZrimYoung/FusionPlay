@@ -42,6 +42,14 @@ struct PlayerWindowBehavior: NSViewRepresentable {
         private var lastMiniRequest = 0
         private var lastLayoutMode = NarrowPlayerLayout.original
         private var preferredLyricsPaneHeight: CGFloat?
+        private var nativeCoverResizeAspect: NSSize?
+        private var minimumObservations: [NSKeyValueObservation] = []
+        private var minimumObservationGeneration: UInt64 = 0
+        private var minimumCorrectionScheduled = false
+        private var applyingMinimum = false
+#if FUSIONPLAY_UI_CHECKS
+        private(set) var minimumCorrectionWritesForCheck = 0
+#endif
 
         func update(_ view: WindowAttachmentView, policy: PlayerWindowBehavior) {
             self.view = view
@@ -56,16 +64,45 @@ struct PlayerWindowBehavior: NSViewRepresentable {
         private func attach(to window: NSWindow?) {
             guard window !== attachedWindow else { return }
             windowObservers.forEach(NotificationCenter.default.removeObserver)
+            invalidateMinimumObservations()
             windowObservers = []; attachedWindow = window
             PlayerWindowDiagnostics.record("attach", window: window, force: true)
             fullScreenTransition = false; fullScreenTransitionGeneration &+= 1
             appliedSquare = nil; appliedDimButtons = nil; normalizeSquareAfterResize = false
             lastLyricsPreference = nil; expandLyricsAfterResize = false; lastLayoutMode = .original
-            preferredLyricsPaneHeight = nil
+            preferredLyricsPaneHeight = nil; nativeCoverResizeAspect = nil
             if let window {
+                // NSHostingView can update contentMinSize without publishing
+                // minSize KVO. Observe both public keys, coalescing their writes
+                // until the host has completed its current sizing pass.
+                minimumObservations = [
+                    window.observe(\.minSize, options: [.new]) { [weak self, weak window] _, _ in
+                        guard let self, let window else { return }
+                        self.scheduleMinimumCorrection(for: window)
+                    },
+                    window.observe(\.contentMinSize, options: [.new]) { [weak self, weak window] _, _ in
+                        guard let self, let window else { return }
+                        self.scheduleMinimumCorrection(for: window)
+                    }
+                ]
                 windowObservers.append(NotificationCenter.default.addObserver(
                     forName: NSWindow.didEndLiveResizeNotification, object: window, queue: .main
-                ) { [weak self] _ in self?.schedule() })
+                ) { [weak self] _ in
+                    self?.nativeCoverResizeAspect = nil
+                    self?.schedule()
+                })
+                // SwiftUI can restore a plain minimum without updating an
+                // otherwise unchanged representable policy. Revalidate the
+                // active native ratio before/through a resize, without changing
+                // the frame or deriving a new ratio from rounded pixels.
+                for name in [NSWindow.willStartLiveResizeNotification, NSWindow.didResizeNotification] {
+                    windowObservers.append(NotificationCenter.default.addObserver(
+                        forName: name, object: window, queue: .main
+                    ) { [weak self, weak window] _ in
+                        guard let self, let window else { return }
+                        self.preserveAspectMinimum(in: window, startingLiveResize: name == NSWindow.willStartLiveResizeNotification)
+                    })
+                }
                 for name in [NSWindow.willEnterFullScreenNotification, NSWindow.didEnterFullScreenNotification,
                              NSWindow.willExitFullScreenNotification, NSWindow.didExitFullScreenNotification] {
                     windowObservers.append(NotificationCenter.default.addObserver(
@@ -76,6 +113,66 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                     })
                 }
             }
+        }
+        private func preserveAspectMinimum(in window: NSWindow, startingLiveResize: Bool) {
+            guard !fullScreenTransition, !window.styleMask.contains(.fullScreen),
+                  let policy = latest, policy.hasTrack, policy.scalesCoverProportionally,
+                  policy.miniLyrics, !policy.coverLyricsResizing,
+                  (policy.layoutMode ?? (policy.pagingEnabled ? .ipadPaged : .original)) == .original,
+                  window.contentRect(forFrameRect: window.frame).width < 600 else { return }
+            let current = window.contentAspectRatio
+            let validCurrent = current.width > 0 && current.height > 0
+            let aspect: NSSize
+            if startingLiveResize {
+                aspect = validCurrent ? current : window.contentRect(forFrameRect: window.frame).size
+                nativeCoverResizeAspect = aspect
+            } else if validCurrent {
+                aspect = current
+            } else {
+                // A bottom-edge gesture is manual and clears its ratio before
+                // SwiftUI updates the policy. Only a genuine native live resize
+                // may restore a ratio erased by the scene sizing controller.
+                guard window.inLiveResize else { return }
+                aspect = nativeCoverResizeAspect ?? window.contentRect(forFrameRect: window.frame).size
+                nativeCoverResizeAspect = aspect
+            }
+            guard aspect.width > 0, aspect.height > 0 else { return }
+            if !validCurrent { window.contentAspectRatio = aspect }
+            applyNativeMinimum(to: window, aspect: aspect)
+        }
+        private func invalidateMinimumObservations() {
+            minimumObservationGeneration &+= 1
+            minimumObservations.forEach { $0.invalidate() }
+            minimumObservations.removeAll()
+            minimumCorrectionScheduled = false
+        }
+        private func scheduleMinimumCorrection(for window: NSWindow) {
+            guard !applyingMinimum, !minimumCorrectionScheduled, attachedWindow === window else { return }
+            minimumCorrectionScheduled = true
+            let token = minimumObservationGeneration
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, self.minimumObservationGeneration == token else { return }
+                self.minimumCorrectionScheduled = false
+                guard let window, self.attachedWindow === window, self.view?.window === window else { return }
+                self.restoreCompatibleMinimumIfNeeded(in: window)
+            }
+        }
+        private func restoreCompatibleMinimumIfNeeded(in window: NSWindow) {
+            guard !applyingMinimum, !fullScreenTransition, !window.styleMask.contains(.fullScreen),
+                  let policy = latest, policy.hasTrack, policy.scalesCoverProportionally,
+                  policy.miniLyrics, !policy.coverLyricsResizing,
+                  (policy.layoutMode ?? (policy.pagingEnabled ? .ipadPaged : .original)) == .original,
+                  window.contentRect(forFrameRect: window.frame).width < 600,
+                  let required = compatibleMinimum(for: window.contentAspectRatio) else { return }
+            let current = window.contentMinSize
+            guard current.width < required.width || current.height < required.height else { return }
+            // Do not lower a stricter legitimate minimum. This path owns only
+            // the lost ratio-compatible lower bound, never frame or ratio.
+            setMinimum(NSSize(width: max(current.width, required.width), height: max(current.height, required.height)),
+                       for: window)
+#if FUSIONPLAY_UI_CHECKS
+            minimumCorrectionWritesForCheck += 1
+#endif
         }
         private func fullScreenChanged(_ name: Notification.Name, window: NSWindow) {
             PlayerWindowDiagnostics.record(name.rawValue, window: window, force: true)
@@ -100,6 +197,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             schedule()
         }
         private func releaseFullScreenSizing(_ window: NSWindow) {
+            nativeCoverResizeAspect = nil
             expandLyricsAfterResize = false
             normalizeSquareAfterResize = false
             let unit = NSSize(width: 1, height: 1)
@@ -107,8 +205,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 window.resizeIncrements != unit || window.contentResizeIncrements != unit {
                 setSquare(false, window: window)
             }
-            let minimum = NSSize(width: 260, height: 260)
-            if window.contentMinSize != minimum { window.contentMinSize = minimum }
+            applyNativeMinimum(to: window)
         }
         private func schedule() {
             generation &+= 1
@@ -187,7 +284,9 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 normalizeSquareAfterResize = false
                 lastLyricsPreference = policy.miniLyrics && layout == .original
                 lastLayoutMode = layout
+                nativeCoverResizeAspect = nil
                 setSquare(false, window: window)
+                applyNativeMinimum(to: window)
                 return
             }
             // Capture the user's lyric area before a no-lyrics transition can
@@ -213,7 +312,7 @@ struct PlayerWindowBehavior: NSViewRepresentable {
                 window.makeKeyAndOrderFront(nil)
                 return
             }
-            let content = window.contentRect(forFrameRect: window.frame).size
+            var content = window.contentRect(forFrameRect: window.frame).size
             let compact = content.width < 600
             let miniLyrics = wantsStackedLyrics && compact
             // A width-boundary crossing is a user's resize, not a request to
@@ -226,16 +325,34 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             let shouldBeSquare = compact && (layout == .squarePaged || (layout == .original && !policy.miniLyrics))
             let squareRatio = NSSize(width: 1, height: 1)
             let proportionalCover = policy.scalesCoverProportionally && miniLyrics
+            if !proportionalCover { nativeCoverResizeAspect = nil }
             let nativeConstraintChanged = shouldBeSquare
                 ? window.contentAspectRatio != squareRatio
                 : window.aspectRatio != .zero || (!proportionalCover && window.contentAspectRatio != .zero) ||
-                  window.resizeIncrements != squareRatio || window.contentResizeIncrements != squareRatio
+                  window.resizeIncrements != squareRatio || (!proportionalCover && window.contentResizeIncrements != squareRatio)
             if appliedSquare != shouldBeSquare || nativeConstraintChanged {
                 setSquare(shouldBeSquare, window: window)
             }
             if proportionalCover { applyCoverScaleAspect(window) }
+            else { applyNativeMinimum(to: window) }
             guard !window.inLiveResize else { return }
-            let minimumHeight = applyMinimumSize(lyrics: miniLyrics, width: content.width, window: window)
+            // A restored/previously undersized frame is repaired once after
+            // resizing, never by competing with AppKit on each drag update.
+            content = window.contentRect(forFrameRect: window.frame).size
+            if content.width < 260 || content.height < 260 {
+                let minimum = window.contentMinSize
+                let desired: NSSize
+                if proportionalCover {
+                    let scale = max(1, minimum.width / max(1, content.width), minimum.height / max(1, content.height))
+                    desired = NSSize(width: content.width * scale, height: content.height * scale)
+                } else {
+                    desired = NSSize(width: max(260, content.width), height: max(260, content.height))
+                }
+                window.setContentSize(desired)
+                content = window.contentRect(forFrameRect: window.frame).size
+            }
+            let minimumHeight = applyMinimumSize(lyrics: miniLyrics, width: content.width, window: window,
+                                                 preservingAspect: proportionalCover)
             if miniLyrics && content.height < minimumHeight
                 && (!proportionalCover || content.height <= content.width + 1) {
                 // Cover and its controls occupy a square; only grow enough to
@@ -260,27 +377,50 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             let size = window.contentRect(forFrameRect: window.frame).size
             guard size.width > 0, size.height > 0 else { return }
             let current = window.contentAspectRatio
-            let ratio = size.width / size.height
-            if current.height <= 0 || abs(current.width / current.height - ratio) > 0.00001 {
-                // The bottom edge temporarily releases this ratio; all other
-                // native resize edges scale the settled cover presentation.
-                window.contentAspectRatio = size
+            let validCurrent = current.width.isFinite && current.height.isFinite && current.width > 0 && current.height > 0
+            // Pixel rounding during a native side/top drag must not continuously
+            // redefine the ratio that AppKit is already enforcing.
+            let aspect = window.inLiveResize ? (validCurrent ? current : nativeCoverResizeAspect ?? size) : size
+            if window.inLiveResize { nativeCoverResizeAspect = aspect }
+            if !validCurrent || (!window.inLiveResize && abs(current.width / current.height - size.width / size.height) > 0.00001) {
+                window.contentAspectRatio = aspect
             }
+            applyNativeMinimum(to: window, aspect: aspect)
         }
-        @discardableResult private func applyMinimumSize(lyrics: Bool, width: CGFloat, window: NSWindow) -> CGFloat {
-            let height = lyrics ? width + 136 : 260
-            // The Window scene owns the fixed 260-point native minimum.
-            // Do not publish a second width-dependent contentMinSize here:
-            // SwiftUI restores its own minimum on subsequent media updates.
-            // Enforce the square-cover lyric area by clamping actual geometry
-            // after a resize instead, outside AppKit's measurement pass.
+        private func compatibleMinimum(for aspect: NSSize) -> NSSize? {
+            guard aspect.width.isFinite, aspect.height.isFinite, aspect.width > 0, aspect.height > 0 else { return nil }
+            let ratio = aspect.width / aspect.height
+            let width = ceil(260 * max(1, ratio)), height = ceil(260 * max(1, 1 / ratio))
+            guard ratio.isFinite, ratio > 0, width.isFinite, height.isFinite else { return nil }
+            return NSSize(width: width, height: height)
+        }
+        private func setMinimum(_ minimum: NSSize, for window: NSWindow) {
+            guard window.contentMinSize != minimum else { return }
+            let wasApplying = applyingMinimum
+            applyingMinimum = true
+            window.contentMinSize = minimum
+            applyingMinimum = wasApplying
+        }
+        private func applyNativeMinimum(to window: NSWindow, aspect: NSSize? = nil) {
+            if let aspect, let required = compatibleMinimum(for: aspect) {
+                // Match both lower bounds to one allowed scale. AppKit can
+                // otherwise derive a width below SwiftUI's 260-point floor.
+                let current = window.contentMinSize
+                setMinimum(NSSize(width: max(current.width, required.width), height: max(current.height, required.height)),
+                           for: window)
+                return
+            }
             let minimum = NSSize(width: 260, height: 260)
             let chrome = max(0, window.frame.height - window.contentLayoutRect.height)
             if window.contentMinSize.width != minimum.width || window.contentMinSize.height < minimum.height
                 || window.contentMinSize.height > minimum.height + chrome {
-                window.contentMinSize = minimum
+                setMinimum(minimum, for: window)
             }
-            return height
+        }
+        @discardableResult private func applyMinimumSize(lyrics: Bool, width: CGFloat, window: NSWindow,
+                                                         preservingAspect: Bool = false) -> CGFloat {
+            applyNativeMinimum(to: window, aspect: preservingAspect ? window.contentAspectRatio : nil)
+            return lyrics ? width + 136 : 260
         }
         private func lyricHeight(width: CGFloat, window: NSWindow) -> CGFloat {
             let minimum = width + 136
@@ -305,9 +445,13 @@ struct PlayerWindowBehavior: NSViewRepresentable {
             generation &+= 1
             fullScreenTransitionGeneration &+= 1; fullScreenTransition = false
             windowObservers.forEach(NotificationCenter.default.removeObserver)
+            invalidateMinimumObservations()
             windowObservers = []; attachedWindow = nil; view = nil; latest = nil
         }
-        deinit { windowObservers.forEach(NotificationCenter.default.removeObserver) }
+        deinit {
+            windowObservers.forEach(NotificationCenter.default.removeObserver)
+            minimumObservations.forEach { $0.invalidate() }
+        }
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> WindowAttachmentView {

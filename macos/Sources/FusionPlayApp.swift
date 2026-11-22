@@ -30,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if duplicates.count > 1 { NSApp.terminate(nil) }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        sender.unhide(nil)
         guard let showPlayer else { return true }
         showPlayer()
         return false
@@ -99,6 +100,7 @@ private struct PlayerWindowContent: View {
     var body: some View {
         PlayerView(model: model).focusedSceneValue(\.playerSupportsFullScreen, true).onAppear {
             delegate.configureMenuPanel(model: model) { id in
+                NSApp.unhide(nil)
                 openWindow(id: id)
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -120,6 +122,7 @@ private struct SettingsWindowContent: View {
     var body: some View {
         SettingsPanel(model: model).onAppear {
             delegate.configureMenuPanel(model: model) { id in
+                NSApp.unhide(nil)
                 openWindow(id: id)
                 NSApp.activate(ignoringOtherApps: true)
             }
@@ -318,6 +321,7 @@ struct PlaybackControls: View {
     }
 }
 
+@MainActor
 struct PlayerView: View {
     @Environment(\.appTypography) private var typography
     @AppStorage("uiCorrectLyricTitles") private var correctLyricTitles = false
@@ -339,6 +343,11 @@ struct PlayerView: View {
     @AppStorage("lyricsPageShowsArtwork") private var lyricsPageShowsArtwork = true
     @AppStorage("lyricsPageShowsTrackInfo") private var lyricsPageShowsTrackInfo = true
     @ObservedObject var model: ReceiverModel
+    @State private var responsiveMotion: PlayerResponsiveMotionDriver
+    init(model: ReceiverModel, responsiveMotion: PlayerResponsiveMotionDriver? = nil) {
+        self.model = model
+        _responsiveMotion = State(initialValue: responsiveMotion ?? PlayerResponsiveMotionDriver())
+    }
     @Environment(\.colorSchemeContrast) private var colorContrast
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -401,6 +410,9 @@ struct PlayerView: View {
         return String(format: "%llu:%02llu", seconds / 60, seconds % 60)
     }
     var body: some View {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        let _ = NativeLyricsReflowBenchmark.hit("playerRootEvaluations")
+#endif
         GeometryReader { geometry in
             let compact = geometry.size.width < 600
             ZStack {
@@ -410,18 +422,10 @@ struct PlayerView: View {
                         .foregroundStyle(.white.opacity(0.28))
                         .frame(width: geometry.size.width, height: geometry.size.height)
                         .accessibilityLabel(L("等待你的音乐"))
-                } else if compact {
-                    // Keep the cover page mounted while its lower lyric pane opens
-                    // or snaps closed; a root transition would crossfade two covers.
-                    pagedMini(size: geometry.size)
-                        .transaction { transaction in
-                            if coverLyricsResizing {
-                                transaction.animation = nil
-                                transaction.disablesAnimations = true
-                            }
-                        }
-                } else { expanded(size: geometry.size).transition(.opacity) }
-            }.animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: compact)
+                } else {
+                    responsivePlayer(size: geometry.size)
+                }
+            }
             PlayerWindowBehavior(square: compact && (narrowLayout == .squarePaged || (narrowLayout == .original && !showLyrics)),
                                  miniRequest: model.miniPlayerRequest, miniLyrics: showLyrics,
                                  dimButtons: compact && !showMiniControls,
@@ -465,9 +469,6 @@ struct PlayerView: View {
             }
 #endif
             .environment(\.colorScheme, .dark)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showPlaybackControls)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: showProgress)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.36), value: showLyrics)
             .modifier(PlayerFullScreenEligibility())
             .onAppear { lyricsVisibility.observe(trackID: stableTrackID, connected: connected) }
             .onChange(of: stableTrackID) { _, id in
@@ -494,194 +495,121 @@ struct PlayerView: View {
                 guard !Task.isCancelled else { return }
                 hovering = false
             }
-            .onDisappear { pointerInside = false; hovering = false }
+            .onChange(of: hasTrack) { _, value in if !value { responsiveMotion.stop() } }
+            .onDisappear { pointerInside = false; hovering = false; responsiveMotion.stop() }
     }
-    private func expanded(size: CGSize) -> some View {
-        let lyricsLayout = ExpandedLyricsLayout(size: size, showsProgress: showProgress,
-                                                showsTransport: showPlaybackControls)
-        let inset = showLyrics ? lyricsLayout.horizontalInset : horizontalInset(for: size.width)
-        let gap = lyricsLayout.columnGap
-        let availableWidth = max(0, size.width - inset * 2)
-        let column = lyricsLayout.albumColumnWidth
-        let padding = lyricsLayout.verticalPadding
-        let standardSide = min(360, size.height - 48, size.width * 0.37)
-        let metadataExtra = metadataExtraHeight(width: column, titleSize: 20, subtitleSize: 12, defaultTitleLines: 1)
-        let side = showLyrics ? max(60, lyricsLayout.artworkSide - metadataExtra) : standardSide
-        let detailWidth = min(440, max(0, availableWidth - standardSide - 28))
-        let albumWidth = showLyrics ? column : standardSide + 28 + detailWidth
-        let lyricsWidth = lyricsLayout.lyricsWidth
-        let albumLayout = showLyrics
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 0))
-            : AnyLayout(HStackLayout(alignment: .top, spacing: 28))
-        return HStack(spacing: showLyrics ? gap : 0) {
-            // AnyLayout moves the same cover/details between horizontal and
-            // vertical arrangements instead of replacing the player subtree.
-            if wrapPlayerMetadata {
-                ScrollView(.vertical) {
-                    albumLayout {
-                        cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
-                        expandedDetails(width: showLyrics ? column : detailWidth)
-                            .frame(width: showLyrics ? column : detailWidth)
-                    }.frame(width: albumWidth)
-                }.scrollIndicators(.hidden)
-                    .frame(width: albumWidth, height: max(0, size.height - (showLyrics ? padding * 2 : 24)))
-            } else {
-                albumLayout {
-                    cover(side: side).frame(width: showLyrics ? column : side, alignment: .leading)
-                    expandedDetails(width: showLyrics ? column : detailWidth)
-                        .frame(width: showLyrics ? column : detailWidth)
-                        .frame(height: showLyrics ? nil : side)
-                }.frame(width: albumWidth)
-            }
-            // Keep the lyric viewport and its scroll identity alive at their
-            // reading width while the surrounding slot collapses and fades.
-            lyricsPanel(compact: false)
-                .frame(width: lyricsWidth, height: max(0, size.height - padding * 2))
-                .animation(nil, value: CGSize(width: lyricsWidth, height: max(0, size.height - padding * 2)))
-                .frame(width: showLyrics ? lyricsWidth : 0, alignment: .leading)
-                .mask { Rectangle().padding(.horizontal, -24) }
-                .opacity(showLyrics ? 1 : 0)
-                .offset(y: showLyrics ? 0 : 12)
-                .allowsHitTesting(showLyrics).accessibilityHidden(!showLyrics)
-        }.padding(.horizontal, inset).padding(.vertical, showLyrics ? padding : 0)
-            .frame(width: size.width, height: size.height, alignment: .center)
-    }
-    private func expandedDetails(width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            PlayerTrackMetadataView(title: title, subtitle: subtitle, width: width,
-                                    titleSize: showLyrics ? 20 : 28, subtitleSize: showLyrics ? 12 : 14,
-                                    spacing: showLyrics ? 5 : 9, defaultTitleLines: showLyrics ? 1 : 2,
-                                    subtitleOpacity: showLyrics ? 0.7 : 0.72, allowsSelection: true)
-                .frame(minHeight: showLyrics ? nil : 86, alignment: .topLeading)
-                .padding(.top, showLyrics ? 14 : 0).padding(.bottom, showLyrics ? 10 : 0)
-            if !showLyrics {
-                Spacer(minLength: 18)
-                if !model.error.isEmpty {
-                    Label {
-                        Text(model.error).font(typography.font(size: 11))
-                    } icon: {
-                        Image(systemName: "exclamationmark.circle").font(.system(size: 11))
-                    }.foregroundStyle(.white.opacity(0.85))
-                        .lineLimit(2).help(model.error).padding(.bottom, 10)
-                }
-            }
-            progress
-            expandedTransport
-        }
-    }
-    @ViewBuilder private var expandedTransport: some View {
-        if showLyrics {
-            miniTransport.transition(.opacity)
-        } else {
-            HStack(spacing: 28) {
-                Spacer(minLength: 0)
-                transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
-                Button { model.togglePlayback() } label: {
-                    Image(systemName: playing ? "pause.fill" : "play.fill")
-                        .contentTransition(.opacity)
-                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: playing)
-                        .font(.system(size: 23, weight: .semibold))
-                        .offset(x: playing ? 0 : 1)
-                        .frame(width: 62, height: 62)
-                        .modifier(PlayerGlass())
-                }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
-                    .opacity(model.canControl ? 1 : 0.45)
-                    .help(playing ? L("暂停") : L("播放")).accessibilityLabel(playing ? L("暂停") : L("播放"))
-                transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
-                Spacer(minLength: 0)
-            }.frame(height: 62)
-                .frame(height: showPlaybackControls ? 62 : 0, alignment: .top).clipped()
-                .opacity(showPlaybackControls ? 1 : 0)
-                .allowsHitTesting(showPlaybackControls).accessibilityHidden(!showPlaybackControls)
-                .padding(.top, showPlaybackControls ? 6 : 0)
-                .transition(.opacity)
-        }
-    }
-    private func mini(size: CGSize, includesLyrics: Bool? = nil, keepLyricsMounted: Bool = false) -> some View {
-        let showControls = showMiniControls
-        let showsLyrics = includesLyrics ?? showLyrics
-        let coverHeight = size.width
-        let coverSize = CGSize(width: size.width, height: coverHeight)
-        let artworkMode: ContentMode = .fill
-        let paneHeight = max(0, size.height - size.width)
-        let lyricGap = min(8, paneHeight)
-        let lyricsHeight = max(0, paneHeight - lyricGap)
-        let titleSize: CGFloat = size.width < 320 ? 17 : 20
-        let controlsBudget: CGFloat = 32 + (showProgress ? 44 : 0) + (showPlaybackControls ? 46 : 0)
-        let lineBudget = PlayerMetadataLineBudget(availableHeight: max(0, coverHeight - controlsBudget - 6),
-            titleLineHeight: NSLayoutManager().defaultLineHeight(for: typography.nsFont(size: titleSize, weight: .semibold)),
+    private func responsivePlayer(size: CGSize) -> some View {
+        let compact = size.width < NarrowPlayerPresentation.breakpoint
+        let expandedCover = narrowLayout == .original && showLyrics
+        let paging = compact && !expandedCover && !coverLyricsResizing
+        let playbackActive = !compact || expandedCover || compactPage == .playback
+        let coverTitleSize: CGFloat = size.width < 320 ? 17 : 20
+        let budget = PlayerMetadataLineBudget(
+            availableHeight: max(0, size.width - 32 - (showProgress ? 44 : 0) - (showPlaybackControls ? 46 : 0) - 6),
+            titleLineHeight: NSLayoutManager().defaultLineHeight(for: typography.nsFont(size: coverTitleSize, weight: .semibold)),
             subtitleLineHeight: NSLayoutManager().defaultLineHeight(for: typography.nsFont(size: 12)),
             spacing: 5, hasSubtitle: !subtitle.isEmpty)
-        return VStack(spacing: 0) {
-            ZStack(alignment: .bottom) {
-                if let artwork = model.artwork {
-                    ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: artworkMode)
-                        .frame(width: size.width, height: coverHeight).clipped()
-                        .accessibilityHidden(true)
-                } else {
-                    Image(systemName: "music.note").font(.system(size: showsLyrics ? 56 : 64, weight: .ultraLight))
-                        .foregroundStyle(.white.opacity(showsLyrics ? 0.35 : 0.4))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    PlayerTrackMetadataView(title: title, subtitle: subtitle, width: max(0, size.width - 32),
-                                            titleSize: titleSize, subtitleSize: 12, spacing: 5,
-                                            defaultTitleLines: 2,
-                                            wrappedTitleLines: lineBudget.titleLines, wrappedSubtitleLines: lineBudget.subtitleLines,
-                                            subtitleOpacity: 0.75)
-                    progress.padding(.top, showProgress ? 8 : 0)
-                    miniTransport.padding(.top, showPlaybackControls ? 2 : 0)
-                }.padding(16)
-                    .background { if showControls { PlayerPagingDragExclusion() } }
-                    .background {
-                        GeometryReader { geometry in
-                            miniBackdrop(size: coverSize, controlsHeight: geometry.size.height, artworkMode: artworkMode)
-                                .offset(y: geometry.size.height - coverHeight)
-                                .opacity(showControls ? 1 : 0)
-                                .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.42 : 0.65)
-                                    .delay(showControls ? 0 : 0.08), value: showControls)
-                        }.allowsHitTesting(false).accessibilityHidden(true)
-                    }
-                    .opacity(showControls ? 1 : 0)
-                    .allowsHitTesting(showControls).accessibilityHidden(!showControls)
-                    .animation(reduceMotion ? nil : .easeInOut(duration: showControls ? 0.36 : 0.42)
-                        .delay(showControls ? 0.1 : 0), value: showControls)
-            }.frame(width: size.width, height: coverHeight).clipped()
-#if FUSIONPLAY_UI_CHECKS
-                .onAppear { PlayerCoverLifecycleCheck.appearances += 1 }
+        let target = PlayerResponsiveLayout(size: size, layout: narrowLayout, showLyrics: showLyrics,
+            page: compactPage, showControls: showMiniControls, showsProgress: showProgress,
+            showsTransport: showPlaybackControls, headerArtwork: lyricsPageShowsArtwork,
+            headerInfo: lyricsPageShowsTrackInfo, wraps: wrapPlayerMetadata,
+            coverTitleLines: budget.titleLines, coverSubtitleLines: budget.subtitleLines) { width, titleSize, subtitleSize, spacing, titleLines, subtitleLines in
+#if FUSIONPLAY_REFLOW_BENCHMARK
+                NativeLyricsReflowBenchmark.hit("playerMetadataMeasures")
 #endif
-            // Retain the lyric pane's spacing without painting a hairline
-            // below the cover, which looked like a misaligned material edge.
-            Color.clear.frame(height: showsLyrics ? lyricGap : 0)
-                .accessibilityHidden(true)
-            if keepLyricsMounted || includesLyrics != false {
-                lyricsPanel(compact: true, presentationActive: showsLyrics)
-                    .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
-                    .frame(width: size.width, height: lyricsHeight)
-                    .animation(nil, value: CGSize(width: size.width, height: lyricsHeight))
-                    .frame(height: showsLyrics ? lyricsHeight : 0, alignment: .top)
-                    .clipped().opacity(showsLyrics ? 1 : 0)
-                    .offset(y: showsLyrics ? 0 : 12)
-                    .allowsHitTesting(showsLyrics).accessibilityHidden(!showsLyrics)
+                return PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
+                    titleFont: typography.nsFont(size: titleSize, weight: .semibold),
+                    subtitleFont: typography.nsFont(size: subtitleSize), spacing: spacing,
+                    wraps: wrapPlayerMetadata, wrappedTitleLines: titleLines, wrappedSubtitleLines: subtitleLines)
+            }.pose
+        let key = PlayerCanvasMotionKey(compact: compact, cover: narrowLayout.isCover,
+            page: compactPage, lyrics: showLyrics, controls: !compact || !narrowLayout.isCover || showMiniControls,
+            progress: showProgress, transport: showPlaybackControls, wraps: wrapPlayerMetadata,
+            headerArtwork: lyricsPageShowsArtwork, headerInfo: lyricsPageShowsTrackInfo)
+        let input = PlayerCanvasMotionInput(pose: target, key: key)
+        let lyricActive = target[.lyrics].opacity > 0.5
+        return ZStack(alignment: .topLeading) {
+            // One playback subtree, including short-window native scrolling.
+            ScrollView(.vertical) {
+                ZStack(alignment: .topLeading) {
+                    canvasArtwork(fills: compact && narrowLayout.isCover)
+                        .canvasPlacement(.artwork, target: target, motion: responsiveMotion, interactive: playbackActive)
+                    miniBackdrop(size: target[.coverBackdrop].frame.size, controlsHeight: target.controlsHeight)
+                        .canvasPlacement(.coverBackdrop, target: target, motion: responsiveMotion, interactive: false)
+                    PlayerTrackMetadataView(title: title, subtitle: subtitle, width: target[.metadata].frame.width,
+                        titleSize: target.titleSize, subtitleSize: target.subtitleSize,
+                        spacing: target.metadataSpacing, wrappedTitleLines: target.titleLines,
+                        wrappedSubtitleLines: target.subtitleLines, subtitleOpacity: target.subtitleOpacity, allowsSelection: true)
+                        .frame(width: target[.metadata].frame.width, height: target[.metadata].frame.height, alignment: .topLeading).clipped()
+                        .background { if target[.metadata].opacity > 0.5 { PlayerPagingDragExclusion() } }
+                        .canvasPlacement(.metadata, target: target, motion: responsiveMotion, interactive: playbackActive && target[.metadata].opacity > 0.5)
+                    currentLyricSummary(active: compact && !narrowLayout.isCover && compactPage == .playback)
+                        .canvasPlacement(.lyricSummary, target: target, motion: responsiveMotion, interactive: playbackActive && target[.lyricSummary].opacity > 0.5)
+                    PlaybackProgressView(model: model, visible: playbackActive && showProgress && target[.progress].opacity > 0.5)
+                        .canvasPlacement(.progress, target: target, motion: responsiveMotion, interactive: playbackActive && showProgress && target[.progress].opacity > 0.5)
+                    canvasTransport("backward.end.fill", label: L("上一曲"), interactive: playbackActive && showPlaybackControls && target[.previous].opacity > 0.5) { model.control(.previous) }
+                        .canvasPlacement(.previous, target: target, motion: responsiveMotion, interactive: playbackActive && showPlaybackControls && target[.previous].opacity > 0.5)
+                    PlayerCanvasGlassVisual(motion: responsiveMotion, targetOpacity: target.glassOpacity) { glass in
+                        canvasTransport(playing ? "pause.fill" : "play.fill", label: playing ? L("暂停") : L("播放"), glass: glass, interactive: playbackActive && showPlaybackControls && target[.playPause].opacity > 0.5) { model.togglePlayback() }
+                    }
+                        .canvasPlacement(.playPause, target: target, motion: responsiveMotion, interactive: playbackActive && showPlaybackControls && target[.playPause].opacity > 0.5)
+                    canvasTransport("forward.end.fill", label: L("下一曲"), interactive: playbackActive && showPlaybackControls && target[.next].opacity > 0.5) { model.control(.next) }
+                        .canvasPlacement(.next, target: target, motion: responsiveMotion, interactive: playbackActive && showPlaybackControls && target[.next].opacity > 0.5)
+                }
+                .frame(width: size.width, height: max(size.height, target.contentHeight), alignment: .topLeading)
+                .background { PlayerPlaybackScrollIdentity() }
             }
-        }.frame(width: size.width, height: size.height, alignment: .top).clipped()
-            .contentShape(Rectangle())
-            .accessibilityLabel(L("迷你播放器") + ", " + title)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: title)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: subtitle)
+            .scrollIndicators(.automatic).scrollContentBackground(.hidden)
+            .frame(width: size.width, height: size.height)
+            // The lyric viewport stays at this single call site; only its frame
+            // changes. It is never a matched-geometry/compositor snapshot.
+            lyricsPanel(compact: compact, presentationActive: lyricActive,
+                geometryInteractionActive: coverLyricsResizing)
+                .canvasPlacement(.lyrics, target: target, motion: responsiveMotion, interactive: lyricActive)
+            Button { requestCompactPage(.playback) } label: { lyricsPageSummary(size: size) }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("fusionplay.player.lyrics.header")
+                .accessibilityLabel(L("返回播放页"))
+                .canvasPlacement(.lyricsHeader, target: target, motion: responsiveMotion, interactive: compact && compactPage == .lyrics && target[.lyricsHeader].opacity > 0.5)
+        }
+        .frame(width: size.width, height: size.height, alignment: .topLeading).clipped()
+        .background { NarrowPlayerHorizontalScroll(requestPage: requestCompactPage, enabled: paging,
+            allowsLyricDragging: paging && compactPage == .lyrics) }
+        .onChange(of: input, initial: true) { _, value in
+            responsiveMotion.move(to: value.pose, key: value.key, animated: !reduceMotion && !coverLyricsResizing)
+        }
+        .onChange(of: reduceMotion) { _, value in
+            if value { responsiveMotion.move(to: target, key: key, animated: false) }
+        }
+        .onChange(of: coverLyricsResizing) { _, value in
+            if value { responsiveMotion.move(to: target, key: key, animated: false) }
+        }
     }
-    private func metadataExtraHeight(width: CGFloat, titleSize: CGFloat, subtitleSize: CGFloat,
-                                     defaultTitleLines: Int) -> CGFloat {
-        guard wrapPlayerMetadata else { return 0 }
-        let titleFont = typography.nsFont(size: titleSize, weight: .semibold)
-        let subtitleFont = typography.nsFont(size: subtitleSize)
-        let base = PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
-            titleFont: titleFont, subtitleFont: subtitleFont, spacing: 5, wraps: false,
-            defaultTitleLines: defaultTitleLines)
-        let expanded = PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
-            titleFont: titleFont, subtitleFont: subtitleFont, spacing: 5, wraps: true,
-            defaultTitleLines: defaultTitleLines)
-        return max(0, expanded - base)
+    private func canvasArtwork(fills: Bool) -> some View {
+        ZStack {
+            Rectangle().fill(.white.opacity(0.06))
+            if let artwork = model.artwork {
+                ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: fills ? .fill : .fit)
+            } else {
+                Image(systemName: "music.note").font(.system(size: 56, weight: .ultraLight))
+                    .foregroundStyle(.white.opacity(0.32))
+            }
+        }
+        .accessibilityLabel(model.artwork == nil ? L("暂无专辑封面") : L("专辑封面"))
+#if FUSIONPLAY_UI_CHECKS
+        .onAppear { PlayerCoverLifecycleCheck.appearances += 1 }
+#endif
+    }
+    private func canvasTransport(_ symbol: String, label: String, glass: Double = 0,
+                                 interactive: Bool, action: @escaping () -> Void) -> some View {
+        ZStack {
+            if glass > 0.001 {
+                Color.clear.modifier(PlayerGlass()).opacity(glass).allowsHitTesting(false)
+            }
+            PlayerTransportButton(symbol: symbol, label: label, enabled: model.canControl,
+                                  interactive: interactive, action: action)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            .opacity(model.canControl ? 0.9 : 0.3)
     }
     private func setCoverLyricsExpanded(_ expanded: Bool) {
         var transaction = Transaction(animation: nil)
@@ -696,39 +624,6 @@ struct PlayerView: View {
     private func requestCompactPage(_ page: CompactPlayerPage) {
         compactPage = page
     }
-    private func pagedMini(size: CGSize) -> some View {
-        let coverExpanded = narrowLayout == .original && showLyrics
-        let pagingEnabled = !coverExpanded && !coverLyricsResizing
-        return PlayerNarrowPager(selection: $compactPage, requestPage: requestCompactPage, pagingEnabled: pagingEnabled) {
-            Group {
-                if narrowLayout.isCover {
-                    mini(size: size, includesLyrics: coverExpanded, keepLyricsMounted: true)
-                        .transition(.opacity)
-                } else {
-                    pagedPlayback(size: size).transition(.opacity)
-                }
-            }.animation(reduceMotion ? nil : .easeInOut(duration: 0.32), value: narrowLayout.isCover)
-        } lyrics: {
-            VStack(spacing: 0) {
-                if narrowLayout == .ipadPaged && (lyricsPageShowsArtwork || lyricsPageShowsTrackInfo) {
-                    Group {
-                        if narrowLayout == .ipadPaged {
-                            Button { requestCompactPage(.playback) } label: { lyricsPageSummary(size: size) }
-                                .buttonStyle(.plain)
-                                .background { PlayerPagingDragExclusion() }
-                                .accessibilityIdentifier("fusionplay.player.lyrics.header")
-                                .accessibilityLabel(L("返回播放页"))
-                                .accessibilityValue([title, subtitle].filter { !$0.isEmpty }.joined(separator: ", "))
-                                .help(L("点击歌曲信息返回播放页"))
-                        } else { lyricsPageSummary(size: size) }
-                    }.padding(.horizontal, 20).padding(.top, 8).padding(.bottom, 10)
-                }
-                lyricsPanel(compact: true, presentationActive: pagingEnabled && compactPage == .lyrics)
-                    .padding(.horizontal, size.width < 320 ? 16 : 22).padding(.bottom, 12)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }.padding(.top, 44)
-        }.frame(width: size.width, height: size.height)
-    }
     private func lyricsPageSummary(size: CGSize) -> some View {
         HStack(alignment: .center, spacing: 12) {
             if lyricsPageShowsArtwork { cover(side: 56) }
@@ -740,41 +635,8 @@ struct PlayerView: View {
             if !lyricsPageShowsTrackInfo { Spacer(minLength: 0) }
         }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
     }
-    private func pagedPlayback(size: CGSize) -> some View {
-        let measureMetadata: (CGFloat) -> CGFloat = { width in
-            PlayerTrackMetadataView.height(title: title, subtitle: subtitle, width: width,
-                titleFont: typography.nsFont(size: 22, weight: .semibold), subtitleFont: typography.nsFont(size: 13),
-                spacing: 5, wraps: wrapPlayerMetadata, defaultTitleLines: 2)
-        }
-        let layout = PagedPlaybackLayout(size: size,
-            metadataHeight: measureMetadata(PagedPlaybackLayout.maximumContentWidth(for: size.width)),
-            showsProgress: showProgress, showsTransport: showPlaybackControls,
-            metadataHeightForWidth: measureMetadata)
-        return ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 0) {
-                cover(side: layout.artworkSide)
-                    .accessibilityIdentifier("fusionplay.player.paged-artwork")
-                    .frame(maxWidth: .infinity, alignment: .center)
-                PlayerTrackMetadataView(title: title, subtitle: subtitle, width: layout.contentWidth,
-                    titleSize: 22, subtitleSize: 13, spacing: 5, defaultTitleLines: 2, allowsSelection: true)
-                    .accessibilityIdentifier("fusionplay.player.paged-metadata")
-                    .background { PlayerPagingDragExclusion() }
-                    .padding(.top, 18)
-                currentLyricSummary.padding(.top, 12)
-                progress.accessibilityIdentifier("fusionplay.player.paged-progress")
-                    .padding(.top, showProgress ? 12 : 0)
-                miniTransport.padding(.top, showPlaybackControls ? 8 : 0)
-            }.frame(width: layout.contentWidth)
-                .frame(minHeight: layout.viewportHeight, alignment: .center)
-                .padding(.horizontal, layout.horizontalInset)
-                .padding(.bottom, layout.bottomInset)
-        }.scrollIndicators(.automatic)
-            .frame(width: size.width, height: max(0, size.height - layout.topInset))
-            .padding(.top, layout.topInset)
-            .frame(width: size.width, height: size.height)
-    }
-    private var currentLyricSummary: some View {
-        TimelineView(.animation(minimumInterval: 0.15, paused: !playing || compactPage != .playback)) { _ in
+    private func currentLyricSummary(active: Bool) -> some View {
+        TimelineView(.animation(minimumInterval: 0.15, paused: !playing || !active)) { _ in
             let current = PlayerCurrentLyricSummary.text(document: model.lyrics, positionMs: model.displayedPositionMs)
             let emptyCaption = model.lyrics.lines.isEmpty ? L("暂无歌词") : L("查看歌词")
             let caption = model.lyricsLoading ? L("正在载入歌词…") : (current ?? emptyCaption)
@@ -830,30 +692,18 @@ struct PlayerView: View {
             .accessibilityHidden(compact && !showMiniControls)
             .animation(reduceMotion ? nil : .easeInOut(duration: showMiniControls ? 0.36 : 0.42), value: showMiniControls)
     }
-    private func lyricsPanel(compact: Bool, presentationActive: Bool = true) -> some View {
+    private func lyricsPanel(compact: Bool, presentationActive: Bool = true, geometryInteractionActive: Bool = false) -> some View {
         let track = model.snapshot?.trackId
         let trackTitle = model.snapshot?.title
         return LyricsView(document: model.lyrics, positionMs: model.displayedPositionMs,
                           loading: model.lyricsLoading, connected: model.snapshot?.controlsAvailable == true,
                           compact: compact, canSeek: model.canSeek, presentationActive: presentationActive,
-                          geometryInteractionActive: compact && narrowLayout.isCover && coverLyricsResizing) { position in
+                          geometryInteractionActive: geometryInteractionActive || (compact && narrowLayout.isCover && coverLyricsResizing)) { position in
             // A row from a disappearing track must not seek the newly selected one.
             let sameTrack = (track?.isEmpty == false) ? track == model.snapshot?.trackId : trackTitle == model.snapshot?.title
             guard sameTrack else { return }
             model.seek(to: position)
         }.id((track?.isEmpty == false ? track : trackTitle) ?? "")
-    }
-    private var miniTransport: some View {
-        HStack {
-            Spacer(minLength: 0)
-            transport("backward.end.fill", label: L("上一曲")) { model.control(.previous) }
-            transport(playing ? "pause.fill" : "play.fill", label: playing ? L("暂停") : L("播放")) { model.togglePlayback() }
-            transport("forward.end.fill", label: L("下一曲")) { model.control(.next) }
-            Spacer(minLength: 0)
-        }.frame(height: 44)
-            .frame(height: showPlaybackControls ? 44 : 0, alignment: .top).clipped()
-            .opacity(showPlaybackControls ? 1 : 0)
-            .allowsHitTesting(showPlaybackControls).accessibilityHidden(!showPlaybackControls)
     }
     private func miniBackdrop(size: CGSize, controlsHeight: CGFloat, artworkMode: ContentMode = .fill) -> some View {
         // The background uses the same container geometry as the controls.
@@ -866,12 +716,11 @@ struct PlayerView: View {
                 // Blend successive blur radii over adjacent bands. Below each band
                 // its layer is opaque, so sharp artwork cannot leak through the controls.
                 ForEach(0..<4) { step in
-                    let radii: [CGFloat] = [6, 14, 26, 40]
                     let start = fadeStart + (1 - fadeStart) * CGFloat(step) / 4
                     let end = fadeStart + (1 - fadeStart) * CGFloat(step + 1) / 4
-                    ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: artworkMode)
+                    CachedArtworkBlur(artwork: artwork, kind: .cover(step: step), loading: model.artworkLoading)
                         .frame(width: size.width, height: size.height)
-                        .clipped().blur(radius: radii[step], opaque: true)
+                        .clipped()
                         .mask(LinearGradient(stops: [
                             .init(color: .clear, location: start),
                             .init(color: .black, location: end)
@@ -894,9 +743,9 @@ struct PlayerView: View {
                                             Color(red: 0.08, green: 0.10, blue: 0.16)],
                                    startPoint: .topLeading, endPoint: .bottomTrailing)
                     if let artwork = model.artwork {
-                        ArtworkSurface(artwork: artwork, loading: model.artworkLoading, mode: .fill)
+                        CachedArtworkBlur(artwork: artwork, kind: .ambient, loading: model.artworkLoading)
                             .frame(width: geometry.size.width, height: geometry.size.height)
-                            .scaleEffect(1.15).blur(radius: 48)
+                            .scaleEffect(1.15)
                         Color.black.opacity(colorContrast == .increased ? 0.72 : 0.48)
                     }
                     LinearGradient(colors: [.clear, .black.opacity(0.22)],
@@ -921,20 +770,7 @@ struct PlayerView: View {
             .shadow(color: .black.opacity(0.28), radius: 20, y: 12)
             .accessibilityLabel(model.artwork == nil ? L("暂无专辑封面") : L("专辑封面"))
     }
-    private var progress: some View {
-        PlaybackProgressView(model: model, visible: showProgress)
-            .frame(height: showProgress ? 36 : 0, alignment: .top).clipped()
-            .opacity(showProgress ? 1 : 0)
-            .allowsHitTesting(showProgress).accessibilityHidden(!showProgress)
-    }
-    private func transport(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 20, weight: .medium)).frame(width: 44, height: 44)
-                .contentTransition(.opacity)
-                .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: symbol)
-        }.buttonStyle(PlayerTransportStyle()).disabled(!model.canControl)
-            .opacity(model.canControl ? 0.9 : 0.3).help(label).accessibilityLabel(label)
-    }
+
 }
 
 private struct ArtworkSurface: View {

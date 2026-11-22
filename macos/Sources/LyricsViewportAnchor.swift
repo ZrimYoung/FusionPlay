@@ -19,14 +19,14 @@ import SwiftUI
     private weak var scroll: NSScrollView?
     private var bindingOwner: ObjectIdentifier?
     private var observers: [NSObjectProtocol] = []
+    private var readingObservers: [NSObjectProtocol] = []
+    private var readingHierarchy: [ObjectIdentifier] = []
     private var readingPoint: ReadingPoint?
-    private var correctionScheduled = false
     private var captureWhenReady = false
     private var compensating = false
     private var activeID: Int?
     private var browsing = false
     private var enabled = true
-    private var synchronousGeometry = false
     private(set) var lastGeometryChange = Date.distantPast
     var isHolding: Bool { readingPoint != nil }
 #if FUSIONPLAY_UI_CHECKS
@@ -41,13 +41,13 @@ import SwiftUI
         self.activeID = activeID
         self.browsing = browsing
         self.enabled = enabled
-        self.synchronousGeometry = synchronousGeometry
         if !enabled { cancel() }
         else if synchronousGeometry { beginIfNeeded(retryWhenReady: true) }
     }
     func attach(_ scroll: NSScrollView?, owner: AnyObject) {
         bindingOwner = ObjectIdentifier(owner)
         guard self.scroll !== scroll else { return }
+        clearReadingObservers()
         observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll()
         self.scroll = scroll
@@ -68,19 +68,34 @@ import SwiftUI
             }
         }
         if captureWhenReady { beginIfNeeded() }
+        refreshReadingObservers()
     }
     func register(_ row: LyricsViewportRowView) {
-        guard rows[row.lineID]?.value !== row else { return }
+        if rows[row.lineID]?.value === row {
+            if captureWhenReady { beginIfNeeded() }
+            if readingPoint?.id == row.lineID { refreshReadingObservers() }
+            return
+        }
         rows[row.lineID] = WeakRow(row)
         lastGeometryChange = Date()
         if captureWhenReady { beginIfNeeded() }
+        if readingPoint?.id == row.lineID { refreshReadingObservers() }
         scheduleCorrection()
     }
     func unregister(_ row: LyricsViewportRowView) {
-        if rows[row.lineID]?.value === row { rows.removeValue(forKey: row.lineID) }
+        if rows[row.lineID]?.value === row {
+            rows.removeValue(forKey: row.lineID)
+            if readingPoint?.id == row.lineID { clearReadingObservers() }
+        }
+    }
+    func rowHierarchyChanged(_ row: LyricsViewportRowView) {
+        guard readingPoint?.id == row.lineID, rows[row.lineID]?.value === row else { return }
+        refreshReadingObservers()
+        scheduleCorrection()
     }
     func rowChanged(_ row: LyricsViewportRowView) {
         lastGeometryChange = Date()
+        if readingPoint?.id == row.lineID { refreshReadingObservers() }
         scheduleCorrection()
     }
     func beginIfNeeded(retryWhenReady: Bool = false) {
@@ -111,6 +126,46 @@ import SwiftUI
             viewportFraction: viewportY / clip.bounds.height, playingID: activeID, browsing: browsing)
         captureWhenReady = false
         lastGeometryChange = Date()
+        refreshReadingObservers()
+    }
+
+    private func refreshReadingObservers() {
+        guard let point = readingPoint, let scroll,
+              let row = rows[point.id]?.value, row.window != nil, row.window === scroll.window else {
+            clearReadingObservers(); return
+        }
+        var ancestors: [NSView] = []
+        var node = row.superview
+        while let view = node, view !== scroll.contentView {
+            // Clip and document already have their own observation above.
+            if view !== scroll.documentView { ancestors.append(view) }
+            node = view.superview
+        }
+        guard node === scroll.contentView else { clearReadingObservers(); return }
+        let hierarchy = ancestors.map(ObjectIdentifier.init)
+        guard hierarchy != readingHierarchy else { return }
+        clearReadingObservers()
+        readingHierarchy = hierarchy
+        // SwiftUI can move a placement ancestor after the document and the
+        // row's local frame are already updated. Observe only this held row's
+        // ordinary NSView chain so the final placement corrects in the same pass.
+        for view in ancestors {
+            view.postsFrameChangedNotifications = true
+            view.postsBoundsChangedNotifications = true
+            for name in [NSView.frameDidChangeNotification, NSView.boundsDidChangeNotification] {
+                readingObservers.append(NotificationCenter.default.addObserver(forName: name, object: view, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, !self.compensating else { return }
+                        self.lastGeometryChange = Date()
+                        self.scheduleCorrection()
+                    }
+                })
+            }
+        }
+    }
+    private func clearReadingObservers() {
+        readingObservers.forEach(NotificationCenter.default.removeObserver)
+        readingObservers.removeAll(); readingHierarchy.removeAll()
     }
     private func viewportTop(_ row: NSView, clip: NSClipView) -> CGFloat {
         let rect = row.convert(row.bounds, to: clip)
@@ -118,17 +173,14 @@ import SwiftUI
     }
     private func scheduleCorrection() {
         guard readingPoint != nil else { return }
-        // Height-only pointer resizing must compensate in this layout pass;
-        // waiting for the next main-loop turn paints one displaced frame.
-        if synchronousGeometry { correct(); return }
-        guard !correctionScheduled else { return }
-        correctionScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.correctionScheduled = false
-            self.correct()
-        }
+        // A held reading point must be corrected in the layout pass that moved
+        // it, including the row-height animation after live resize ends. A queued
+        // correction otherwise exposes one displaced frame before scrolling back.
+        // correct() writes only clip origin, and its compensating guard ignores
+        // the synchronous bounds notification caused by that write.
+        correct()
     }
+
     func correct() {
         guard !compensating, let point = readingPoint, let scroll,
               let row = rows[point.id]?.value, row.window === scroll.window else { return }
@@ -156,11 +208,13 @@ import SwiftUI
                   let scroll, let row = rows[point.id]?.value, row.window === scroll.window else { return false }
             return row.convert(row.bounds, to: scroll.contentView).intersects(scroll.contentView.bounds)
         } ?? false
-        readingPoint = nil
-        captureWhenReady = false
+        cancel()
         return preserved
     }
-    func cancel() { readingPoint = nil; captureWhenReady = false }
+    func cancel() {
+        readingPoint = nil; captureWhenReady = false
+        clearReadingObservers()
+    }
     func detach(owner: AnyObject) {
         guard bindingOwner == ObjectIdentifier(owner) else { return }
         disconnect()
@@ -169,7 +223,10 @@ import SwiftUI
         cancel(); observers.forEach(NotificationCenter.default.removeObserver)
         observers.removeAll(); scroll = nil; bindingOwner = nil
     }
-    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        readingObservers.forEach(NotificationCenter.default.removeObserver)
+    }
 }
 
 struct LyricsViewportRowProbe: NSViewRepresentable {
@@ -194,7 +251,14 @@ final class LyricsViewportRowView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window != nil { anchor?.register(self) } }
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview(); anchor?.rowHierarchyChanged(self)
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil { anchor?.register(self) }
+        else { anchor?.rowHierarchyChanged(self) }
+    }
     override func setFrameOrigin(_ newOrigin: NSPoint) {
         let changed = frame.origin != newOrigin
         super.setFrameOrigin(newOrigin)

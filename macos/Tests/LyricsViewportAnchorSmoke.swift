@@ -47,8 +47,8 @@ import SwiftUI
         window.isReleasedWhenClosed = false
         window.alphaValue = 0
         window.contentView = host
-        window.orderBack(nil)
-        defer { window.orderOut(nil); window.contentView = nil; window.close() }
+        window.ignoresMouseEvents = true
+        defer { window.contentView = nil; window.close() }
         func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
         func viewport() -> NSScrollView? { descendants(host).compactMap { $0 as? NSScrollView }.first }
         func row(_ id: Int) -> LyricsRowGeometryCheckView? {
@@ -95,8 +95,11 @@ import SwiftUI
         for width: CGFloat in [640, 560, 470, 390, 330, 470, 620, 760, 540] {
             window.setContentSize(NSSize(width: width, height: 620))
             for tick in 0..<4 {
+                // Record immediately after layout, before giving an async
+                // compensator another main turn to hide a displaced frame.
+                _ = record("resize-\(Int(width))-\(tick)-before-turn", id: activeID)
                 await pause(0.03)
-                _ = record("resize-\(Int(width))-\(tick)", id: activeID)
+                _ = record("resize-\(Int(width))-\(tick)-after-turn", id: activeID)
             }
         }
         await pause(0.75)
@@ -109,13 +112,22 @@ import SwiftUI
         }
         let final = record("settled", id: activeID)
         let viewportFollows = follows.filter { $0.0 == "viewport" }
+        let resizeSamples = samples.filter { ($0["stage"] as? String)?.hasPrefix("resize-") == true }
+        let resizeDrift = resizeSamples.compactMap { $0["readingPointDrift"] as? Double }
         let settleDrift = samples.filter { ($0["stage"] as? String)?.hasPrefix("settle") == true }
             .compactMap { $0["readingPointDrift"] as? Double }
         print("Measured active row: initial=\(initial ?? .nan), held=\(held ?? .nan), final=\(final ?? .nan), max settling=\(settleErrors.map(abs).max() ?? .nan), viewport follows=\(viewportFollows.count)")
         try require(viewport().map(ObjectIdentifier.init) == scrollID, "Resizing recreated the native lyric scroll view")
-        try require(window.alphaValue == 0 && NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+        try require(!window.isVisible && !window.isKeyWindow && !window.isMainWindow && window.alphaValue == 0 && NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier,
                     "Hidden fixture changed the foreground app")
         if !baseline {
+            if resizeDrift.count != 72 || resizeDrift.contains(where: { abs($0) > 1 }) {
+                let diagnostic = samples.filter { ($0["readingPointDrift"] as? Double).map { abs($0) > 1 } == true }
+                print("Unexpected per-layout samples: \(diagnostic)")
+                print("Original reading point: \(String(describing: readingPoint)); current held: \(String(describing: row(activeID)?.anchor?.heldReadingPoint))")
+            }
+            try require(resizeDrift.count == 72 && resizeDrift.allSatisfy { abs($0) <= 1 },
+                        "The reading point moved within a horizontal resize layout pass")
             try require(!settleDrift.isEmpty && settleDrift.allSatisfy { abs($0) <= 1 },
                         "The same sentence's visible reading point drifted during resize settling")
             try require(viewportFollows.isEmpty, "The same focused sentence was needlessly animated back after resizing")
@@ -185,6 +197,7 @@ import SwiftUI
         }
         let result: [String: Any] = ["baseline": baseline, "maximum": maximum,
             "initialError": initial as Any, "heldError": held as Any, "finalError": final as Any,
+            "maxResizingReadingPointDrift": resizeDrift.map(abs).max() ?? 0,
             "maxSettlingReadingPointDrift": settleDrift.map(abs).max() ?? 0,
             "viewportFollowCountForSameSentence": viewportFollows.count, "samples": samples,
             "receiverStarted": false, "realPreferencesChanged": false,

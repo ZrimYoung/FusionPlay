@@ -281,6 +281,7 @@ final class CoverLyricsResizeGrip: NSView {
         window.aspectRatio = .zero; window.contentAspectRatio = .zero
         window.resizeIncrements = NSSize(width: 1, height: 1)
         window.contentResizeIncrements = NSSize(width: 1, height: 1)
+        window.contentMinSize = NSSize(width: 260, height: 260)
     }
     private func contentFrame(_ height: CGFloat, width: CGFloat, top: CGFloat, left: CGFloat, window: NSWindow) -> NSRect {
         let size = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: width, height: height)).size

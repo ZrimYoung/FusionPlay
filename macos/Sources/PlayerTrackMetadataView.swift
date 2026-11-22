@@ -53,6 +53,20 @@ struct PlayerTrackMetadataView: View {
     static func height(title: String, subtitle: String, width: CGFloat, titleFont: NSFont,
                        subtitleFont: NSFont, spacing: CGFloat, wraps: Bool,
                        defaultTitleLines: Int = 1, wrappedTitleLines: Int = 3, wrappedSubtitleLines: Int = 2) -> CGFloat {
+        let key = MetadataHeightKey(title: title, subtitle: subtitle, width: width,
+            titleDescriptor: titleFont.fontDescriptor, titlePointSize: titleFont.pointSize,
+            subtitleDescriptor: subtitleFont.fontDescriptor, subtitlePointSize: subtitleFont.pointSize,
+            spacing: spacing, wraps: wraps, defaultTitleLines: defaultTitleLines,
+            wrappedTitleLines: wrappedTitleLines, wrappedSubtitleLines: wrappedSubtitleLines)
+        if let cached = metadataHeightCache.value(for: key) {
+#if FUSIONPLAY_REFLOW_BENCHMARK
+            NativeLyricsReflowBenchmark.hit("metadataHeightCacheHits")
+#endif
+            return cached
+        }
+#if FUSIONPLAY_REFLOW_BENCHMARK
+        NativeLyricsReflowBenchmark.hit("metadataHeightCacheMisses")
+#endif
         func measured(_ text: String, font: NSFont, lines: Int) -> CGFloat {
             let baseLineHeight = NSLayoutManager().defaultLineHeight(for: font)
             let attributed = NSAttributedString(string: text, attributes: [.font: font])
@@ -73,6 +87,53 @@ struct PlayerTrackMetadataView: View {
             return ceil(max(baseLineHeight, height))
         }
         let titleHeight = measured(title, font: titleFont, lines: wraps ? wrappedTitleLines : 1)
-        return titleHeight + (subtitle.isEmpty ? 0 : spacing + measured(subtitle, font: subtitleFont, lines: wraps ? wrappedSubtitleLines : 1))
+        let height = titleHeight + (subtitle.isEmpty ? 0 : spacing + measured(subtitle, font: subtitleFont, lines: wraps ? wrappedSubtitleLines : 1))
+        if width.isFinite && spacing.isFinite && height.isFinite {
+            metadataHeightCache.insert(height, for: key)
+        }
+        return height
+    }
+
+    private static let metadataHeightCache = MetadataHeightCache()
+}
+
+/// Exact text/font/geometry inputs preserve CoreText's fallback-run measurement,
+/// even when wrapping is disabled. Animation frames often reuse these inputs.
+private struct MetadataHeightKey: Hashable {
+    let title: String
+    let subtitle: String
+    let width: CGFloat
+    let titleDescriptor: NSFontDescriptor
+    let titlePointSize: CGFloat
+    let subtitleDescriptor: NSFontDescriptor
+    let subtitlePointSize: CGFloat
+    let spacing: CGFloat
+    let wraps: Bool
+    let defaultTitleLines: Int
+    let wrappedTitleLines: Int
+    let wrappedSubtitleLines: Int
+}
+
+/// A strict FIFO bound avoids retaining metadata from an unlimited song history.
+/// Synchronization also keeps measurement callers independent of a view's actor.
+private final class MetadataHeightCache {
+    private let lock = NSLock()
+    private var values: [MetadataHeightKey: CGFloat] = [:]
+    private var insertionOrder: [MetadataHeightKey] = []
+    private let capacity = 256
+
+    func value(for key: MetadataHeightKey) -> CGFloat? {
+        lock.lock(); defer { lock.unlock() }
+        return values[key]
+    }
+
+    func insert(_ value: CGFloat, for key: MetadataHeightKey) {
+        lock.lock(); defer { lock.unlock() }
+        if values[key] != nil { values[key] = value; return }
+        if insertionOrder.count == capacity {
+            values.removeValue(forKey: insertionOrder.removeFirst())
+        }
+        insertionOrder.append(key)
+        values[key] = value
     }
 }

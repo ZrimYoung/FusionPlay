@@ -1,6 +1,165 @@
 import AppKit
 import SwiftUI
 
+private struct LyricsHeightManagedByRowKey: EnvironmentKey { static let defaultValue = false }
+extension EnvironmentValues {
+    var lyricsHeightManagedByRow: Bool {
+        get { self[LyricsHeightManagedByRowKey.self] }
+        set { self[LyricsHeightManagedByRowKey.self] = newValue }
+    }
+}
+
+/// Shared glyph/whole-row stages. These preserve the existing native timing.
+enum LyricsNativeMotionTiming {
+    static let duration = 0.48
+    static let hideEnd = 0.31
+    static let rowStart = 0.34
+    static let rowEnd = 0.64
+    static let showStart = 0.68
+    static let slideDuration = 0.19
+}
+
+private struct LyricsResizeContextKey: EnvironmentKey {
+    static let defaultValue = LyricsResizeContext()
+}
+
+enum LyricsResizeParticipant: Hashable { case primary, translation }
+private struct LyricsResizeParticipantKey: EnvironmentKey { static let defaultValue = LyricsResizeParticipant.primary }
+
+struct LyricsResizeGlyphPhase: Equatable {
+    let timing: LyricsResizeTiming
+    let hasOutgoingInk: Bool
+    var hideEnd: Date { timing.start.addingTimeInterval(LyricsNativeMotionTiming.duration * LyricsNativeMotionTiming.hideEnd) }
+    var rowStart: Date { timing.start.addingTimeInterval(LyricsNativeMotionTiming.duration * LyricsNativeMotionTiming.rowStart) }
+    var rowEnd: Date { timing.start.addingTimeInterval(LyricsNativeMotionTiming.duration * LyricsNativeMotionTiming.rowEnd) }
+}
+
+struct LyricsResizePhaseSummary: Equatable {
+    var phases: [LyricsResizeGlyphPhase] = []
+    var deadline: Date? = nil
+}
+
+/// The two native texts retain their own word epochs. Row height consumes
+/// their actual in-flight constraints, rather than restarting a fade window.
+struct LyricsResizePhaseSnapshot {
+    var phases: [LyricsResizeGlyphPhase] = []
+    var deadline: Date? = nil
+    var ownerCount = 0
+
+    func heightWindow(expanding: Bool, at now: Date) -> ClosedRange<Date>? {
+        let active = phases.filter { $0.timing.end > now }
+        let waiting = active.filter { $0.timing.reveal > now }
+        let outgoing = active.filter { $0.hasOutgoingInk && $0.hideEnd > now }
+        // Growing adds safe space before the earliest incoming ink. Shrinking
+        // must wait for the newest genuinely outgoing word to disappear.
+        let phase = !expanding && !outgoing.isEmpty
+            ? outgoing.max { $0.timing.start < $1.timing.start }
+            : waiting.min { $0.timing.start < $1.timing.start }
+        if let phase {
+            if now < phase.rowEnd {
+                let start = max(now, phase.rowStart)
+                if start < phase.rowEnd { return start...phase.rowEnd }
+            }
+            // At t=.32 the original rowEnd (.3072) is past, but the ink is
+            // still hidden until .3264. Use that gap, never another .48 wave.
+            if now < phase.timing.reveal { return now...phase.timing.reveal }
+        }
+        if let deadline, deadline > now { return now...deadline }
+        return nil
+    }
+}
+
+/// Not observable: recording a native phase never republishes the view tree.
+@MainActor final class LyricsResizeClock {
+    private struct Owner: Equatable {
+        let identity: ObjectIdentifier
+        let summary: LyricsResizePhaseSummary
+    }
+    private var lastMeasurement: Date?
+    private var owners: [LyricsResizeParticipant: Owner] = [:]
+    private var rowDeadline: (owner: ObjectIdentifier, end: Date)?
+    private(set) var revision: UInt64 = 0
+
+    func timing(at now: Date, delay: TimeInterval) -> LyricsResizeTiming {
+        let epoch: Date
+        if let lastMeasurement, abs(now.timeIntervalSince(lastMeasurement)) < 1.0 / 60 {
+            epoch = lastMeasurement
+        } else { lastMeasurement = now; epoch = now }
+        return LyricsResizeTiming(start: epoch.addingTimeInterval(LyricsStaggerTiming.clampSpan(delay)))
+    }
+    func record(_ summary: LyricsResizePhaseSummary, participant: LyricsResizeParticipant, owner: ObjectIdentifier) {
+        guard summary.deadline != nil else { remove(participant: participant, owner: owner); return }
+        let value = Owner(identity: owner, summary: summary)
+        guard owners[participant] != value else { return }
+        owners[participant] = value; revision &+= 1
+    }
+    func remove(participant: LyricsResizeParticipant, owner: ObjectIdentifier) {
+        guard owners[participant]?.identity == owner else { return }
+        owners.removeValue(forKey: participant); revision &+= 1
+    }
+    func snapshot(at now: Date) -> LyricsResizePhaseSnapshot {
+        let summaries = owners.values.map(\.summary).filter { ($0.deadline ?? .distantPast) > now }
+        return LyricsResizePhaseSnapshot(phases: summaries.flatMap(\.phases),
+            deadline: summaries.compactMap(\.deadline).max(), ownerCount: summaries.count)
+    }
+    func recordRowDeadline(_ end: Date?, owner: ObjectIdentifier) {
+        if let end { rowDeadline = (owner, end) }
+        else if rowDeadline?.owner == owner { rowDeadline = nil }
+    }
+    func clearRowDeadline(endingAt end: Date, owner: ObjectIdentifier) {
+        if rowDeadline?.owner == owner && rowDeadline?.end == end { rowDeadline = nil }
+    }
+    var activeDeadline: Date? {
+        ([rowDeadline?.end] + owners.values.map { $0.summary.deadline }).compactMap { $0 }.max()
+    }
+    func reset() {
+        if !owners.isEmpty { revision &+= 1 }
+        owners.removeAll(); rowDeadline = nil; lastMeasurement = nil
+    }
+}
+
+struct LyricsResizeTiming: Equatable {
+    let start: Date
+    var end: Date { start.addingTimeInterval(LyricsNativeMotionTiming.duration) }
+    var reveal: Date { start.addingTimeInterval(LyricsNativeMotionTiming.duration * LyricsNativeMotionTiming.showStart) }
+}
+
+struct LyricsResizeContext {
+    var isVisible = true
+    var delay: TimeInterval? = nil
+    var clock: LyricsResizeClock? = nil
+    @MainActor func timing(at now: Date, fallbackDelay: TimeInterval) -> LyricsResizeTiming {
+        let delay = LyricsStaggerTiming.clampSpan(delay ?? fallbackDelay)
+        return clock?.timing(at: now, delay: delay)
+            ?? LyricsResizeTiming(start: now.addingTimeInterval(delay))
+    }
+}
+
+extension EnvironmentValues {
+    var lyricsResizeParticipant: LyricsResizeParticipant {
+        get { self[LyricsResizeParticipantKey.self] }
+        set { self[LyricsResizeParticipantKey.self] = newValue }
+    }
+    var lyricsResizeContext: LyricsResizeContext {
+        get { self[LyricsResizeContextKey.self] }
+        set { self[LyricsResizeContextKey.self] = newValue }
+    }
+}
+
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+struct NativeLyricsFreshWrapCheck {
+    let fromOpacity: Double
+    let initialOpacity: Double
+    let startedAt: Date
+    let observedAt: Date
+}
+@MainActor enum NativeLyricsHeightCheckEvents {
+    static var measurement: ((String, CGSize, Bool) -> Void)?
+    static var rowPhaseRead: ((Int, UInt64) -> Void)?
+    static var freshWrap: ((NativeLyricsFreshWrapCheck) -> Void)?
+}
+#endif
+
 #if compiler(>=6.0)
 /// The same native TextRenderer and CharacterIndex cluster motion used by the
 /// FusionPlay iPad player. No glyph is rasterized or reshaped by this path.
@@ -14,10 +173,14 @@ struct NativeLyricsReflowText: View {
     let width: CGFloat
     var motionDelay: Double = 0
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.lyricsHeightManagedByRow) private var heightManagedByRow
+    @Environment(\.lyricsResizeContext) private var resizeContext
+    @Environment(\.lyricsResizeParticipant) private var resizeParticipant
     @State private var target: NativeGlyphLayout?
     @State private var motion = NativeGlyphMotion()
     @State private var rowMotion: NativeLyricRowMotion?
     @State private var naturalHeight: CGFloat?
+    @State private var naturalIdentity: NativeLyricIdentity?
     @State private var intrinsicGeometry = NativeLyricIntrinsicGeometry()
     @State private var revision: UInt64 = 0
     @State private var clock: Date?
@@ -45,22 +208,29 @@ struct NativeLyricsReflowText: View {
 
     var body: some View {
         let coordinates = NativeLyricCoordinates(font: font, width: safeWidth, referenceSize: referencePointSize, referenceFont: referenceFont)
-        return TimelineView(.animation(minimumInterval: 1.0 / 60, paused: end == nil)) { context in
+        let currentIdentity = identity
+        return TimelineView(.animation(minimumInterval: 1.0 / 60, paused: end == nil || !resizeContext.isVisible)) { context in
             renderedText(text: text, font: coordinates.font,
-                renderer: NativeReflowRenderer(target: target, motion: motion, now: context.date,
+                renderer: NativeReflowRenderer(target: resizeContext.isVisible ? target : nil, motion: motion, now: context.date,
                     overflow: coordinates.overflow, displayScale: coordinates.scale))
                 .lineSpacing(lineSpacing)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(width: coordinates.width, alignment: .topLeading)
-                .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
-                    let canonical = size
-                    intrinsicGeometry.size = canonical
+                .onGeometryChange(for: NativeLyricMeasurement.self) { [currentIdentity] geometry in
+                    NativeLyricMeasurement(identity: currentIdentity, size: geometry.size)
+                } action: { measurement in
+                    guard measurement.identity == identity else { return }
+                    intrinsicGeometry.size = measurement.size
+                    intrinsicGeometry.identity = measurement.identity
+                    if naturalIdentity != measurement.identity { naturalIdentity = measurement.identity }
                     let topology = intrinsicGeometry.pendingTopology
                     intrinsicGeometry.pendingTopology = false
-                    acceptHeight(canonical.height, topologyChanged: topology, at: Date(), scale: coordinates.scale)
+                    acceptHeight(measurement.size.height, topologyChanged: topology, at: Date(), scale: coordinates.scale)
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+                    NativeLyricsHeightCheckEvents.measurement?(text, measurement.size, heightManagedByRow)
+#endif
                 }
-                .frame(height: (rowMotion?.height(at: context.date) ?? naturalHeight).map { $0 * coordinates.scale },
-                       alignment: .topLeading)
+                .frame(height: physicalHeight(at: context.date, scale: coordinates.scale), alignment: .topLeading)
         }
         .frame(width: safeWidth, alignment: .topLeading)
         .contentShape(Rectangle())
@@ -77,6 +247,13 @@ struct NativeLyricsReflowText: View {
             reset(clearLayout: true)
         }
         .onChange(of: allowed) { _, enabled in if !enabled { reset(clearLayout: false) } }
+        .onChange(of: heightManagedByRow) { _, managed in if managed { rowMotion = nil } }
+        .onChange(of: resizeContext.isVisible) { _, visible in
+            if !visible {
+                motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+                resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
+            }
+        }
 #if FUSIONPLAY_UI_CHECKS
         // A proportional font/width change can leave native Text.Layout exactly
         // unchanged. Keep test samples in visible coordinates without asking
@@ -86,10 +263,19 @@ struct NativeLyricsReflowText: View {
         }
 #endif
         .onAppear { installSampler() }
-        .task(id: revision) { await finishMotion() }
+        .task(id: end) { await finishMotion() }
         .onDisappear { reset(clearLayout: false); removeSampler() }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text)
+    }
+
+    private func physicalHeight(at date: Date, scale: CGFloat) -> CGFloat? {
+        // A new text/font identity must never inherit the old text's frame.
+        // Identity is also part of the geometry payload, so equal-sized new
+        // text still delivers a fresh native measurement.
+        guard naturalIdentity == identity else { return nil }
+        let height = heightManagedByRow ? naturalHeight : (rowMotion?.height(at: date) ?? naturalHeight)
+        return height.map { $0 * scale }
     }
 
     private func renderedText(text: String, font: NSFont, renderer: NativeReflowRenderer) -> some View {
@@ -115,8 +301,11 @@ struct NativeLyricsReflowText: View {
         let now = Date()
         let previous = target
         let changedWrap = previous.map { $0.lineStarts != measured.lineStarts } ?? false
-        let start = now.addingTimeInterval(LyricsStaggerTiming.clampSpan(motionDelay))
-        if let previous, allowed, previous.identity == measured.identity {
+        if let previous, allowed, resizeContext.isVisible,
+           previous.identity == measured.identity,
+           changedWrap || previous.positions != measured.positions || motion.endsAt != nil {
+            let timing = resizeContext.timing(at: now, fallbackDelay: motionDelay)
+            let start = timing.start
             if changedWrap {
 #if FUSIONPLAY_UI_CHECKS
                 intrinsicGeometry.direction = measured.height > previous.height + 0.5 ? "expand" :
@@ -129,19 +318,26 @@ struct NativeLyricsReflowText: View {
 #endif
                 clock = start
             }
-            motion = motion.retarget(from: previous, to: measured, now: now, start: start, scale: coordinates.scale)
+            motion = motion.retarget(from: previous, to: measured, now: now, timing: timing, scale: coordinates.scale)
         } else {
             motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+        resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
 #if FUSIONPLAY_UI_CHECKS
             intrinsicGeometry.direction = "none"
 #endif
         }
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+        motion.freshWrapChecks.forEach { NativeLyricsHeightCheckEvents.freshWrap?($0) }
+#endif
+        resizeContext.clock?.record(motion.phaseSummary, participant: resizeParticipant,
+            owner: ObjectIdentifier(intrinsicGeometry))
         target = measured
         // Native Text's intrinsic geometry is the sole source of row height.
         // Typographic bounds below are used only to describe wrap direction.
         if changedWrap {
             intrinsicGeometry.pendingTopology = true
-            if let size = intrinsicGeometry.size, abs(size.width - coordinates.width) * coordinates.scale < 0.75 {
+            if let size = intrinsicGeometry.size, intrinsicGeometry.identity == identity,
+               abs(size.width - coordinates.width) * coordinates.scale < 0.75 {
                 intrinsicGeometry.pendingTopology = false
                 acceptHeight(size.height, topologyChanged: true, at: now, scale: coordinates.scale)
             }
@@ -160,7 +356,14 @@ struct NativeLyricsReflowText: View {
         NativeLyricsReflowBenchmark.hit("heightCallbacks")
 #endif
         guard height.isFinite, height >= 0 else { return }
-        guard let previous = naturalHeight, allowed, target != nil else {
+        if heightManagedByRow {
+            // The paired original/translation row owns one height timeline.
+            // Keep the physical native height, without restarting glyph tasks.
+            if naturalHeight != height { naturalHeight = height }
+            if rowMotion != nil { rowMotion = nil }
+            return
+        }
+        guard let previous = naturalHeight, allowed, resizeContext.isVisible, target != nil else {
             naturalHeight = height; rowMotion = nil; return
         }
         guard topologyChanged || abs(previous - height) * scale > 0.25 else { return }
@@ -181,12 +384,20 @@ struct NativeLyricsReflowText: View {
 
     private func reset(clearLayout: Bool) {
         revision &+= 1; motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+        resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
 #if FUSIONPLAY_UI_CHECKS
         intrinsicGeometry.direction = "none"
 #endif
         intrinsicGeometry.pendingTopology = false
-        if clearLayout && target?.identity != identity {
-            target = nil; naturalHeight = intrinsicGeometry.size?.height
+        if clearLayout {
+            if target?.identity != identity { target = nil }
+            if intrinsicGeometry.identity == identity {
+                naturalIdentity = identity
+                naturalHeight = intrinsicGeometry.size?.height
+            } else {
+                naturalIdentity = nil; naturalHeight = nil
+                intrinsicGeometry.size = nil
+            }
 #if FUSIONPLAY_UI_CHECKS
             intrinsicGeometry.input = nil
 #endif
@@ -202,12 +413,12 @@ struct NativeLyricsReflowText: View {
         NativeLyricsReflowBenchmark.hit("motionTasks")
 #endif
         guard let expected = end else { return }
-        let token = revision
         let expectedIdentity = identity
         // A stalled main thread can start this task after its last deadline.
         // Always stop the timeline rather than retaining an expired motion.
         if expected <= Date() {
             motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+        resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
 #if FUSIONPLAY_UI_CHECKS
             LyricsReflowTextCheckEvents.transition?("end", 0)
 #endif
@@ -217,9 +428,9 @@ struct NativeLyricsReflowText: View {
 #if FUSIONPLAY_UI_CHECKS
         // Phase sampling is a test concern. Production only needs the final
         // deadline, rather than five Date allocations for every moving glyph.
-        var boundaries = motion.dissolves.values.flatMap { fade in
+        var boundaries = motion.wrappingTransitions.flatMap { fade in
             [NativeLyricTiming.hideEnd, NativeLyricTiming.rowStart, NativeLyricTiming.rowEnd,
-             NativeLyricTiming.showStart, 1].map { fade.startedAt.addingTimeInterval(NativeLyricTiming.duration * $0) }
+             NativeLyricTiming.showStart, 1].map { fade.start.addingTimeInterval(NativeLyricTiming.duration * $0) }
         }
         if let rowMotion { boundaries += [rowMotion.start, rowMotion.end] }
         boundaries.append(expected)
@@ -229,9 +440,10 @@ struct NativeLyricsReflowText: View {
         for boundary in Set(boundaries.filter { $0 > Date() }).sorted() {
             do { try await Task.sleep(for: .seconds(max(0, boundary.timeIntervalSinceNow))) }
             catch { return }
-            guard !Task.isCancelled, revision == token, identity == expectedIdentity else { return }
+            guard !Task.isCancelled, end == expected, identity == expectedIdentity else { return }
             if Date() >= expected {
                 motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+        resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
 #if FUSIONPLAY_UI_CHECKS
                 LyricsReflowTextCheckEvents.transition?("end", 0)
 #endif
@@ -243,16 +455,17 @@ struct NativeLyricsReflowText: View {
 #else
         do { try await Task.sleep(for: .seconds(max(0, expected.timeIntervalSinceNow))) }
         catch { return }
-        guard !Task.isCancelled, revision == token, identity == expectedIdentity else { return }
+        guard !Task.isCancelled, end == expected, identity == expectedIdentity else { return }
         motion = NativeGlyphMotion(); rowMotion = nil; clock = nil
+        resizeContext.clock?.remove(participant: resizeParticipant, owner: ObjectIdentifier(intrinsicGeometry))
 #endif
     }
 
     private func phase(at now: Date) -> String {
         if let rowMotion, now >= rowMotion.start && now < rowMotion.end { return "move" }
-        let fading = motion.dissolves.values.filter { $0.endsAt > now }
-        if fading.contains(where: { now.timeIntervalSince($0.startedAt) < NativeLyricTiming.duration * NativeLyricTiming.hideEnd }) { return "vanish" }
-        if fading.contains(where: { now.timeIntervalSince($0.startedAt) >= NativeLyricTiming.duration * NativeLyricTiming.showStart }) { return "appear" }
+        let fading = motion.wrappingTransitions.filter { $0.end > now }
+        if fading.contains(where: { now.timeIntervalSince($0.start) < NativeLyricTiming.duration * NativeLyricTiming.hideEnd }) { return "vanish" }
+        if fading.contains(where: { now.timeIntervalSince($0.start) >= NativeLyricTiming.duration * NativeLyricTiming.showStart }) { return "appear" }
         if !fading.isEmpty { return "move" }
         return motion.endsAt.map { $0 > now ? "position" : "idle" } ?? "idle"
     }
@@ -287,7 +500,7 @@ struct NativeLyricsReflowText: View {
         var moving = 0, visible = 0
         for (key, destination) in target.positions {
             let appearance = motion.appearance(key, at: destination.origin, now: now) ?? NativeGlyphAppearance(origin: destination.origin)
-            let changingLine = motion.dissolves[key].map { $0.endsAt > now } ?? false
+            let changingLine = motion.isWrapping(key, now: now)
             if changingLine { moving += 1; if appearance.opacity > 0.02 { visible += 1 } }
             let id = target.id(for: key)
             poses[id] = NativeLyricsReflowCheckEvents.Pose(id: id, origin: appearance.origin.applying(transform),
@@ -356,6 +569,7 @@ struct NativeLyricsReflowText: View {
 /// them must not request another Text layout for every pixel of a resize.
 @MainActor private final class NativeLyricIntrinsicGeometry {
     var size: CGSize?
+    var identity: NativeLyricIdentity?
     var pendingTopology = false
 #if FUSIONPLAY_UI_CHECKS
     var input: NativeLyricInput?
@@ -364,16 +578,9 @@ struct NativeLyricsReflowText: View {
 #endif
 }
 
-private enum NativeLyricTiming {
-    static let duration = 0.48
-    static let hideEnd = 0.31
-    static let rowStart = 0.34
-    static let rowEnd = 0.64
-    static let showStart = 0.68
-    static let slideDuration = 0.19
-}
+private typealias NativeLyricTiming = LyricsNativeMotionTiming
 
-private struct NativeLyricIdentity: Equatable {
+private struct NativeLyricIdentity: Equatable, Sendable {
     let text: String
     let font: String
     let traits: UInt32
@@ -381,6 +588,11 @@ private struct NativeLyricIdentity: Equatable {
         self.text = text; self.font = font.fontName; traits = font.fontDescriptor.symbolicTraits.rawValue
     }
 }
+private struct NativeLyricMeasurement: Equatable {
+    let identity: NativeLyricIdentity
+    let size: CGSize
+}
+
 private struct NativeLyricInput: Equatable {
     let text: String
     let font: NSFont
@@ -459,6 +671,34 @@ private struct NativeGlyphLayout: Equatable {
             && lhs.positions == rhs.positions
     }
 
+    private struct LinePair: Hashable { let old: Int; let new: Int }
+
+    /// iPad's one-to-one native-cluster overlap mapping distinguishes a whole
+    /// visual line moving down from words that actually leave their fragment.
+    func continuingLines(from previous: Self) -> [Int: Int] {
+        var overlap: [LinePair: Int] = [:]
+        for (key, position) in positions {
+            guard let prior = previous.positions[key] else { continue }
+            overlap[LinePair(old: prior.line, new: position.line), default: 0] += key.count
+        }
+        func preferred(_ candidate: LinePair, over current: LinePair?) -> Bool {
+            guard let current else { return true }
+            let keepsStart = previous.lineStarts[candidate.old] == lineStarts[candidate.new]
+            let currentKeepsStart = previous.lineStarts[current.old] == lineStarts[current.new]
+            if keepsStart != currentKeepsStart { return keepsStart }
+            let weight = overlap[candidate, default: 0], currentWeight = overlap[current, default: 0]
+            if weight != currentWeight { return weight > currentWeight }
+            if candidate.old != current.old { return candidate.old < current.old }
+            return candidate.new < current.new
+        }
+        var bestFromOld: [Int: LinePair] = [:], bestFromNew: [Int: LinePair] = [:]
+        for pair in overlap.keys {
+            if preferred(pair, over: bestFromOld[pair.old]) { bestFromOld[pair.old] = pair }
+            if preferred(pair, over: bestFromNew[pair.new]) { bestFromNew[pair.new] = pair }
+        }
+        return bestFromOld.compactMapValues { bestFromNew[$0.new] == $0 ? $0.new : nil }
+    }
+
     func matches(_ layout: Text.Layout) -> Bool {
         lineStarts == Self.starts(in: layout)
             && zip(lineWidths, layout).allSatisfy { abs($0 - $1.typographicBounds.width) < 0.75 }
@@ -485,109 +725,122 @@ private struct NativeGlyphAppearance {
 }
 
 @available(macOS 15.0, *)
-private struct NativeGlyphDissolve {
+private struct NativeGlyphTransition {
     private static let maximumBlur: CGFloat = 4
     private static let blurLead = 0.24
+    private static let minimumRetargetTime: TimeInterval = 0.065
     let from: NativeGlyphAppearance
-    let startedAt: Date
-    var reposition: NativeGlyphSlide? = nil
-    var endsAt: Date { startedAt.addingTimeInterval(NativeLyricTiming.duration) }
+    let destination: CGPoint
+    let start: Date
+    let end: Date
+    var wrap: LyricsResizeTiming? = nil
+    var hasWrapped = false
 
-    func appearance(at destination: CGPoint, now: Date) -> NativeGlyphAppearance? {
-        let elapsed = max(0, now.timeIntervalSince(startedAt))
-        let progress = elapsed / NativeLyricTiming.duration
-        if progress < NativeLyricTiming.hideEnd {
-            let phase = progress / NativeLyricTiming.hideEnd
-            let fade = Self.ease((phase - Self.blurLead) / (1 - Self.blurLead))
-            let blur = from.blur + (Self.maximumBlur - from.blur) * CGFloat(Self.ease(phase))
-            return NativeGlyphAppearance(origin: from.origin, opacity: from.opacity * (1 - fade), blur: blur)
+    func appearance(at now: Date) -> NativeGlyphAppearance {
+        if wrap != nil {
+            let progress = max(0, now.timeIntervalSince(start)) / NativeLyricTiming.duration
+            if progress < NativeLyricTiming.hideEnd {
+                let phase = progress / NativeLyricTiming.hideEnd
+                let fade = Self.ease((phase - Self.blurLead) / (1 - Self.blurLead))
+                let blur = from.blur + (Self.maximumBlur - from.blur) * CGFloat(Self.ease(phase))
+                return NativeGlyphAppearance(origin: from.origin, opacity: from.opacity * (1 - fade), blur: blur)
+            }
+            if progress < NativeLyricTiming.showStart {
+                return NativeGlyphAppearance(origin: destination, opacity: 0, blur: Self.maximumBlur)
+            }
+            let phase = Self.ease((progress - NativeLyricTiming.showStart) / (1 - NativeLyricTiming.showStart))
+            return NativeGlyphAppearance(origin: destination, opacity: phase,
+                                         blur: Self.maximumBlur * CGFloat(1 - phase))
         }
-        if progress < NativeLyricTiming.showStart {
-            return NativeGlyphAppearance(origin: destination, opacity: 0, blur: Self.maximumBlur)
+        let progress = Self.ease(now.timeIntervalSince(start) / max(0.001, end.timeIntervalSince(start)))
+        let remainder = CGFloat(1 - progress)
+        return NativeGlyphAppearance(origin: CGPoint(x: destination.x + (from.origin.x - destination.x) * remainder,
+                                                     y: destination.y + (from.origin.y - destination.y) * remainder),
+                                     opacity: 1 + (from.opacity - 1) * (1 - progress), blur: from.blur * remainder)
+    }
+
+    /// Keep outgoing ink/deadline until reveal. Afterwards preserve its exact
+    /// visible pose and finish with a bounded slide, never another fade-out.
+    func retarget(to next: CGPoint, at now: Date, scale: CGFloat) -> Self {
+        if let wrap, now < wrap.reveal,
+           NativeGlyphMotion.hasDisplacement(from: from.origin, to: next, scale: scale) {
+            return Self(from: from, destination: next, start: start, end: end, wrap: wrap, hasWrapped: true)
         }
-        guard progress < 1 else { return nil }
-        let phase = Self.ease((progress - NativeLyricTiming.showStart) / (1 - NativeLyricTiming.showStart))
-        return NativeGlyphAppearance(origin: reposition?.position(at: destination, now: now) ?? destination,
-                                     opacity: phase, blur: Self.maximumBlur * CGFloat(1 - phase))
+        let sample = appearance(at: now), nextStart = max(now, start)
+        return Self(from: sample, destination: next, start: nextStart,
+                    end: max(end, nextStart.addingTimeInterval(Self.minimumRetargetTime)), hasWrapped: hasWrapped)
     }
 
     private static func ease(_ progress: Double) -> Double {
-        let t = min(1, max(0, progress))
-        return t * t * (3 - 2 * t)
-    }
-}
-
-private struct NativeGlyphSlide {
-    let origin: CGPoint
-    let startedAt: Date
-    var duration: TimeInterval = NativeLyricTiming.slideDuration
-    var endsAt: Date { startedAt.addingTimeInterval(duration) }
-
-    func position(at destination: CGPoint, now: Date) -> CGPoint {
-        let remaining = 1 - min(1, max(0, now.timeIntervalSince(startedAt) / max(0.001, duration)))
-        let ease = CGFloat(remaining * remaining * remaining)
-        return CGPoint(x: destination.x + (origin.x - destination.x) * ease,
-                       y: destination.y + (origin.y - destination.y) * ease)
+        let t = min(1, max(0, progress)); return t * t * (3 - 2 * t)
     }
 }
 
 @available(macOS 15.0, *)
 private struct NativeGlyphMotion {
-    let dissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve]
-    let slides: [NativeGlyphLayout.Key: NativeGlyphSlide]
+    private let transitions: [NativeGlyphLayout.Key: NativeGlyphTransition]
     let endsAt: Date?
-
-    init(dissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve] = [:],
-         slides: [NativeGlyphLayout.Key: NativeGlyphSlide] = [:]) {
-        self.dissolves = dissolves; self.slides = slides
-        // A motion is immutable between retargets. Every frame can share the
-        // same deadline rather than scanning and allocating Dates per glyph.
-        let slideEnd = slides.values.lazy.map(\.endsAt).max()
-        let dissolveEnd = dissolves.values.lazy.map(\.endsAt).max()
-        if let slideEnd, let dissolveEnd { endsAt = max(slideEnd, dissolveEnd) }
-        else { endsAt = slideEnd ?? dissolveEnd }
+    let phaseSummary: LyricsResizePhaseSummary
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+    var freshWrapChecks: [NativeLyricsFreshWrapCheck] = []
+#endif
+    init(_ transitions: [NativeGlyphLayout.Key: NativeGlyphTransition] = [:]) {
+        self.transitions = transitions
+        endsAt = transitions.values.lazy.map(\.end).max()
+        var phases: [Date: Bool] = [:]
+        for transition in transitions.values {
+            guard let wrap = transition.wrap else { continue }
+            phases[wrap.start] = (phases[wrap.start] ?? false) || transition.from.opacity > 0.02
+        }
+        phaseSummary = LyricsResizePhaseSummary(phases: phases.map {
+            LyricsResizeGlyphPhase(timing: LyricsResizeTiming(start: $0.key), hasOutgoingInk: $0.value)
+        }.sorted { $0.timing.start < $1.timing.start }, deadline: endsAt)
     }
-
+    var wrappingTransitions: [NativeGlyphTransition] { transitions.values.filter { $0.wrap != nil } }
+    func isWrapping(_ key: NativeGlyphLayout.Key, now: Date) -> Bool {
+        transitions[key].map { $0.hasWrapped && $0.end > now } ?? false
+    }
     func appearance(_ key: NativeGlyphLayout.Key, at destination: CGPoint, now: Date) -> NativeGlyphAppearance? {
-        if let fading = dissolves[key]?.appearance(at: destination, now: now) { return fading }
-        guard let slide = slides[key], slide.endsAt > now else { return nil }
-        return NativeGlyphAppearance(origin: slide.position(at: destination, now: now))
+        guard let transition = transitions[key], transition.end > now else { return nil }
+        return transition.appearance(at: now)
     }
-
-    func retarget(from previous: NativeGlyphLayout, to target: NativeGlyphLayout, now: Date, start: Date, scale: CGFloat) -> Self {
-        var nextDissolves: [NativeGlyphLayout.Key: NativeGlyphDissolve] = [:]
-        var nextSlides: [NativeGlyphLayout.Key: NativeGlyphSlide] = [:]
-
+    func retarget(from previous: NativeGlyphLayout, to target: NativeGlyphLayout, now: Date,
+                  timing: LyricsResizeTiming, scale: CGFloat) -> Self {
+        let continuing = target.continuingLines(from: previous)
+        var next: [NativeGlyphLayout.Key: NativeGlyphTransition] = [:]
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+        var firstSamples: [NativeLyricsFreshWrapCheck] = []
+#endif
         for (key, destination) in target.positions {
             guard let prior = previous.positions[key] else { continue }
-            let dissolving = dissolves[key].flatMap { $0.endsAt > now ? $0 : nil }
-            let sliding = slides[key].flatMap { $0.endsAt > now ? $0 : nil }
-            let fadingAppearance = dissolving?.appearance(at: prior.origin, now: now)
-            let visible = fadingAppearance?.origin ?? sliding?.position(at: prior.origin, now: now) ?? prior.origin
-            if prior.line != destination.line {
-                let from = fadingAppearance ?? NativeGlyphAppearance(origin: visible)
-                nextDissolves[key] = NativeGlyphDissolve(from: from, startedAt: start)
-            } else if var dissolving {
-                // A pixel-width update keeps the existing fade deadline. If
-                // appearance is already visible, retarget its position smoothly.
-                if now.timeIntervalSince(dissolving.startedAt) >= NativeLyricTiming.duration * NativeLyricTiming.showStart,
-                   Self.hasDisplacement(from: visible, to: destination.origin, scale: scale) {
-                    dissolving.reposition = NativeGlyphSlide(origin: visible, startedAt: now,
-                        duration: max(0.001, min(NativeLyricTiming.slideDuration, dissolving.endsAt.timeIntervalSince(now))))
-                }
-                nextDissolves[key] = dissolving
-            } else if Self.hasDisplacement(from: prior.origin, to: destination.origin, scale: scale) {
-                if Self.hasDisplacement(from: visible, to: destination.origin, scale: scale) {
-                    nextSlides[key] = NativeGlyphSlide(origin: visible, startedAt: start)
-                }
-            } else if let sliding {
-                nextSlides[key] = sliding
+            let running = transitions[key].flatMap { $0.end > now ? $0 : nil }
+            if let running, running.destination == destination.origin { next[key] = running; continue }
+            let crossesLine = continuing[prior.line] != destination.line
+            let visible = running?.appearance(at: now) ?? NativeGlyphAppearance(origin: prior.origin)
+            guard running != nil || Self.hasDisplacement(from: visible.origin, to: destination.origin, scale: scale) else { continue }
+            if crossesLine, running?.hasWrapped != true {
+                let transition = NativeGlyphTransition(from: visible, destination: destination.origin,
+                    start: timing.start, end: timing.end, wrap: timing, hasWrapped: true)
+                next[key] = transition
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+                firstSamples.append(NativeLyricsFreshWrapCheck(fromOpacity: visible.opacity,
+                    initialOpacity: transition.appearance(at: now).opacity, startedAt: timing.start, observedAt: now))
+#endif
+            } else if let running {
+                next[key] = running.retarget(to: destination.origin, at: now, scale: scale)
+            } else {
+                next[key] = NativeGlyphTransition(from: visible, destination: destination.origin,
+                    start: timing.start, end: timing.start.addingTimeInterval(NativeLyricTiming.slideDuration))
             }
         }
-
-        return NativeGlyphMotion(dissolves: nextDissolves, slides: nextSlides)
+#if FUSIONPLAY_LYRICS_COORDINATION_CHECKS
+        var result = Self(next)
+        result.freshWrapChecks = firstSamples
+        return result
+#else
+        return Self(next)
+#endif
     }
-
     static func hasDisplacement(from origin: CGPoint, to destination: CGPoint, scale: CGFloat = 1) -> Bool {
         abs(origin.x - destination.x) * scale >= 0.75 || abs(origin.y - destination.y) * scale >= 0.75
     }
