@@ -14,6 +14,9 @@ public sealed class ReceiverController : IAsyncDisposable
     private readonly CancellationTokenSource lifetime = new();
     private NativeReceiver? native;
     private readonly PlaybackTimeline timeline = new();
+    private readonly LyricsState lyrics = new();
+    private readonly DisplayMetadataCache displayMetadata = new();
+    private long? scheduledLyricsWait;
     private CancellationTokenSource? seekFeedbackExpiry;
     private long generation;
     private Task? polling;
@@ -32,7 +35,26 @@ public sealed class ReceiverController : IAsyncDisposable
     public UiPreferencesStore Preferences { get; }
     public ReceiverSettings Settings { get; private set; } = new();
     public ReceiverSnapshot State => timeline.Source;
+    public bool HasCurrentTrack => DisplayMetadataResolver.HasCurrentTrack(State);
+    public DisplayMetadata DisplayMetadata
+    {
+        get
+        {
+            var state = State;
+            if (!Preferences.Value.CorrectLyricTitles || !HasCurrentTrack || sleeping || disposed)
+            {
+                displayMetadata.Reset();
+                return new(state.Title, state.Artist, state.Album);
+            }
+            return displayMetadata.Resolve(state);
+        }
+    }
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
+    internal bool SeekPending => timeline.IsPending;
+    public LyricsDocument Lyrics => lyrics.Document;
+    public bool LyricsLoading => lyrics.Loading || lyrics.WaitingForLyrics;
+    public bool LyricsAvailable => lyrics.Available;
+    public ulong? LyricsPositionMs => lyrics.Position(DisplayPositionMs, State.ControlsAvailable && !sleeping && !disposed);
     public NetworkInterface[] Networks { get; private set; } = [];
     public AudioDevice[] Outputs { get; private set; } = [];
     public bool Initialized { get; private set; }
@@ -60,7 +82,7 @@ public sealed class ReceiverController : IAsyncDisposable
         L.Language = Preferences.Value.Language;
         Preferences.Changed += PreferencesChanged;
     }
-    private void PreferencesChanged() { L.Language = Preferences.Value.Language; Notify(); }
+    private void PreferencesChanged() { displayMetadata.Reset(); L.Language = Preferences.Value.Language; Notify(); }
     private void Notify()
     {
         // One view failing to refresh must not interrupt cover loading, polling,
@@ -141,6 +163,7 @@ public sealed class ReceiverController : IAsyncDisposable
     {
         long request = Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
+        lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
         Busy = true; Error = ""; ControlMessage = ""; Notify();
@@ -230,12 +253,54 @@ public sealed class ReceiverController : IAsyncDisposable
         var previous = State;
         if (!timeline.Apply(observation)) return false;
         var snapshot = State;
-        bool changedTrack = previous.TrackId != snapshot.TrackId || previous.Title != snapshot.Title;
+        bool changedTrack = !Seeking.SameTrack(previous, snapshot);
+        if (changedTrack || !snapshot.ControlsAvailable || !HasCurrentTrack) displayMetadata.Reset();
         if (!timeline.IsPending) StopSeekFeedbackTimer();
         volume.Observe(snapshot.Volume);
         if (!snapshot.ControlsAvailable || changedTrack) ControlMessage = "";
+        if (lyrics.Observe(snapshot) is { } parse) _ = ParseLyricsAsync(parse);
+        ScheduleMissingLyricsExpiry();
         UpdateArtwork(snapshot); Notify();
         return true;
+    }
+    private void ScheduleMissingLyricsExpiry()
+    {
+        long? token = lyrics.MissingLyricsWaitToken;
+        if (scheduledLyricsWait == token) return;
+        scheduledLyricsWait = token;
+        if (token is long waiting) _ = ExpireMissingLyricsAsync(waiting, Interlocked.Read(ref generation));
+    }
+    private async Task ExpireMissingLyricsAsync(long token, long receiverGeneration)
+    {
+        var cancellation = lifetime.Token;
+        try
+        {
+            await Task.Delay(LyricsState.MissingLyricsGracePeriod, cancellation);
+            await OnUi(() =>
+            {
+                if (disposed || cancellation.IsCancellationRequested || receiverGeneration != Interlocked.Read(ref generation)
+                    || !lyrics.ExpireMissingLyrics(token)) return;
+                scheduledLyricsWait = null; Notify();
+            });
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested || disposed) { }
+    }
+    private async Task ParseLyricsAsync(LyricsParseRequest request)
+    {
+        // Only memory is involved. Publication is guarded against replacement,
+        // disconnect and lifecycle cancellation by LyricsState's version.
+        var cancellation = lifetime.Token;
+        try
+        {
+            var document = await Task.Run(() => LyricsDocument.Parse(request.Source), cancellation);
+            if (cancellation.IsCancellationRequested) return;
+            await OnUi(() =>
+            {
+                if (disposed || !lyrics.Complete(request, document)) return;
+                Notify();
+            });
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
     }
     public Task TogglePlaybackAsync() => ControlAsync(State.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);
     public void DispatchControl(PlaybackCommand command) => ui.TryEnqueue(() => _ = ControlAsync(command));
@@ -475,6 +540,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
+        lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();
         volumeDebounce?.Cancel(); volumeDebounce?.Dispose();

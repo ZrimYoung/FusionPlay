@@ -240,3 +240,16 @@ enum DisplayMetadataResolver {
     }
     func reset() { previous = nil; result = nil }
 }
+
+
+#if os(iOS)
+// The iOS project includes this shared source, while Mac keeps its Snapshot
+// adapter separate so its standalone metadata policy remains testable.
+extension DisplayMetadata {
+    init(_ state: Snapshot, correctLyricTitles: Bool) {
+        self = DisplayMetadataResolver.resolveProjected(title: state.title, artist: state.artist, album: state.album,
+            lyricsText: state.lyricsText, displayTitle: state.displayTitle, displayArtist: state.displayArtist,
+            displayAlbum: state.displayAlbum, correctLyricTitles: correctLyricTitles)
+    }
+}
+#endif

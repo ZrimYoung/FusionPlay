@@ -21,7 +21,7 @@ internal sealed class TrayWindow : Window
 {
     private readonly ReceiverController model;
     private const double PanelWidth = 340;
-    private const double HeaderInset = 4, HeaderGap = 12, VolumeWidth = 104;
+    private const double HeaderInset = 12, HeaderGap = 12, VolumeWidth = 104;
     private readonly StackPanel root;
     private readonly StackPanel trackColumn = new() { Name = "TrackColumn", Spacing = 6, VerticalAlignment = VerticalAlignment.Top };
     private readonly Image cover = new() { Name = "AlbumCover", Stretch = Stretch.UniformToFill, IsHitTestVisible = false };
@@ -56,7 +56,7 @@ internal sealed class TrayWindow : Window
         {
             root.Background = (Brush)Application.Current.Resources["ApplicationPageBackgroundThemeBrush"];
         }
-        var top = new Grid { ColumnSpacing = HeaderGap };
+        var top = new Grid { Name = "TrayHeader", ColumnSpacing = HeaderGap };
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var art = new Grid();
@@ -97,7 +97,7 @@ internal sealed class TrayWindow : Window
         volumeViewport.SizeChanged += (_, _) => volumeClip.Rect = new Rect(0, 0, volumeViewport.ActualWidth, 28);
         MainWindow.AttachVolume(volume, model);
         volume.ValueChanged += (_, args) => { if (!rendering) model.EditVolume(args.NewValue); };
-        var footer = new Grid { ColumnSpacing = 8, Margin = new Thickness(8, 0, 8, 4) };
+        var footer = new Grid { Name = "TrayFooter", ColumnSpacing = 8 };
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -163,8 +163,9 @@ internal sealed class TrayWindow : Window
         rendering = true; var state = model.State; Title = "FusionPlay · " + L.Text("接收面板");
         cover.Source = model.Artwork;
         string oldTitle = title.Text, oldArtist = artist.Text;
-        title.Text = state.Title.Length > 0 ? state.Title : L.Text("等待音乐");
-        artist.Text = string.Join(" · ", new[] { state.Artist, state.Album }.Where(x => x.Length > 0));
+        var display = model.DisplayMetadata;
+        title.Text = display.Title.Length > 0 ? display.Title : L.Text("等待音乐");
+        artist.Text = string.Join(" · ", new[] { display.Artist, display.Album }.Where(x => x.Length > 0));
         if (artist.Text.Length == 0) artist.Text = model.Settings.Name;
         previous.IsEnabled = play.IsEnabled = next.IsEnabled = model.CanControl;
         PlaybackIcons.Update((PathIcon)play.Content, state.Phase == ReceiverPhase.Playing ? PlaybackCommand.Pause : PlaybackCommand.Play);

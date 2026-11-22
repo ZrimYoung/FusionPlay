@@ -26,7 +26,8 @@ import SwiftUI
             trackId: id, artworkUrl: "", lyricsText: lyrics ? "[00:00]Opening line\n[00:06]A new morning\n[00:12]Another line\n[00:18]" : "",
             durationMs: 180_000, positionMs: 8_000, controlsAvailable: true, volume: 50,
             message: "", address: "", output: "", queueMs: 0, outputLatencyMs: 0, scheduleErrorMs: 0,
-            underruns: 0, droppedFrames: 0, resyncs: 0)
+            underruns: 0, droppedFrames: 0, resyncs: 0,
+            displayTitle: nil, displayArtist: nil, displayAlbum: nil)
     }
     static func stressTrack(_ cycle: Int, lyrics: Bool) -> Snapshot {
         var state = track("stress-\(cycle)", lyrics: false)

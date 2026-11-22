@@ -25,6 +25,7 @@ import com.airplayreceiver.desktop.bridge.WindowsBridgeXiaomiExit
 import com.airplayreceiver.desktop.bridge.WindowsBridgeXiaomiLog
 import com.airplayreceiver.desktop.bridge.XiaomiPlaybackMutation
 import com.airplayreceiver.desktop.bridge.XiaomiPlaybackReducer
+import com.airplayreceiver.desktop.bridge.XiaomiReduction
 import com.airplayreceiver.desktop.bridge.toVolumePercentOrNull
 import com.airplayreceiver.desktop.bridge.toXiaomiMiPlayUserMessage
 import com.fusionplay.android.media.FusionPlayMediaChannel
@@ -45,6 +46,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -72,6 +75,11 @@ class FusionPlayRuntime(
         diagnosticLogger = diagnosticLogger,
         parentScope = scope,
     )
+    // A cold flow emits the current setting/playback on every Activity start.
+    val keepScreenOn = viewModel.state.map { state ->
+        state.settings.keepScreenOnWhilePlaying && state.playback.isPlaying
+    }.distinctUntilChanged()
+
     private val bridge = WindowsBridgeClient(parentScope = scope, stopXiaomiOnClose = false)
     private val xiaomiReducer = XiaomiPlaybackReducer()
     private val xiaomiTakeoverGate = XiaomiTakeoverGate()
@@ -171,6 +179,7 @@ class FusionPlayRuntime(
                     }
                 }
 
+                xiaomiReducer.expireClosedMedia()?.let { applyXiaomiReduction(it) }
                 val playback = viewModel.state.value.playback
                 if (
                     playback.protocol.equals(XIAOMI_PROTOCOL, ignoreCase = true) &&
@@ -222,6 +231,8 @@ class FusionPlayRuntime(
                             AccessibilityKeepAliveController.requestAuthorization(context)
                         }
                     }
+                    "setKeepScreenOnWhilePlaying" ->
+                        viewModel.setKeepScreenOnWhilePlaying(call.boolean("value"))
                     "setAdvancedEffectsEnabled" ->
                         viewModel.setAdvancedEffectsEnabled(call.boolean("value"))
                     "setNativeCastPaused" -> nativeCast.setPaused(call.boolean("value"))
@@ -804,6 +815,10 @@ class FusionPlayRuntime(
                     },
             )
         }
+        applyXiaomiReduction(reduction)
+    }
+
+    private suspend fun applyXiaomiReduction(reduction: XiaomiReduction) {
         for (mutation in reduction.mutations) {
             when (mutation) {
                 is XiaomiPlaybackMutation.Activate -> {
@@ -844,9 +859,10 @@ class FusionPlayRuntime(
                 is XiaomiPlaybackMutation.Deactivate -> {
                     xiaomiTrackChangeDirection = null
                     xiaomiTakeoverGate.reset()
-                    mediaSourceArbiter.deactivate(MediaSource.XIAOMI_MIPLAY) {
-                        viewModel.deactivateXiaomiPlayback()
-                    }
+                    // Pause already releases the arbiter; still remove the cached/UI
+                    // session when its media route subsequently ends.
+                    mediaSourceArbiter.deactivate(MediaSource.XIAOMI_MIPLAY)
+                    viewModel.deactivateXiaomiPlayback()
                 }
                 is XiaomiPlaybackMutation.ApplyMediaInfo -> mutation.mediaInfo.let { media ->
                     if (mutation.replaceTrack) {
@@ -1143,6 +1159,7 @@ class FusionPlayRuntime(
             "receiverName" to state.settings.receiverName,
             "startupEnabled" to state.settings.startupEnabled,
             "autoWakeEnabled" to state.settings.autoWakeEnabled,
+            "keepScreenOnWhilePlaying" to state.settings.keepScreenOnWhilePlaying,
             "advancedEffectsEnabled" to state.settings.advancedEffectsEnabled,
             "miPlayEnabled" to state.settings.miPlayEnabled,
             "miPlayDeviceIdentity" to state.settings.miPlayDeviceIdentity.persistedValue,
@@ -1305,7 +1322,7 @@ class FusionPlayRuntime(
             "target_server_minus_local_us", "phase_error_us", "frequency_ppm",
             "round_trip_us", "latency_ms", "arrival_residual_ms", "media_generation",
             "front_pts_us", "server_now_us", "schedule_error_us", "buffered_frames",
-            "timed_playback_started",
+            "timed_playback_started", "channel",
             "observed_output_latency_ms", "underrun_callbacks",
             "output_latency_calibrated",
             "output_advance_ms",

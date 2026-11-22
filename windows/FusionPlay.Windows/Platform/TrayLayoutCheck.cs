@@ -25,8 +25,10 @@ internal static class TrayLayoutCheck
     }
     private sealed record Sample(string Language, int FontSize, bool TwoLines, bool VolumeExpanded,
         Box Cover, Box Image, Box TrackColumn, Box Title, Box Artist, Box Controls, Box PreviousIcon,
-        Box VolumeViewport, Box VolumeSlider, double RootWidth, double RootHeight, double ClientWidth, double ClientHeight);
+        Box VolumeViewport, Box VolumeSlider, Box Footer, Box SettingsButton, Box VolumeButton, Box QuitButton,
+        double RootWidth, double RootHeight, double ClientWidth, double ClientHeight);
     private const double Tolerance = 1;
+    private const double ExpectedInset = 12;
 
     public static async Task Run(string outputFile)
     {
@@ -131,7 +133,7 @@ internal static class TrayLayoutCheck
                     status, step, failure_code = code, exception_type = type, hresult, failure_details = details,
                     panel_remained_hidden = hidden, foreground_unchanged = sameForeground,
                     receiver_initialized = false, native_audio_started = false, system_media_session_created = false,
-                    tolerance_dips = Tolerance, samples,
+                    tolerance_dips = Tolerance, expected_panel_inset_dips = ExpectedInset, samples,
                     scope = "real_tray_hidden_xaml_measurement; native_corner_radius_and_physical_interaction_not_tested"
                 }, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, NumberHandling = JsonNumberHandling.AllowNamedFloatingPointLiterals }));
             }
@@ -183,15 +185,22 @@ internal static class TrayLayoutCheck
             var column = Find<FrameworkElement>("TrackColumn"); var title = Find<PlayerText>("TrackTitle"); var artist = Find<PlayerText>("TrackArtist");
             var controls = Find<FrameworkElement>("TransportControls"); var previous = Find<Button>("PreviousButton");
             var viewport = Find<FrameworkElement>("VolumeViewport"); var slider = Find<Slider>("VolumeSlider");
+            var footer = Find<Grid>("TrayFooter"); var settings = Find<Button>("SettingsButton"); var volume = Find<FrameworkElement>("VolumeButton"); var quit = Find<Button>("QuitButton");
             var icon = previous.Content as FrameworkElement;
             Require(icon != null, "previous_icon_missing");
             var a = Bounds(artwork); var i = Bounds(image); var c = Bounds(column); var t = Bounds(title); var ar = Bounds(artist); var tr = Bounds(controls); var pi = Bounds(icon!); var v = Bounds(viewport); var s = Bounds(slider);
-            var geometry = new { cover = a, image = i, column = c, title = t, artist = ar, controls = tr, previous_icon = pi, volume_viewport = v, volume_slider = s };
+            var f = Bounds(footer); var st = Bounds(settings); var vb = Bounds(volume); var q = Bounds(quit);
+            var geometry = new { cover = a, image = i, column = c, title = t, artist = ar, controls = tr, previous_icon = pi, volume_viewport = v, volume_slider = s, footer = f, settings_button = st, volume_button = vb, quit_button = q };
             Require(a.Width > 0 && Math.Abs(a.Width - a.Height) <= Tolerance, "cover_not_square", geometry);
             Require(Math.Abs(i.Width - i.Height) <= Tolerance && Math.Abs(i.Width - a.Width) <= Tolerance && Math.Abs(i.Height - a.Height) <= Tolerance, "cover_image_not_filling_square", geometry);
             Require(Math.Abs(a.Height - c.Height) <= Tolerance && Math.Abs(a.Y - c.Y) <= Tolerance && Math.Abs(a.Bottom - c.Bottom) <= Tolerance, "cover_column_height_or_edges_mismatch", geometry);
             Require(Math.Abs(t.X - ar.X) <= Tolerance && Math.Abs(t.X - tr.X) <= Tolerance && Math.Abs(t.X - pi.X) <= Tolerance, "track_controls_not_left_aligned", geometry);
             Require(a.X > 0 && Math.Abs(a.X - a.Y) <= Tolerance && Math.Abs(content!.ActualWidth - c.Right - a.X) <= Tolerance, "header_insets_not_symmetric", geometry);
+            Require(Math.Abs(a.X - ExpectedInset) <= Tolerance && Math.Abs(a.Y - ExpectedInset) <= Tolerance && Math.Abs(content!.ActualWidth - c.Right - ExpectedInset) <= Tolerance, "panel_insets_not_twelve_dips", geometry);
+            Require(Math.Abs(c.X - a.Right - 12) <= Tolerance, "cover_track_gap_changed", geometry);
+            Require(Math.Abs(f.X - a.X) <= Tolerance && Math.Abs(f.Right - c.Right) <= Tolerance && Math.Abs(st.X - a.X) <= Tolerance && Math.Abs(q.Right - c.Right) <= Tolerance, "footer_not_aligned_with_header", geometry);
+            Require(Math.Abs(content!.ActualHeight - f.Bottom - ExpectedInset) <= Tolerance && Math.Abs(f.Y - a.Bottom - 10) <= Tolerance, "footer_vertical_spacing_changed", geometry);
+            Require(Math.Abs(st.Y - vb.Y) <= Tolerance && Math.Abs(st.Y - q.Y) <= Tolerance && Math.Abs(st.Bottom - q.Bottom) <= Tolerance, "footer_controls_not_aligned", geometry);
             Require(viewport.IsHitTestVisible == expanded, "volume_hit_testing_mismatch", geometry);
             if (expanded)
             {
@@ -212,7 +221,7 @@ internal static class TrayLayoutCheck
             double clientWidth = (client.Right - client.Left) / scale, clientHeight = (client.Bottom - client.Top) / scale;
             Require(content.ActualWidth <= clientWidth + Tolerance && content.ActualHeight <= clientHeight + Tolerance, "content_overflows_window_client", new { content = new[] { content.ActualWidth, content.ActualHeight }, client = new[] { clientWidth, clientHeight } });
             Background();
-            return new(language, font, twoLines, expanded, a, i, c, t, ar, tr, pi, v, s, content.ActualWidth, content.ActualHeight, clientWidth, clientHeight);
+            return new(language, font, twoLines, expanded, a, i, c, t, ar, tr, pi, v, s, f, st, vb, q, content.ActualWidth, content.ActualHeight, clientWidth, clientHeight);
         }
     }
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)

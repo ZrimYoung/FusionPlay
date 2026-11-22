@@ -654,6 +654,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "if-addrs",
+ "libc",
  "md-5",
  "objc2-core-foundation",
  "oboe",
@@ -844,6 +845,7 @@ name = "if-addrs"
 version = "0.15.0"
 dependencies = [
  "getifs",
+ "libc",
 ]
 
 [[package]]

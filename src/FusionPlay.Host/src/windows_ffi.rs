@@ -448,13 +448,14 @@ mod tests {
             (1001, "track-a", "Song"),
             (u64::MAX, "track-a", "Song"),
             (500, "old-track", "Song"),
-            (500, "track-a", "Old song"),
         ] {
             assert_eq!(
                 seek(position, track, title)["error"]["code"],
                 "invalid_config"
             );
         }
+        // The stable sender identity survives titles used as lyric captions.
+        assert_eq!(seek(500, "track-a", "Old caption")["error"]["code"], "receiver");
         assert_eq!(
             invoke(handle, serde_json::json!({"op":"poll"}))["value"],
             before
@@ -480,6 +481,49 @@ mod tests {
             seek(500, "track-b", "Song")["error"]["code"],
             "invalid_config"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn lyrics_are_live_abi_snapshot_fields_and_never_persisted() {
+        let dir = std::env::temp_dir().join(format!("fusionplay-lyrics-abi-{}", uuid::Uuid::new_v4()));
+        let created = invoke(0, serde_json::json!({"op":"create", "data_directory":dir}));
+        assert_eq!(created["abi"], 1);
+        let handle = created["value"]["handle"].as_u64().unwrap();
+        assert_eq!(invoke(handle, serde_json::json!({"op":"poll"}))["value"]["snapshot"]["lyrics_text"], "");
+        let receiver = handles().lock().unwrap().get(&handle).unwrap().clone();
+        let lyrics = "[00:01.000]Transient ABI lyric 7D29\n[00:01.000]Memory-only translation";
+        let observe = |event: Value, expected: &str| {
+            receiver.emit(event);
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                let reply = invoke(handle, serde_json::json!({"op":"poll"}));
+                if reply["value"]["snapshot"]["lyrics_text"] == expected { break; }
+                assert!(std::time::Instant::now() < deadline, "live lyric snapshot was not published");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        receiver.emit(serde_json::json!({"event":"interconnect_stage", "stage":"media_session_established"}));
+        observe(serde_json::json!({"event":"media_info", "track_id":"lyric-a", "title":"ABI fixture", "lyrics_text":lyrics}), lyrics);
+        observe(serde_json::json!({"event":"media_info", "track_id":"lyric-a", "lyrics_text":"", "position_ms":0}), lyrics);
+        // Queue a real replacement carrying no lyrics; its snapshot must clear.
+        observe(serde_json::json!({"event":"media_info", "track_id":"lyric-b", "title":"Replacement"}), "");
+        observe(serde_json::json!({"event":"media_info", "track_id":"lyric-b", "lyrics_text":lyrics}), lyrics);
+        observe(serde_json::json!({"event":"media_channel_closed"}), "");
+        drop(receiver);
+        assert_eq!(invoke(handle, serde_json::json!({"op":"destroy"}))["ok"], true);
+        fn check_files(path: &Path) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() { check_files(&path); }
+                else {
+                    let bytes = fs::read(path).unwrap();
+                    assert!(!bytes.windows(b"Transient ABI lyric 7D29".len()).any(|window| window == b"Transient ABI lyric 7D29"));
+                    assert!(!bytes.windows(b"Memory-only translation".len()).any(|window| window == b"Memory-only translation"));
+                }
+            }
+        }
+        check_files(&dir);
         fs::remove_dir_all(dir).unwrap();
     }
 }

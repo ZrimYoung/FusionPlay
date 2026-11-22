@@ -1,6 +1,7 @@
 package com.airplayreceiver.desktop.bridge
 
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -30,6 +31,8 @@ data class XiaomiMediaInfo(
     val bitsPerSample: Int? = null,
     val channels: Int? = null,
     val metadataChangeType: Int? = null,
+    val trackTransition: String? = null,
+    val titleIsLyric: Boolean = false,
 )
 
 fun WindowsBridgeXiaomiEvent.toVolumePercentOrNull(): Int? {
@@ -127,6 +130,13 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
             ?.longOrNull
             ?.takeIf { it in 0L..2L }
             ?.toInt(),
+        trackTransition = (objectPayload["track_transition"] as? JsonPrimitive)
+            ?.contentOrNull
+            ?.takeIf { normalizedEvent == "media_info" && (it == "same" || it == "new") },
+        titleIsLyric = normalizedEvent == "media_info" &&
+            (objectPayload["title_is_lyric"] as? JsonPrimitive)
+                ?.takeUnless(JsonPrimitive::isString)
+                ?.booleanOrNull == true,
     )
 }
 

@@ -1,5 +1,12 @@
-//! Mac-only synchronization preference, separate from other platforms' settings.
+//! Synchronization preference for the Apple audio output path.
 use super::*;
+
+// Keep the existing path on macOS so upgrades preserve the adjustment.
+#[cfg(target_os = "macos")]
+const SETTINGS_FILENAME: &str = "macos-sync.json";
+#[cfg(target_os = "ios")]
+const SETTINGS_FILENAME: &str = "ios-sync.json";
+
 #[derive(Default, Serialize, Deserialize)]
 struct SyncSettings {
     #[serde(default)]
@@ -14,7 +21,7 @@ fn validate(value: i32) -> Result<i32> {
     Ok(value)
 }
 fn load(data: &Path) -> Result<i32> {
-    match fs::read(data.join("macos-sync.json")) {
+    match fs::read(data.join(SETTINGS_FILENAME)) {
         Ok(bytes) => validate(
             serde_json::from_slice::<SyncSettings>(&bytes)
                 .map_err(storage)?
@@ -25,7 +32,7 @@ fn load(data: &Path) -> Result<i32> {
     }
 }
 pub(super) fn apply(data: &Path) -> Result<()> {
-    fusionplay_miplay_sdk::media::set_macos_sync_adjustment_millis(load(data)?);
+    fusionplay_miplay_sdk::media::set_apple_sync_adjustment_millis(load(data)?);
     Ok(())
 }
 #[uniffi::export]
@@ -37,12 +44,12 @@ impl Receiver {
         let _operation = self.operations.lock().map_err(storage)?;
         let value = validate(millis)?;
         save_json(
-            &self.data.join("macos-sync.json"),
+            &self.data.join(SETTINGS_FILENAME),
             &SyncSettings {
                 adjustment_ms: value,
             },
         )?;
-        fusionplay_miplay_sdk::media::set_macos_sync_adjustment_millis(value);
+        fusionplay_miplay_sdk::media::set_apple_sync_adjustment_millis(value);
         Ok(())
     }
 }
@@ -52,16 +59,21 @@ mod tests {
     #[test]
     fn sync_preference_defaults_persists_and_rejects_invalid_values() {
         let dir =
-            std::env::temp_dir().join(format!("fusionplay-mac-sync-{}", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("fusionplay-apple-sync-{}", uuid::Uuid::new_v4()));
         let receiver = Receiver::new(dir.to_string_lossy().into()).unwrap();
         assert_eq!(receiver.sync_adjustment().unwrap(), 0);
-        for value in [-200, 35, 200, 0] {
+        for value in [-200, 200, -35] {
             receiver.set_sync_adjustment(value).unwrap();
-            assert_eq!(load(&dir).unwrap(), value);
+            assert_eq!(receiver.sync_adjustment().unwrap(), value);
         }
         assert!(receiver.set_sync_adjustment(201).is_err());
         assert!(receiver.set_sync_adjustment(-201).is_err());
-        assert_eq!(load(&dir).unwrap(), 0);
+        drop(receiver);
+
+        let receiver = Receiver::new(dir.to_string_lossy().into()).unwrap();
+        assert_eq!(receiver.sync_adjustment().unwrap(), -35);
+        receiver.set_sync_adjustment(0).unwrap();
+        assert_eq!(receiver.sync_adjustment().unwrap(), 0);
         drop(receiver);
         fs::remove_dir_all(dir).unwrap();
     }
