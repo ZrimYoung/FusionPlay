@@ -212,6 +212,10 @@ impl ReceiverController {
         self.hub.set_volume(percent)
     }
 
+    pub fn volume_percent(&self) -> u32 {
+        self.hub.volume_percent()
+    }
+
     pub fn send_confirmed(
         &self,
         action: MediaAction,

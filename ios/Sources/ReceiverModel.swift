@@ -419,9 +419,6 @@ final class ReceiverModel: ObservableObject {
         let releaseAudioSession = audioSessionActive
         audioSessionActive = false
         clearMedia()
-        let startSettings = target.map {
-            Settings(name: $0.name, interfaceName: $0.lan.name, outputDevice: "", volume: UInt32(volume.rounded()))
-        }
         let listener = ReceiverEvents(model: self, generation: nextGeneration)
         backend.async { [weak self] in
             if let previous { receiver.unsubscribe(token: previous) }
@@ -431,11 +428,15 @@ final class ReceiverModel: ObservableObject {
                 try? session.setActive(false, options: .notifyOthersOnDeactivation)
             }
             let result = Result<UInt64?, Error> {
-                guard let startSettings else { return nil }
+                guard let target else { return nil }
+                // Read the committed volume after queued edits have finished.
+                // The slider can still show a transient value from the phone.
+                let settings = Settings(name: target.name, interfaceName: target.lan.name,
+                                        outputDevice: "", volume: min(receiver.settings().volume, 100))
                 // Configure the output for CPAL before opening the listener.
                 // Activation waits for a phone to establish a playback route.
                 try session.setCategory(.playback, mode: .default)
-                try receiver.start(settings: startSettings)
+                try receiver.start(settings: settings)
                 return receiver.subscribe(listener: listener)
             }
             DispatchQueue.main.async { [weak self] in
@@ -535,8 +536,20 @@ final class ReceiverModel: ObservableObject {
 
     fileprivate func receive(_ state: Snapshot, generation: UInt64) {
         guard generation == self.generation, runningListener != nil, !interrupted else { return }
+        let volumeChanged = snapshot?.volume != state.volume
         if snapshot != state { snapshot = state }
         guard prepareAudioSession(for: state) else { return }
+        if volumeChanged, state.controlsAvailable, let receiver {
+            backend.async { [weak self] in
+                do { try receiver.rememberCurrentVolume() }
+                catch {
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, generation == self.generation else { return }
+                        self.controlMessage = ReceiverAppLanguage.text("设置音量失败")
+                    }
+                }
+            }
+        }
         if state.controlsAvailable, state.phase == .playing {
             playedInCurrentSession = true
         } else if !state.controlsAvailable, foreground || state.phase != .ready {

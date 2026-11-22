@@ -59,6 +59,8 @@
 "始终显示顶部按钮" = "Always Show Top Controls";
 "允许歌名和艺人信息换行" = "Wrap Song Details";
 "窄窗左右分页" = "Swipe Between Pages in Narrow Windows";
+"查看歌词" = "View Lyrics";
+"返回播放页" = "Back to Player";
 "歌词页显示小封面" = "Show Artwork on Lyrics Page";
 "歌词页显示歌曲信息" = "Show Song Details on Lyrics Page";
 "播放页" = "Player Page";
@@ -77,6 +79,9 @@
 "始终开启" = "Always Show";
 "始终关闭" = "Always Hide";
 "歌词字号" = "Lyrics Text Size";
+"歌词投影" = "Lyrics Shadow";
+"投影浓度" = "Shadow Opacity";
+"投影弥散" = "Shadow Blur";
 "同步诊断" = "Sync Diagnostics";
 "输出设备" = "Output Device";
 "尚未输出" = "No Audio Output Yet";
@@ -89,6 +94,7 @@
 "暂无诊断日志。" = "No diagnostic log yet.";
 "无法分享诊断日志。" = "Could not share the diagnostic log.";
 "进度条颜色" = "Progress Bar Color";
+"背景模糊程度" = "Background Blur";
 "白色" = "White";
 "跟随系统" = "System";
 "自定义" = "Custom";

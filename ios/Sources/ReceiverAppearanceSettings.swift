@@ -22,6 +22,66 @@ struct ReceiverProgressColorSettings: View {
     }
 }
 
+struct ReceiverBackdropBlurSettings: View {
+    @AppStorage(ReceiverBackdropAppearance.blurKey) private var blurPercent = ReceiverBackdropAppearance.defaultBlurPercent
+
+    var body: some View {
+        let range = ReceiverBackdropAppearance.blurRange
+        let percent = ReceiverBackdropAppearance.clampedBlurPercent(blurPercent)
+        let value = Text(Double(percent) / 100, format: .percent.precision(.fractionLength(0)))
+        VStack(alignment: .leading, spacing: 7) {
+            LabeledContent("背景模糊程度") { value.monospacedDigit() }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(ReceiverBackdropAppearance.clampedBlurPercent(blurPercent)) },
+                    set: { blurPercent = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: 1
+            )
+            .accessibilityLabel("背景模糊程度")
+            .accessibilityValue(value)
+        }
+    }
+}
+
+struct ReceiverLyricsShadowSettings: View {
+    @AppStorage(LyricsShadowAppearance.enabledKey) private var enabled = false
+    @AppStorage(LyricsShadowAppearance.opacityKey) private var opacity = LyricsShadowAppearance.defaultOpacity
+    @AppStorage(LyricsShadowAppearance.spreadKey) private var spread = LyricsShadowAppearance.defaultSpread
+
+    var body: some View {
+        Toggle("歌词投影", isOn: $enabled)
+        if enabled {
+            let percent = LyricsShadowAppearance.clamp(opacity, to: LyricsShadowAppearance.opacityRange)
+            let points = LyricsShadowAppearance.clamp(spread, to: LyricsShadowAppearance.spreadRange)
+            control("投影浓度", value: $opacity, range: LyricsShadowAppearance.opacityRange,
+                    readout: Text(Double(percent) / 100, format: .percent.precision(.fractionLength(0))))
+            control("投影弥散", value: $spread, range: LyricsShadowAppearance.spreadRange,
+                    readout: Text(verbatim: "\(points) pt"))
+        }
+    }
+
+    private func control(_ label: LocalizedStringKey, value: Binding<Int>,
+                         range: ClosedRange<Int>, readout: Text) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            LabeledContent(label) { readout.monospacedDigit() }
+                .accessibilityHidden(true)
+            Slider(
+                value: Binding(
+                    get: { Double(LyricsShadowAppearance.clamp(value.wrappedValue, to: range)) },
+                    set: { value.wrappedValue = Int($0.rounded()) }
+                ),
+                in: Double(range.lowerBound)...Double(range.upperBound),
+                step: 1
+            )
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(readout)
+        }
+    }
+}
+
 struct ReceiverFontSettingsSection: View {
     @AppStorage(ReceiverTypography.familyKey) private var family = ""
     @State private var showingFonts = false
@@ -99,10 +159,8 @@ private struct ReceiverFontSettings: View {
 
     private func chooseFamily(_ name: String) {
         if name != family {
-            let available = ReceiverFontFace.faces(for: name)
             family = name
-            face = available.first(where: { $0.title.caseInsensitiveCompare("Regular") == .orderedSame })?.id
-                ?? available.first?.id ?? ""
+            face = ReceiverFontFace.preferred(for: name)?.id ?? ""
         } else if name.isEmpty {
             face = ""
         }
@@ -127,10 +185,10 @@ private struct ReceiverFontFamilyPicker: View {
         let matching = query.isEmpty ? families : families.filter { $0.localizedStandardContains(query) }
         List {
             if systemFontMatches {
-                familyRow("", title: Text("系统字体"))
+                familyRow("")
             }
             ForEach(matching, id: \.self) { name in
-                familyRow(name, title: Text(verbatim: name))
+                familyRow(name)
             }
             if !systemFontMatches && matching.isEmpty {
                 Text("未找到匹配的字体").foregroundStyle(.secondary)
@@ -142,10 +200,10 @@ private struct ReceiverFontFamilyPicker: View {
         .onAppear { families = UIFont.familyNames.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
     }
 
-    private func familyRow(_ name: String, title: Text) -> some View {
+    private func familyRow(_ name: String) -> some View {
         Button { onSelect(name) } label: {
             HStack {
-                title.foregroundStyle(.primary)
+                ReceiverFontFamilyLabel(name: name).foregroundStyle(.primary)
                 Spacer()
                 if selection == name {
                     Image(systemName: "checkmark").accessibilityHidden(true)
@@ -157,9 +215,30 @@ private struct ReceiverFontFamilyPicker: View {
     }
 }
 
+private struct ReceiverFontFamilyLabel: View {
+    let name: String
+
+    var body: some View {
+        if name.isEmpty {
+            Text("系统字体")
+        } else {
+            // Resolve the face when SwiftUI renders this row, without previewing the whole catalog up front.
+            let preview = ReceiverFontFace.preferred(for: name)
+            Text(verbatim: name)
+                .font(preview.map { .custom($0.id, size: 17, relativeTo: .body) } ?? .body)
+        }
+    }
+}
+
 private struct ReceiverFontFace: Identifiable {
     let id: String
     let title: String
+
+    static func preferred(for family: String) -> Self? {
+        let available = faces(for: family)
+        return available.first { $0.title.caseInsensitiveCompare("Regular") == .orderedSame }
+            ?? available.first
+    }
 
     static func faces(for family: String) -> [Self] {
         guard !family.isEmpty else { return [] }

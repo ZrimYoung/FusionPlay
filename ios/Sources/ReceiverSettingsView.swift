@@ -3,7 +3,11 @@ import UIKit
 
 @MainActor
 struct ReceiverSettingsView: View {
+    private static let preferredSheetWidth: CGFloat = 560
+    private static let minimumTabWidth: CGFloat = 500
+
     @ObservedObject var model: ReceiverModel
+    let windowWidth: CGFloat
     @AppStorage("autoStartReceiver") private var autoStartReceiver = true
     @AppStorage("playerShowsProgress") private var showProgress = true
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
@@ -21,11 +25,10 @@ struct ReceiverSettingsView: View {
     @AppStorage(ReceiverAppLanguage.storageKey) private var appLanguage: ReceiverAppLanguage = .system
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var editingName: Bool
     @State private var draftName = ""
-    @State private var page: Page? = .receiver
-    @State private var compactPath: [Page] = []
+    @State private var page: Page?
 
     private enum Page: String, CaseIterable, Identifiable {
         case receiver, appearance, audio, about
@@ -64,7 +67,9 @@ struct ReceiverSettingsView: View {
 
     var body: some View {
         if #available(iOS 18, *), isPad {
-            navigation.presentationSizing(.form)
+            navigation
+                .frame(idealWidth: min(windowWidth, Self.preferredSheetWidth))
+                .presentationSizing(.form.fitted(horizontal: true, vertical: false))
         } else {
             navigation
         }
@@ -72,43 +77,53 @@ struct ReceiverSettingsView: View {
 
     private var navigation: some View {
         GeometryReader { geometry in
-            navigation(compact: horizontalSizeClass != .regular || geometry.size.width < 600)
-        }
-    }
-
-    private func navigation(compact: Bool) -> some View {
-        Group {
-            if compact {
-                compactNavigation
+            if isPad && geometry.size.width >= Self.minimumTabWidth && !dynamicTypeSize.isAccessibilitySize {
+                tabNavigation
             } else {
-                regularNavigation
+                compactNavigation
             }
         }
         .onAppear { draftName = model.name }
         .onChange(of: model.name) { _, name in
             if !editingName { draftName = name }
         }
-        .onChange(of: compact) { _, isCompact in
-            if isCompact { compactPath.removeAll() }
-        }
     }
 
-    private var regularNavigation: some View {
-        NavigationSplitView {
-            List(Page.allCases, selection: $page) { item in
-                NavigationLink(value: item) { pageLabel(item) }
+    private var tabSelection: Binding<Page> {
+        Binding(get: { page ?? .receiver }, set: { page = $0 })
+    }
+
+    private var compactPath: Binding<[Page]> {
+        Binding(get: { page.map { [$0] } ?? [] }, set: { page = $0.last })
+    }
+
+    private var tabNavigation: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                Picker("设置", selection: tabSelection) {
+                    ForEach(Page.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .padding(.horizontal, 20)
+                .padding(.vertical, 8)
+
+                content(for: page ?? .receiver)
+                    .formStyle(.grouped)
             }
-            .listStyle(.sidebar)
+            .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("设置")
-            .navigationSplitViewColumnWidth(min: 140, ideal: 158, max: 180)
-        } detail: {
-            pageDetails(page ?? .receiver)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { doneButton }
+            }
         }
-        .navigationSplitViewStyle(.balanced)
     }
 
     private var compactNavigation: some View {
-        NavigationStack(path: $compactPath) {
+        NavigationStack(path: compactPath) {
             List(Page.allCases) { item in
                 NavigationLink(value: item) { pageLabel(item) }
             }
@@ -122,14 +137,7 @@ struct ReceiverSettingsView: View {
     }
 
     private func pageLabel(_ item: Page) -> some View {
-        Label {
-            Text(item.title)
-        } icon: {
-            Image(systemName: item.symbol)
-                .font(.system(size: 14, weight: .regular))
-                .imageScale(.medium)
-                .frame(width: 18, height: 18)
-        }
+        Label(item.title, systemImage: item.symbol)
     }
 
     private func pageDetails(_ item: Page) -> some View {
@@ -208,6 +216,7 @@ struct ReceiverSettingsView: View {
             Section("播放显示") {
                 Toggle("显示进度与时间", isOn: $showProgress)
                 ReceiverProgressColorSettings()
+                ReceiverBackdropBlurSettings()
                 Toggle("显示播放控制", isOn: $showPlaybackControls)
                 Toggle("允许歌名和艺人信息换行", isOn: $wrapPlayerMetadata)
                 Toggle("始终显示顶部按钮", isOn: $toolbarAlwaysVisible)
@@ -215,11 +224,12 @@ struct ReceiverSettingsView: View {
             Section("歌词") {
                 let visibility: LocalizedStringKey = isPad && narrowPlayerPaging ? "非分页时显示歌词" : "显示歌词"
                 Picker(visibility, selection: $lyricsDisplayMode) {
-                    ForEach(LyricsDisplayMode.allCases, id: \.self) { mode in
+                    ForEach([LyricsDisplayMode.automatic, .never], id: \.self) { mode in
                         Text(LocalizedStringKey(mode.title)).tag(mode)
                     }
                 }
                 lyricScaleControl
+                ReceiverLyricsShadowSettings()
                 lyricMoveControl
                 Toggle("修正歌词标题", isOn: $correctLyricTitles)
                     .onChange(of: correctLyricTitles) { _, _ in model.refreshDisplayPresentation() }
