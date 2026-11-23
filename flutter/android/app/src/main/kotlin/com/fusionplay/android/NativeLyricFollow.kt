@@ -8,10 +8,25 @@ internal object NativeLyricFollow {
     // fall just before a line the receiver has already reached.
     private const val BACKWARD_TOLERANCE_MS = 750L
 
+    fun anchorTop(height: Int, compactMaximum: Int? = null): Int = if (compactMaximum == null) {
+        (height * .32f).roundToInt()
+    } else {
+        (height * .18f).roundToInt().coerceAtMost(compactMaximum)
+    }
+
     /** Keep a followed or selected line at its viewport fraction, and preserve a scrolled row's offset. */
     fun resizeAnchorTop(top: Float, oldHeight: Int, newHeight: Int, proportional: Boolean): Int {
         val offset = if (proportional && oldHeight > 0) top * (newHeight.toFloat() / oldHeight) else top
         return offset.roundToInt().takeIf { it < newHeight } ?: 0
+    }
+
+    fun lineAlpha(position: Int, activeIndex: Int?, synchronized: Boolean, highContrast: Boolean): Int = when {
+        !synchronized -> 224
+        position == activeIndex -> 255
+        highContrast -> 189
+        activeIndex == null -> if (position == 0) 184 else 107
+        kotlin.math.abs(position - activeIndex) <= 1 -> 145
+        else -> 82
     }
 
     fun activeIndex(

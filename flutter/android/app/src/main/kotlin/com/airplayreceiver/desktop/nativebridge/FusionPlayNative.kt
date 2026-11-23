@@ -80,7 +80,7 @@ object FusionPlayNative : NativeCallback {
     external fun nativeStopMiPlay()
 
     @JvmStatic
-    external fun nativeSetMiPlayOutputAdvance(millis: Int)
+    external fun nativeSetMiPlaySyncOffset(millis: Int)
 
     @JvmStatic
     external fun nativeSuspendMiPlayOutput()

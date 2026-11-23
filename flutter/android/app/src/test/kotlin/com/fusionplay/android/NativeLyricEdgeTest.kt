@@ -1,10 +1,19 @@
 package com.fusionplay.android
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NativeLyricEdgeTest {
+    @Test
+    fun `active row receives edge effects when browsing unless it has remote focus`() {
+        assertTrue(NativeLyricEdge.keepsRowClear(active = true, browsing = false, remoteFocused = false))
+        assertFalse(NativeLyricEdge.keepsRowClear(active = true, browsing = true, remoteFocused = false))
+        assertTrue(NativeLyricEdge.keepsRowClear(active = true, browsing = true, remoteFocused = true))
+        assertFalse(NativeLyricEdge.keepsRowClear(active = false, browsing = false, remoteFocused = false))
+    }
+
     @Test
     fun `center stays clear and blur gets stronger toward both edges`() {
         assertEquals(0, NativeLyricEdge.blurLevel(.32f, stronger = false))

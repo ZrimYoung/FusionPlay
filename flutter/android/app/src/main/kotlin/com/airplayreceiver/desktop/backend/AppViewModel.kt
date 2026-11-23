@@ -523,6 +523,13 @@ class AppViewModel(
         _state.update { it.copy(lastError = null) }
     }
 
+    internal fun clearErrorIfMatches(message: String?) {
+        if (message == null) return
+        _state.update { current ->
+            if (current.lastError == message) current.copy(lastError = null) else current
+        }
+    }
+
     fun reportExternalLog(
         message: String,
         isError: Boolean = false,
@@ -799,7 +806,7 @@ class AppViewModel(
             if (startup.firstRun) {
                 appendLog(
                     AppLogLevel.INFO,
-                    "First run: Windows startup is enabled by default.",
+                    "First run: automatic startup and wake are off by default.",
                 )
             }
         } catch (exception: Exception) {

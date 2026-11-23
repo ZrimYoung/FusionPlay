@@ -7,6 +7,24 @@ import org.junit.Test
 
 class NativeLyricStaggerTest {
     @Test
+    fun configuredMoveDurationAppliesToScrollAndStagger() {
+        assertEquals(1f, NativeLyricStagger.scrollFraction(200, durationMs = 200), .001f)
+        assertEquals(.77315f, NativeLyricStagger.scrollFraction(200, durationMs = 400), .001f)
+        assertTrue(NativeLyricStagger.offsetDp(200, 1f, 140, 1, durationMs = 200) > 0f)
+        assertEquals(0f, NativeLyricStagger.offsetDp(340, 1f, 140, 1, durationMs = 200), .001f)
+    }
+
+    @Test
+    fun `scroll matches the iPad bezier and settles without reversing`() {
+        assertEquals(.30044f, NativeLyricStagger.scrollFraction(100, durationMs = 400), .001f)
+        assertEquals(.95628f, NativeLyricStagger.scrollFraction(300, durationMs = 400), .001f)
+        val positions = (-1L..401L).map { NativeLyricStagger.scrollFraction(it, durationMs = 400) }
+        assertEquals(0f, positions.first(), .001f)
+        assertEquals(1f, positions.last(), .001f)
+        assertTrue(positions.zipWithNext().all { (a, b) -> a <= b })
+    }
+
+    @Test
     fun `an interrupted wave starts from its old translation and remains bounded`() {
         val span = NativeLyricStagger.MAX_SPAN_MS
         val interrupted = NativeLyricStagger.offsetDp(180, 1f, span, 1)

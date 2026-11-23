@@ -38,12 +38,12 @@ import kotlinx.coroutines.launch
 
 class MainActivity : Activity() {
     private val consumedMediaKeys = mutableSetOf<Int>()
-    private var pendingAccessibilityKeepAlivePrompt = false
     private var stateJob: Job? = null
     private var settingsDialog: Dialog? = null
     private var settingsView: NativeSettingsView? = null
     private var hasShownPlayback = false
     private var restoreSettings = false
+    private var restoreSettingsPage: NativeSettingsPage? = null
     private var observing = false
     private val runtime get() = (application as FusionPlayApplication).runtime
     private val isTelevision by lazy(LazyThreadSafetyMode.NONE) {
@@ -61,6 +61,10 @@ class MainActivity : Activity() {
     private val mediaListener: () -> Unit = {
         uiHandler.removeCallbacks(updateArtwork)
         uiHandler.post(updateArtwork)
+    }
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(NativePlayerPreferenceStore(newBase).language().applyTo(newBase))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -88,17 +92,27 @@ class MainActivity : Activity() {
             val safe = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
             )
-            view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            if (isTelevision) {
+                view.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            } else {
+                player.setContentInsets(safe.left, safe.top, safe.right, safe.bottom)
+            }
             WindowInsetsCompat.CONSUMED
         }
         setContentView(root)
         restoreSettings = savedInstanceState?.getBoolean(STATE_SETTINGS_OPEN) == true
-        pendingAccessibilityKeepAlivePrompt = shouldShowAccessibilityKeepAlivePrompt()
-        requestReceiverPermissions()
+        restoreSettingsPage = NativeSettingsPage.entries.firstOrNull {
+            it.name == savedInstanceState?.getString(STATE_SETTINGS_PAGE)
+        }
+        if (savedInstanceState?.getBoolean(STATE_RECEIVER_RUNNING) ?: runtime.autoReceiveOnLaunch) {
+            requestReceiverPermissions()
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean(STATE_SETTINGS_OPEN, settingsDialog?.isShowing == true)
+        outState.putString(STATE_SETTINGS_PAGE, settingsView?.page?.name)
+        outState.putBoolean(STATE_RECEIVER_RUNNING, runtime.uiState.value.receiverRunning)
         outState.putBoolean(STATE_COMPACT_LYRICS, player.isCompactLyricsPageOpen())
         super.onSaveInstanceState(outState)
     }
@@ -106,9 +120,15 @@ class MainActivity : Activity() {
     private fun showSettings() {
         if (settingsDialog != null || isFinishing || isDestroyed) return
         player.exitRemoteLyrics()
-        val dialog = Dialog(this)
+        val dialog = object : Dialog(this) {
+            @Suppress("DEPRECATION")
+            override fun onBackPressed() {
+                if (settingsView?.navigateBack() != true) super.onBackPressed()
+            }
+        }
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        val content = NativeSettingsView(this, ::applySettingsAction, dialog::dismiss)
+        val content = NativeSettingsView(this, ::applySettingsAction, dialog::dismiss, restoreSettingsPage)
+        restoreSettingsPage = null
         settingsView = content
         settingsDialog = dialog
         dialog.setContentView(content)
@@ -123,8 +143,14 @@ class MainActivity : Activity() {
             if (menu && event.action == KeyEvent.ACTION_UP) dialog.dismiss()
             menu
         }
+        runtime.refreshReceiverDiagnostics()
         render(runtime.uiState.value)
         dialog.show()
+        if (Build.VERSION.SDK_INT >= 33) {
+            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
+                if (!content.navigateBack()) dialog.dismiss()
+            }
+        }
         dialog.window?.let { settingsWindow ->
             settingsWindow.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             settingsWindow.setGravity(Gravity.CENTER)
@@ -145,29 +171,36 @@ class MainActivity : Activity() {
             is NativeSettingsAction.KeepScreenOn -> runtime.setKeepScreenOnWhilePlaying(action.value)
             is NativeSettingsAction.AdvancedEffects -> runtime.setAdvancedEffectsEnabled(action.value)
             is NativeSettingsAction.NativeCast -> runtime.setNativeCastPaused(action.value)
-            is NativeSettingsAction.AudioAdvance -> runtime.setMiPlayOutputAdvance(action.value)
+            is NativeSettingsAction.AudioAdvance -> runtime.setMiPlaySyncOffset(action.value)
+            is NativeSettingsAction.ReceiverRunning -> {
+                if (action.enabled) requestReceiverPermissions() else runtime.stopReceiving()
+            }
+            is NativeSettingsAction.AutoReceiveOnLaunch -> runtime.setAutoReceiveOnLaunch(action.enabled)
             is NativeSettingsAction.Protocol -> runtime.setProtocolEnabled(action.protocol, action.enabled)
             is NativeSettingsAction.Identity -> runtime.setMiPlayDeviceIdentity(action.value)
             NativeSettingsAction.ExportLogs -> runtime.exportLogs()
+            NativeSettingsAction.RefreshDiagnostics -> runtime.refreshReceiverDiagnostics()
             is NativeSettingsAction.PlayerPreferences -> updatePreferences(action.value)
         }
     }
 
     private fun updatePreferences(value: NativePlayerPreferences) {
         if (value == preferences) return
+        val previous = preferences
         preferences = value
         preferenceStore.save(value)
-        runtime.setCorrectLyricTitles(value.correctLyricTitles)
-        render(runtime.uiState.value)
+        if (value.correctLyricTitles != previous.correctLyricTitles) runtime.setCorrectLyricTitles(value.correctLyricTitles)
+        if (value.appLanguage != previous.appLanguage) recreate() else render(runtime.uiState.value)
     }
 
     private fun render(ui: ReceiverUiState) {
         // Project the backend's effective default receiver name without writing it to disk.
         val playerState = if (ui.state.settings.receiverName != null) ui.state else
             ui.state.copy(settings = ui.state.settings.copy(receiverName = ui.receiverName))
-        player.render(playerState, ui.volumePercent, preferences)
+        player.render(playerState, ui.volumePercent, preferences,
+            receiverRunning = ui.receiverRunning, playerError = ui.playerError)
         val state = ui.state
-        settingsView?.render(state, ui.nativeCast, ui.miPlayOutputAdvanceMs, preferences)
+        settingsView?.render(ui, preferences)
         setKeepScreenOn(observing && state.settings.keepScreenOnWhilePlaying && state.playback.isPlaying)
         val playback = state.playback
         val hasPlayback = playback.streamActive || playback.protocol != null ||
@@ -334,40 +367,14 @@ class MainActivity : Activity() {
 
     private fun startReceiverService() {
         ContextCompat.startForegroundService(this, Intent(this, ReceiverForegroundService::class.java))
-        promptAccessibilityKeepAliveIfNeeded()
-    }
-
-    private fun shouldShowAccessibilityKeepAlivePrompt(): Boolean {
-        val preferences = getSharedPreferences(
-            ACCESSIBILITY_PROMPT_PREFERENCES,
-            Context.MODE_PRIVATE,
-        )
-        if (preferences.getBoolean(ACCESSIBILITY_PROMPT_SHOWN_KEY, false)) {
-            return false
-        }
-        if (AccessibilityKeepAliveController.isServiceEnabled(this)) {
-            preferences.edit().putBoolean(ACCESSIBILITY_PROMPT_SHOWN_KEY, true).apply()
-            return false
-        }
-        return true
-    }
-
-    private fun promptAccessibilityKeepAliveIfNeeded() {
-        if (!pendingAccessibilityKeepAlivePrompt) return
-        pendingAccessibilityKeepAlivePrompt = false
-        getSharedPreferences(ACCESSIBILITY_PROMPT_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(ACCESSIBILITY_PROMPT_SHOWN_KEY, true)
-            .apply()
-        AccessibilityKeepAliveController.requestAuthorization(this)
     }
 
     companion object {
         private const val RECEIVER_PERMISSION_REQUEST = 1201
         private const val STATE_SETTINGS_OPEN = "settings_open"
+        private const val STATE_SETTINGS_PAGE = "settings_page"
+        private const val STATE_RECEIVER_RUNNING = "receiver_running"
         private const val STATE_COMPACT_LYRICS = "compact_lyrics"
-        private const val ACCESSIBILITY_PROMPT_PREFERENCES = "accessibility_keep_alive_prompt"
-        private const val ACCESSIBILITY_PROMPT_SHOWN_KEY = "shown_v1"
 
         @Volatile
         private var appInForeground = false
@@ -396,7 +403,13 @@ class MainActivity : Activity() {
         window.statusBarColor = Color.TRANSPARENT
         @Suppress("DEPRECATION")
         window.navigationBarColor = Color.TRANSPARENT
-        if (Build.VERSION.SDK_INT >= 29) window.isNavigationBarContrastEnforced = false
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.isNavigationBarContrastEnforced = false
+            if (!isTelevision) {
+                @Suppress("DEPRECATION")
+                window.isStatusBarContrastEnforced = false
+            }
+        }
         val controller = WindowCompat.getInsetsController(window, window.decorView)
         controller.isAppearanceLightStatusBars = false
         controller.isAppearanceLightNavigationBars = false

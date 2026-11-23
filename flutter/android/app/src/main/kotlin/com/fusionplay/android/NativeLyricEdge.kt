@@ -6,6 +6,9 @@ import kotlin.math.roundToInt
 internal object NativeLyricEdge {
     const val MAX_BLUR_LEVEL = 13
 
+    fun keepsRowClear(active: Boolean, browsing: Boolean, remoteFocused: Boolean): Boolean =
+        remoteFocused || (active && !browsing)
+
     fun opacity(center: Float): Float = minOf(center / .09f, (1f - center) / .10f).coerceIn(0f, 1f)
 
     fun blurLevel(center: Float, stronger: Boolean): Int {

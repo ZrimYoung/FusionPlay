@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_lyric_loading">Loading lyrics…</string>
+    <string name="native_lyric_unavailable">The sending device did not provide lyrics</string>
+</resources>

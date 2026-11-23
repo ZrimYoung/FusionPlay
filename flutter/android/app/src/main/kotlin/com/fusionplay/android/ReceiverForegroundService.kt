@@ -15,7 +15,6 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.media.app.NotificationCompat.MediaStyle
-import com.airplayreceiver.desktop.nativebridge.FusionPlayNative
 import com.fusionplay.android.media.FusionPlayMediaChannel
 import com.fusionplay.android.media.FusionPlayMediaCommand
 
@@ -53,11 +52,18 @@ class ReceiverForegroundService : Service() {
             outcome = "observed",
             details = mapOf("action" to intent?.action),
         )
-        when (intent?.action) {
+        val runtime = (application as FusionPlayApplication).runtime
+        val action = intent?.action
+        if (action != null && !runtime.receiving) {
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        when (action) {
             ACTION_PLAY -> FusionPlayMediaChannel.dispatch(FusionPlayMediaCommand.PLAY)
             ACTION_PAUSE -> FusionPlayMediaChannel.dispatch(FusionPlayMediaCommand.PAUSE)
             ACTION_PREVIOUS -> FusionPlayMediaChannel.dispatch(FusionPlayMediaCommand.PREVIOUS)
             ACTION_NEXT -> FusionPlayMediaChannel.dispatch(FusionPlayMediaCommand.NEXT)
+            else -> runtime.setReceiverServiceActive(true)
         }
         mainHandler.removeCallbacks(notificationRefresh)
         mainHandler.post(notificationRefresh)
@@ -70,10 +76,7 @@ class ReceiverForegroundService : Service() {
             event = "receiver_service",
             outcome = "stopped",
         )
-        // The Activity can be stopped while a sender is searching, so native
-        // MiPlay deliberately outlives its UI bridge. The foreground service
-        // is the process-level owner and performs the final shutdown.
-        runCatching { FusionPlayNative.nativeStopMiPlay() }
+        (application as FusionPlayApplication).runtime.setReceiverServiceActive(false)
         multicastLock?.let { lock ->
             if (lock.isHeld) {
                 lock.release()

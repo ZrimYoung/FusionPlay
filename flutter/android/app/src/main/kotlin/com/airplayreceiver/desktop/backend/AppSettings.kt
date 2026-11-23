@@ -24,20 +24,14 @@ enum class MiPlayDeviceIdentity(
     }
 }
 
-/**
- * User-controlled settings persisted below %LOCALAPPDATA%\AirPlayReceiver.
- *
- * Startup is intentionally enabled by default. [WindowsStartupManager] writes
- * the default to disk before registering the Run entry, so a later explicit
- * opt-out remains durable across launches.
- */
+/** User-controlled receiver settings persisted in the Android app's private storage. */
 data class AppSettings(
     val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
     val receiverName: String? = null,
     val outputDeviceId: String? = null,
     val xiaomiNetworkAdapterId: String? = null,
-    val startupEnabled: Boolean = true,
-    val autoWakeEnabled: Boolean = true,
+    val startupEnabled: Boolean = false,
+    val autoWakeEnabled: Boolean = false,
     val keepScreenOnWhilePlaying: Boolean = true,
     val advancedEffectsEnabled: Boolean = false,
     val miPlayEnabled: Boolean = true,

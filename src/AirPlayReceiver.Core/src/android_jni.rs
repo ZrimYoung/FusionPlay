@@ -820,12 +820,12 @@ pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayN
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayNative_nativeSetMiPlayOutputAdvance(
+pub extern "system" fn Java_com_airplayreceiver_desktop_nativebridge_FusionPlayNative_nativeSetMiPlaySyncOffset(
     _env: JNIEnv,
     _class: JClass,
     millis: jint,
 ) {
-    fusionplay_miplay_sdk::media::set_android_output_advance_millis(millis.clamp(0, 500) as u32);
+    fusionplay_miplay_sdk::media::set_android_sync_offset_millis(millis);
 }
 
 #[unsafe(no_mangle)]

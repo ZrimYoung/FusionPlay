@@ -9,6 +9,13 @@ class NativeLyricFollowTest {
     private val lyrics = requireNotNull(LrcParser.parse("[00:05]First\n[00:10]Second\n[00:17]Third"))
 
     @Test
+    fun `compact lyric anchor uses less space and caps tall viewports`() {
+        assertEquals(240, NativeLyricFollow.anchorTop(750))
+        assertEquals(88, NativeLyricFollow.anchorTop(750, compactMaximum = 88))
+        assertEquals(54, NativeLyricFollow.anchorTop(300, compactMaximum = 88))
+    }
+
+    @Test
     fun `width changes keep the visible line and height changes preserve its viewport position`() {
         assertEquals(160, NativeLyricFollow.resizeAnchorTop(160f, 500, 500, proportional = true))
         assertEquals(96, NativeLyricFollow.resizeAnchorTop(160f, 500, 300, proportional = true))

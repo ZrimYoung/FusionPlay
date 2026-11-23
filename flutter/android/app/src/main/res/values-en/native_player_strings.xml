@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_player_show_lyrics">Show lyrics</string>
+    <string name="native_player_hide_lyrics">Hide lyrics</string>
+    <string name="native_player_open_lyrics">View lyrics</string>
+    <string name="native_player_open_lyrics_caption">View lyrics, %1$s</string>
+    <string name="native_player_return">Return to playback</string>
+    <string name="native_player_return_track">Return to playback, %1$s</string>
+    <string name="native_player_return_track_info">Return to playback, %1$s, %2$s</string>
+    <string name="native_player_volume">Receiver volume</string>
+    <string name="native_player_volume_value">Receiver volume, %1$d%%</string>
+    <string name="native_player_settings">Receiver settings</string>
+    <string name="native_player_progress">Playback progress</string>
+    <string name="native_player_previous">Previous track</string>
+    <string name="native_player_play">Play</string>
+    <string name="native_player_pause">Pause</string>
+    <string name="native_player_next">Next track</string>
+    <string name="native_player_waiting_track">Waiting for track information</string>
+    <string name="native_player_miplay">MiPlay</string>
+    <string name="native_player_preparing_receiver">Preparing receiver</string>
+    <string name="native_player_receiver_stopped">Receiver stopped</string>
+    <string name="native_player_receiver_disabled">Reception is off</string>
+    <string name="native_player_waiting_connection">Waiting for connection</string>
+    <string name="native_player_starting_receiver">Starting receiver</string>
+    <string name="native_player_start_receiver_hint">Start the receiver in settings</string>
+    <string name="native_player_enable_protocol_hint">Enable a casting protocol in settings</string>
+    <string name="native_player_select_receiver_hint">Choose the name above in your %1$s device list</string>
+    <string name="native_player_protocol_separator">", "</string>
+</resources>

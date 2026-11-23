@@ -390,7 +390,10 @@ class WindowsBridgeClient(
             FusionPlayMediaChannel.currentSystemMediaVolumePercent(),
             deviceType,
         )
-        return ok("xiaomi_start")
+        return ok("xiaomi_start").copy(result = buildJsonObject {
+            put("interface", adapter.name)
+            put("ipv4", ipv4)
+        })
     }
 
     suspend fun stopXiaomi(): WindowsBridgeResponse {

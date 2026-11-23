@@ -5,6 +5,6 @@
     <string name="receiver_notification_title">FusionPlay</string>
     <string name="receiver_notification_text">运行中</string>
     <string name="accessibility_keep_alive_name">FusionPlay</string>
-    <string name="accessibility_keep_alive_description">用于开机自启/后台保活/自动唤起</string>
-    <string name="accessibility_permission_prompt">请授权无障碍权限</string>
+    <string name="accessibility_keep_alive_description">为开机自启和播放时自动唤起提供支持</string>
+    <string name="accessibility_permission_prompt">请开启 FusionPlay 无障碍服务以使用所选功能</string>
 </resources>

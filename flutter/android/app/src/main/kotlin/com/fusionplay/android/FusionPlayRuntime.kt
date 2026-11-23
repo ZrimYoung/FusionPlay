@@ -2,6 +2,9 @@ package com.fusionplay.android
 
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.AudioManager
+import android.os.Build
 import com.airplayreceiver.desktop.backend.AppEvent
 import com.airplayreceiver.desktop.backend.AppState
 import com.airplayreceiver.desktop.backend.AppViewModel
@@ -12,7 +15,9 @@ import com.airplayreceiver.desktop.backend.MediaSourceArbiter
 import com.airplayreceiver.desktop.backend.MiPlayDeviceIdentity
 import com.airplayreceiver.desktop.backend.NetworkMediaEventGate
 import com.airplayreceiver.desktop.backend.PlaybackCommand
+import com.airplayreceiver.desktop.backend.PlaybackSnapshot
 import com.airplayreceiver.desktop.backend.ReceiverProtocol
+import com.airplayreceiver.desktop.backend.RemoteControlState
 import com.airplayreceiver.desktop.backend.displayMetadata
 import com.airplayreceiver.desktop.backend.SourceTakeoverPolicy
 import com.airplayreceiver.desktop.backend.XiaomiTakeoverGate
@@ -54,14 +59,37 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
 
 data class ReceiverUiState(
     val state: AppState,
     val nativeCast: NativeCastState,
-    val miPlayOutputAdvanceMs: Int,
+    val miPlaySyncOffsetMs: Int,
     val volumePercent: Int,
     val receiverName: String,
+    val receiverRunning: Boolean,
+    val autoReceiveOnLaunch: Boolean,
+    val diagnostics: NativeReceiverDiagnostics,
+    val playerError: String?,
+)
+
+data class NativeReceiverDiagnostics(
+    val lanInterface: String? = null,
+    val lanAddress: String? = null,
+    val audioRoute: String? = null,
+    val audioRouteObserved: Boolean = false,
+    val bufferedFrames: Long? = null,
+    val outputLatencyMs: Double? = null,
+    val endpointLatencyCalibrated: Boolean? = null,
+    val scheduleErrorMs: Double? = null,
+    val underrunCallbacks: Long? = null,
+    val synchronizationMode: String? = null,
+    val outputRecoveries: Int = 0,
+    val coverAvailable: Boolean = false,
+    val receiverError: String? = null,
 )
 
 /** Process-scoped owner of protocol lifecycle, routing, and Android media state. */
@@ -81,8 +109,20 @@ class FusionPlayRuntime(
     private val mediaSourceArbiter = MediaSourceArbiter()
     private val coreLifecycleMutex = Mutex()
     private val miPlayLifecycleMutex = Mutex()
+    private var receiverServiceActive = false
+    internal val receiving: Boolean get() = receiverServiceActive
+    private var diagnostics = NativeReceiverDiagnostics()
+    private var miPlayAudioDeviceId: Int? = null
+    private var diagnosticsRefreshJob: Job? = null
+    private var coreReceiverError: String? = null
+    private var miPlayReceiverError: String? = null
+    private var miPlayAudioError: String? = null
+    private var networkPlaybackError: String? = null
+    private var bridgeInitializationError: String? = null
     private val networkPlayer = NativeNetworkPlayer(context) { message ->
-        viewModel.reportExternalLog("网络媒体播放失败：$message", isError = true)
+        val failure = "网络媒体播放失败：$message"
+        networkPlaybackError = failure
+        viewModel.reportExternalLog(failure, isError = true)
     }
     private val closed = AtomicBoolean(false)
 
@@ -100,19 +140,25 @@ class FusionPlayRuntime(
     private var lastMiPlayProgressLogNanos = 0L
     private val nativeCast = com.fusionplay.android.cast.NativeCastManager(context, scope)
     private val audioCalibration = context.getSharedPreferences("audio_sync", Context.MODE_PRIVATE)
-    private var miPlayOutputAdvanceMs = audioCalibration.getInt("advance_ms", 0).coerceIn(0, 500)
+    private var miPlaySyncOffsetMs = audioCalibration.getInt(
+        SYNC_OFFSET_KEY,
+        -audioCalibration.getInt("advance_ms", 0).coerceIn(0, SYNC_OFFSET_MAX),
+    ).coerceIn(SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)
+    private val receiverPreferences = context.getSharedPreferences("receiver_lifecycle", Context.MODE_PRIVATE)
+    val autoReceiveOnLaunch: Boolean get() = receiverPreferences.getBoolean("auto_receive_on_launch", true)
     private var correctLyricTitles = NativePlayerPreferenceStore(context).load().correctLyricTitles
     private val mutableUiState = MutableStateFlow(projectUiState(viewModel.state.value))
     val uiState = mutableUiState.asStateFlow()
 
     init {
         com.airplayreceiver.desktop.nativebridge.FusionPlayNative
-            .nativeSetMiPlayOutputAdvance(miPlayOutputAdvanceMs)
+            .nativeSetMiPlaySyncOffset(miPlaySyncOffsetMs)
         scope.launch { nativeCast.state.collect { publishState(viewModel.state.value) } }
         scope.launch {
             viewModel.awaitInitialized()
-            runCatching { bridge.initialize() }
-                .onFailure { reportError("媒体桥初始化失败", it) }
+            runCatching { bridge.initialize() }.onFailure {
+                bridgeInitializationError = reportError("媒体桥初始化失败", it)
+            }
             observeDesiredReceivers(viewModel.state.value)
         }
         scope.launch {
@@ -149,6 +195,10 @@ class FusionPlayRuntime(
                     if (networkPlayback.mediaUrl != null) {
                         val position = networkPlayer.positionMs
                         val playing = networkPlayer.playing
+                        if (playing) {
+                            viewModel.clearErrorIfMatches(networkPlaybackError)
+                            networkPlaybackError = null
+                        }
                         val duration = networkPlayer.durationMs.takeIf { it > 0 }
                             ?: networkPlayback.durationMs
                             ?: 0L
@@ -206,12 +256,16 @@ class FusionPlayRuntime(
 
     fun setStartupEnabled(enabled: Boolean) = runUiAction {
         viewModel.setStartupEnabled(enabled)
-        if (enabled) AccessibilityKeepAliveController.requestAuthorization(context)
+        if (enabled && viewModel.state.value.settings.startupEnabled) {
+            AccessibilityKeepAliveController.requestAuthorization(context)
+        }
     }
 
     fun setAutoWakeEnabled(enabled: Boolean) = runUiAction {
         viewModel.setAutoWakeEnabled(enabled)
-        if (enabled) AccessibilityKeepAliveController.requestAuthorization(context)
+        if (enabled && viewModel.state.value.settings.autoWakeEnabled) {
+            AccessibilityKeepAliveController.requestAuthorization(context)
+        }
     }
 
     fun setKeepScreenOnWhilePlaying(enabled: Boolean) = runUiAction {
@@ -226,11 +280,38 @@ class FusionPlayRuntime(
         scope.launch { nativeCast.setPaused(paused) }
     }
 
-    fun setMiPlayOutputAdvance(millis: Int) = runUiAction {
-        require(millis in 0..500) { "补偿范围为 0 至 500 毫秒" }
-        com.airplayreceiver.desktop.nativebridge.FusionPlayNative.nativeSetMiPlayOutputAdvance(millis)
-        audioCalibration.edit().putInt("advance_ms", millis).apply()
-        miPlayOutputAdvanceMs = millis
+    fun setMiPlaySyncOffset(millis: Int) = runUiAction {
+        require(millis in SYNC_OFFSET_MIN..SYNC_OFFSET_MAX)
+        com.airplayreceiver.desktop.nativebridge.FusionPlayNative.nativeSetMiPlaySyncOffset(millis)
+        audioCalibration.edit().putInt(SYNC_OFFSET_KEY, millis).apply()
+        miPlaySyncOffsetMs = millis
+    }
+
+    fun setAutoReceiveOnLaunch(enabled: Boolean) = runUiAction {
+        receiverPreferences.edit().putBoolean("auto_receive_on_launch", enabled).apply()
+    }
+
+    fun stopReceiving() {
+        setReceiverServiceActive(false)
+        context.stopService(Intent(context, ReceiverForegroundService::class.java))
+    }
+
+    internal fun setReceiverServiceActive(active: Boolean) {
+        if (receiverServiceActive == active) return
+        receiverServiceActive = active
+        if (!active) {
+            networkPlayer.stop()
+            viewModel.clearErrorIfMatches(networkPlaybackError)
+            networkPlaybackError = null
+            viewModel.clearErrorIfMatches(miPlayAudioError)
+            miPlayAudioError = null
+            resetMiPlayDiagnostics()
+        }
+        val state = viewModel.state.value
+        if (!active) publishMediaSession(state)
+        observeDesiredReceivers(state)
+        publishState(state)
+        if (active) refreshReceiverDiagnostics()
     }
 
     fun setProtocolEnabled(protocol: ReceiverProtocol, enabled: Boolean) = runUiAction {
@@ -494,10 +575,12 @@ class FusionPlayRuntime(
 
     private fun observeDesiredReceivers(state: AppState) {
         if (!state.initialized) return
+        if (!receiverServiceActive && lastDesiredCoreConfiguration == null) return
         val desiredCore = CoreReceiverConfiguration(
             name = viewModel.receiverName,
-            airPlayEnabled = state.settings.airPlayEnabled,
-            dlnaEnabled = state.settings.dlnaEnabled,
+            airPlayEnabled = receiverServiceActive && state.settings.airPlayEnabled,
+            dlnaEnabled = receiverServiceActive && state.settings.dlnaEnabled,
+            running = receiverServiceActive,
         )
         if (desiredCore != lastDesiredCoreConfiguration) {
             lastDesiredCoreConfiguration = desiredCore
@@ -506,8 +589,12 @@ class FusionPlayRuntime(
             scope.launch {
                 coreLifecycleMutex.withLock {
                     if (desiredCore != lastDesiredCoreConfiguration) return@withLock
-                    runCatching { viewModel.reconcileCoreProtocols() }.fold(
+                    runCatching {
+                        if (desiredCore.running) viewModel.reconcileCoreProtocols() else viewModel.stopReceiver()
+                    }.fold(
                         onSuccess = {
+                            viewModel.clearErrorIfMatches(coreReceiverError)
+                            coreReceiverError = null
                             logCoreConfiguration(
                                 "airplay",
                                 desiredCore.airPlayEnabled,
@@ -522,16 +609,19 @@ class FusionPlayRuntime(
                         onFailure = { error ->
                             logProtocolFailure("airplay", "receiver_configuration", error)
                             logProtocolFailure("dlna", "receiver_configuration", error)
-                            reportError("AirPlay/DLNA 启动失败", error)
+                            coreReceiverError = reportError(
+                                if (desiredCore.running) "AirPlay/DLNA 启动失败" else "AirPlay/DLNA 停止失败", error,
+                            )
                         },
                     )
+                    publishState(viewModel.state.value)
                 }
             }
         }
 
         val desiredMiPlay = MiPlayReceiverConfiguration(
             name = viewModel.receiverName,
-            enabled = state.settings.miPlayEnabled,
+            enabled = receiverServiceActive && state.settings.miPlayEnabled,
             identity = state.settings.miPlayDeviceIdentity,
         )
         if (desiredMiPlay != lastDesiredMiPlayConfiguration) {
@@ -546,10 +636,12 @@ class FusionPlayRuntime(
                         logMiPlay("receiver_stop", "requested")
                         runCatching { bridge.stopXiaomi() }.fold(
                             onSuccess = {
+                                clearRecoveredMiPlayError()
                                 logMiPlay("receiver_stop", "success")
                             },
                             onFailure = { error ->
                                 logMiPlayFailure("receiver_stop", error)
+                                miPlayReceiverError = reportError("小米妙播停止失败", error)
                             },
                         )
                     }
@@ -561,6 +653,7 @@ class FusionPlayRuntime(
                             scheduleMiPlayRecovery(desiredMiPlay, restartGeneration)
                         }
                     } else {
+                        if (previous?.enabled != true) clearRecoveredMiPlayError()
                         logMiPlay(
                             event = "receiver_configuration",
                             outcome = "disabled",
@@ -570,11 +663,14 @@ class FusionPlayRuntime(
                         )
                         xiaomiReducer.reset()
                         xiaomiTakeoverGate.reset()
+                        miPlayAudioError = null
+                        resetMiPlayDiagnostics()
                         mediaSourceArbiter.deactivate(MediaSource.XIAOMI_MIPLAY) {
                             viewModel.deactivateXiaomiPlayback()
                         }
                         appliedMiPlayConfiguration = desiredMiPlay
                     }
+                    publishState(viewModel.state.value)
                 }
             }
         }
@@ -598,13 +694,21 @@ class FusionPlayRuntime(
                 deviceType = configuration.identity.protocolValue,
             )
         }.fold(
-            onSuccess = {
+            onSuccess = { response ->
+                viewModel.clearErrorIfMatches(bridgeInitializationError)
+                bridgeInitializationError = null
+                clearRecoveredMiPlayError()
+                val result = response.result as? JsonObject
+                diagnostics = diagnostics.copy(
+                    lanInterface = result?.text("interface") ?: diagnostics.lanInterface,
+                    lanAddress = result?.text("ipv4") ?: diagnostics.lanAddress,
+                )
                 logMiPlay("receiver_start", "success", details)
                 true
             },
             onFailure = { error ->
                 logMiPlayFailure("receiver_start", error, details)
-                if (reportFailure) reportError("小米妙播启动失败", error)
+                if (reportFailure) miPlayReceiverError = reportError("小米妙播启动失败", error)
                 false
             },
         )
@@ -638,6 +742,7 @@ class FusionPlayRuntime(
                 if (started) {
                     logMiPlay("receiver_recovery", "success")
                     viewModel.reportExternalLog("小米妙播接收器已自动恢复。")
+                    publishState(viewModel.state.value)
                     return@launch
                 }
             }
@@ -646,7 +751,10 @@ class FusionPlayRuntime(
                 configuration == lastDesiredMiPlayConfiguration
             ) {
                 logMiPlay("receiver_recovery", "failure")
-                viewModel.reportExternalLog("小米妙播接收器自动恢复失败。", isError = true)
+                val failure = miPlayReceiverError ?: "小米妙播接收器自动恢复失败。"
+                miPlayReceiverError = failure
+                viewModel.reportExternalLog(failure, isError = true)
+                publishState(viewModel.state.value)
             }
         }
     }
@@ -726,6 +834,8 @@ class FusionPlayRuntime(
         mediaSourceArbiter.deactivate(MediaSource.XIAOMI_MIPLAY) {
             viewModel.deactivateXiaomiPlayback()
         }
+        miPlayAudioError = null
+        resetMiPlayDiagnostics()
         logMiPlay(
             event = "receiver_exit",
             outcome = if (expectedStop || event.exitCode == null || event.exitCode == 0) {
@@ -738,11 +848,10 @@ class FusionPlayRuntime(
                 "expected" to expectedStop,
             ),
         )
-        if (expectedStop) return
-        viewModel.reportExternalLog(
-            "小米妙播进程已退出（代码 ${event.exitCode ?: -1}）。",
-            isError = event.exitCode != null && event.exitCode != 0,
-        )
+        if (expectedStop || !receiverServiceActive) return
+        val message = "小米妙播进程已退出（代码 ${event.exitCode ?: -1}）。"
+        miPlayReceiverError = message.takeIf { event.exitCode != null && event.exitCode != 0 }
+        viewModel.reportExternalLog(message, isError = miPlayReceiverError != null)
         if (event.exitCode == 2 || !viewModel.state.value.settings.miPlayEnabled) return
         val state = viewModel.state.value
         val configuration = MiPlayReceiverConfiguration(
@@ -756,6 +865,8 @@ class FusionPlayRuntime(
     }
 
     private suspend fun handleXiaomiEvent(event: WindowsBridgeXiaomiEvent) {
+        if (!receiverServiceActive) return
+        updateMiPlayDiagnostics(event)
         event.toVolumePercentOrNull()?.let { percent ->
             if (!FusionPlayMediaChannel.setSystemMediaVolumePercent(percent)) {
                 viewModel.reportExternalLog("无法将被控端媒体音量同步到 $percent%。", isError = true)
@@ -880,6 +991,7 @@ class FusionPlayRuntime(
     }
 
     private suspend fun handleCoreEvent(event: AppEvent) {
+        if (!receiverServiceActive) return
         when (event) {
             is AppEvent.SourceTakeover -> if (
                 SourceTakeoverPolicy.shouldSuspend(
@@ -1034,11 +1146,37 @@ class FusionPlayRuntime(
     }
 
     private fun projectUiState(state: AppState) = ReceiverUiState(
-        state = state,
+        state = if (receiverServiceActive) state.copy(
+            receiverReady = state.receiverReady || appliedMiPlayConfiguration?.enabled == true,
+        ) else state.copy(
+            playback = PlaybackSnapshot(),
+            remoteControl = RemoteControlState(),
+            connectedClient = null,
+            coreRunning = false,
+            receiverReady = false,
+        ),
         nativeCast = nativeCast.state.value,
-        miPlayOutputAdvanceMs = miPlayOutputAdvanceMs,
+        miPlaySyncOffsetMs = miPlaySyncOffsetMs,
         volumePercent = FusionPlayMediaChannel.currentSystemMediaVolumePercent(),
         receiverName = viewModel.receiverName,
+        receiverRunning = receiverServiceActive,
+        autoReceiveOnLaunch = autoReceiveOnLaunch,
+        diagnostics = diagnostics.copy(
+            coverAvailable = FusionPlayMediaChannel.currentArtwork() != null,
+            receiverError = listOfNotNull(
+                coreReceiverError, miPlayReceiverError, miPlayAudioError, networkPlaybackError,
+                bridgeInitializationError,
+            ).distinct().joinToString("\n").ifEmpty { null },
+        ),
+        playerError = if (!receiverServiceActive) {
+            null
+        } else if (state.playback.protocol.equals(XIAOMI_PROTOCOL, ignoreCase = true)) {
+            miPlayAudioError ?: miPlayReceiverError
+        } else if (state.playback.streamActive || state.playback.mediaUrl != null) {
+            networkPlaybackError
+        } else {
+            coreReceiverError ?: miPlayReceiverError ?: bridgeInitializationError
+        },
     )
 
     private fun publishState(state: AppState) {
@@ -1046,6 +1184,116 @@ class FusionPlayRuntime(
     }
 
     fun refreshUiState() = publishState(viewModel.state.value)
+
+    fun refreshReceiverDiagnostics() {
+        if (diagnosticsRefreshJob?.isActive == true) return
+        diagnosticsRefreshJob = scope.launch {
+            val boundInterface = diagnostics.lanInterface.takeIf { appliedMiPlayConfiguration?.enabled == true }
+            val boundAddress = diagnostics.lanAddress.takeIf { boundInterface != null }
+            val adapter = withContext(Dispatchers.IO) {
+                runCatching { bridge.listXiaomiNetworkAdapters() }.getOrNull()?.let { list ->
+                    val selected = list.adapters.firstOrNull {
+                        it.name == boundInterface && it.ipv4Address == boundAddress
+                    }
+                    selected ?: list.adapters.firstOrNull { it.id == list.autoSelectedAdapterId }
+                }
+            }
+            if (appliedMiPlayConfiguration?.enabled != true || diagnostics.lanInterface == boundInterface) {
+                diagnostics = diagnostics.copy(lanInterface = adapter?.name, lanAddress = adapter?.ipv4Address)
+            }
+            updateAudioRoute()
+            publishState(viewModel.state.value)
+        }
+    }
+
+    private fun updateAudioRoute() {
+        val audioManager = context.getSystemService(AudioManager::class.java) ?: return
+        val device = miPlayAudioDeviceId?.let { id ->
+            audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).firstOrNull { it.id == id }
+        }
+        val name = device?.productName?.toString()?.takeIf(String::isNotBlank)
+        val systemRoute = if (name == null && Build.VERSION.SDK_INT >= 33) {
+            runCatching {
+                audioManager.getAudioDevicesForAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build(),
+                ).map { it.productName.toString() }.filter(String::isNotBlank).distinct()
+                    .joinToString(" / ").ifEmpty { null }
+            }.getOrNull()
+        } else null
+        diagnostics = diagnostics.copy(audioRoute = name ?: systemRoute, audioRouteObserved = name != null)
+    }
+
+    private fun clearRecoveredMiPlayError() {
+        viewModel.clearErrorIfMatches(miPlayReceiverError)
+        miPlayReceiverError = null
+    }
+
+    private fun resetMiPlayDiagnostics() {
+        miPlayAudioDeviceId = null
+        diagnostics = NativeReceiverDiagnostics(
+            lanInterface = diagnostics.lanInterface,
+            lanAddress = diagnostics.lanAddress,
+        )
+        updateAudioRoute()
+    }
+
+    private fun updateMiPlayDiagnostics(event: WindowsBridgeXiaomiEvent) {
+        val payload = event.payload as? JsonObject ?: return
+        when (event.eventName) {
+            "receiver_ready" -> clearRecoveredMiPlayError()
+            "media_session_replaced", "media_channel_closed" -> {
+                viewModel.clearErrorIfMatches(miPlayAudioError)
+                miPlayAudioError = null
+                resetMiPlayDiagnostics()
+            }
+            "audio_output_route_recovered" -> {
+                diagnostics = diagnostics.copy(outputRecoveries = diagnostics.outputRecoveries + 1)
+                viewModel.clearErrorIfMatches(miPlayAudioError)
+                miPlayAudioError = null
+            }
+            "audio_output_signal_started" -> {
+                viewModel.clearErrorIfMatches(miPlayAudioError)
+                miPlayAudioError = null
+            }
+            "audio_output_callback_started", "audio_synchronization_started", "audio_presentation_schedule" -> {
+                payload.int("audio_device_id")?.let { reportedId ->
+                    val id = reportedId.takeIf { it > 0 }
+                    if (miPlayAudioDeviceId != id) {
+                        miPlayAudioDeviceId = id
+                        updateAudioRoute()
+                    }
+                }
+                diagnostics = diagnostics.copy(
+                    bufferedFrames = (payload["buffered_frames"] as? JsonPrimitive)?.longOrNull ?: diagnostics.bufferedFrames,
+                    outputLatencyMs = payload.double("output_latency_ms") ?: diagnostics.outputLatencyMs,
+                    endpointLatencyCalibrated = (payload["output_latency_calibrated"] as? JsonPrimitive)?.booleanOrNull
+                        ?: diagnostics.endpointLatencyCalibrated,
+                    scheduleErrorMs = if (event.eventName == "audio_presentation_schedule") {
+                        payload.double("schedule_error_us")?.div(1_000.0)
+                    } else diagnostics.scheduleErrorMs,
+                    underrunCallbacks = (payload["underrun_callbacks"] as? JsonPrimitive)?.longOrNull
+                        ?: diagnostics.underrunCallbacks,
+                    synchronizationMode = payload.text("synchronization_mode") ?: diagnostics.synchronizationMode,
+                )
+            }
+            "error" -> if (payload.text("code") == "miplay_audio_output_failed") {
+                val message = payload.text("message") ?: return
+                miPlayAudioError = message
+                viewModel.reportExternalLog(message, isError = true)
+            } else return
+            else -> return
+        }
+        publishState(viewModel.state.value)
+    }
+
+    private fun JsonObject.text(key: String) = (get(key) as? JsonPrimitive)?.contentOrNull
+
+    private fun JsonObject.int(key: String) = (get(key) as? JsonPrimitive)?.intOrNull
+
+    private fun JsonObject.double(key: String) = (get(key) as? JsonPrimitive)?.doubleOrNull?.takeIf(Double::isFinite)
 
     fun setCorrectLyricTitles(enabled: Boolean) {
         if (correctLyricTitles == enabled) return
@@ -1055,7 +1303,8 @@ class FusionPlayRuntime(
 
     private fun publishMediaSession(state: AppState) {
         val playback = state.playback
-        val hasMedia = playback.title != null || playback.streamActive || playback.mediaUrl != null
+        val hasMedia = receiverServiceActive &&
+            (playback.title != null || playback.streamActive || playback.mediaUrl != null)
         if (!hasMedia) {
             if (mediaSessionHasMedia) {
                 artworkJob?.cancel()
@@ -1135,8 +1384,11 @@ class FusionPlayRuntime(
         }
     }
 
-    private fun reportError(prefix: String, error: Throwable) {
-        viewModel.reportExternalLog("$prefix：${error.message}", isError = true)
+    private fun reportError(prefix: String, error: Throwable): String {
+        if (error is CancellationException) throw error
+        val message = "$prefix：${error.message ?: error.javaClass.simpleName}"
+        viewModel.reportExternalLog(message, isError = true)
+        return message
     }
 
     private fun logCoreConfiguration(
@@ -1221,6 +1473,7 @@ class FusionPlayRuntime(
         val name: String,
         val airPlayEnabled: Boolean,
         val dlnaEnabled: Boolean,
+        val running: Boolean,
     )
 
     private data class MiPlayReceiverConfiguration(
@@ -1261,8 +1514,11 @@ class FusionPlayRuntime(
             "timed_playback_started", "channel",
             "observed_output_latency_ms", "underrun_callbacks",
             "output_latency_calibrated",
-            "output_advance_ms",
+            "output_advance_ms", "sync_offset_ms", "audio_device_id",
         )
+        internal const val SYNC_OFFSET_MIN = -500
+        internal const val SYNC_OFFSET_MAX = 500
+        private const val SYNC_OFFSET_KEY = "offset_ms"
         private const val XIAOMI_PROTOCOL = "小米妙播"
         private const val CORE_SOURCE_AIRPLAY = "airplay"
         private const val CORE_SOURCE_DLNA = "dlna"

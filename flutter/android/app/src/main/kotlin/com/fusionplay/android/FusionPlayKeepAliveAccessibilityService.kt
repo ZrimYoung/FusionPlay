@@ -7,19 +7,20 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import androidx.core.content.ContextCompat
-import com.airplayreceiver.desktop.backend.AppSettings
-import com.airplayreceiver.desktop.backend.SettingsStore
 import com.fusionplay.android.media.FusionPlayMediaChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 class FusionPlayKeepAliveAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val runtime get() = (application as FusionPlayApplication).runtime
+    private var settingsJob: Job? = null
     private var previousPlaying = false
     private var lastWakeElapsedRealtime = 0L
     private val mediaStateListener: () -> Unit = {
@@ -29,9 +30,19 @@ class FusionPlayKeepAliveAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        previousPlaying = FusionPlayMediaChannel.currentSnapshot().playing
-        FusionPlayMediaChannel.addStateListener(mediaStateListener)
-        serviceScope.launch { startReceiverAtBootIfEnabled() }
+        settingsJob?.cancel()
+        settingsJob = serviceScope.launch {
+            val settings = runtime.uiState.first { it.state.initialized }.state.settings
+            if (settings.startupEnabled || settings.autoWakeEnabled) {
+                previousPlaying = FusionPlayMediaChannel.currentSnapshot().playing
+                FusionPlayMediaChannel.addStateListener(mediaStateListener)
+                if (settings.startupEnabled) startReceiverAtBoot()
+                runtime.uiState.first {
+                    !it.state.settings.startupEnabled && !it.state.settings.autoWakeEnabled
+                }
+            }
+            disableSelf()
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
@@ -49,25 +60,16 @@ class FusionPlayKeepAliveAccessibilityService : AccessibilityService() {
         val playbackStarted = playing && !previousPlaying
         previousPlaying = playing
         if (!playbackStarted || MainActivity.isAppInForeground()) return
-        serviceScope.launch {
-            val settings = loadSettings()
-            if (!settings.autoWakeEnabled) return@launch
-            if (!FusionPlayMediaChannel.currentSnapshot().playing) return@launch
-            wakeApplication(debounce = true)
-        }
+        if (!runtime.uiState.value.state.settings.autoWakeEnabled) return
+        if (!FusionPlayMediaChannel.currentSnapshot().playing) return
+        wakeApplication(debounce = true)
     }
 
-    private suspend fun startReceiverAtBootIfEnabled() {
-        val settings = loadSettings()
-        if (!settings.startupEnabled) return
+    private fun startReceiverAtBoot() {
         if (AccessibilityKeepAliveController.wasAppLaunchedThisBoot(this)) return
         if (startReceiverService()) {
             AccessibilityKeepAliveController.markAppLaunchedThisBoot(this)
         }
-    }
-
-    private suspend fun loadSettings(): AppSettings = withContext(Dispatchers.IO) {
-        runCatching { SettingsStore().load() }.getOrDefault(AppSettings())
     }
 
     private fun startReceiverService(): Boolean =

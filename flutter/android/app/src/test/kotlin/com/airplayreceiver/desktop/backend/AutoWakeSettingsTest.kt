@@ -8,15 +8,24 @@ import org.junit.Test
 
 class AutoWakeSettingsTest {
     @Test
-    fun defaultsOnAndPersistsExplicitChoice() = runBlocking {
+    fun accessibilityFeaturesDefaultOffAndPreserveSavedOptIns() = runBlocking {
         val directory = Files.createTempDirectory("fusionplay-auto-wake-test-")
         val settingsPath = directory.resolve("settings.json")
         try {
             val store = SettingsStore(settingsPath)
-            assertTrue(store.load().autoWakeEnabled)
+            val fresh = store.load()
+            assertFalse(fresh.startupEnabled)
+            assertFalse(fresh.autoWakeEnabled)
 
-            store.save(AppSettings(autoWakeEnabled = false))
-            assertFalse(store.load().autoWakeEnabled)
+            Files.write(settingsPath, """{"schemaVersion":8,"startupEnabled":true}""".toByteArray())
+            val existing = store.load()
+            assertTrue(existing.startupEnabled)
+            assertFalse(existing.autoWakeEnabled)
+
+            store.save(existing.copy(startupEnabled = false, autoWakeEnabled = true))
+            val updated = store.load()
+            assertFalse(updated.startupEnabled)
+            assertTrue(updated.autoWakeEnabled)
         } finally {
             Files.deleteIfExists(settingsPath)
             Files.deleteIfExists(directory)

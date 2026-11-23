@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="native_player_show_lyrics">显示歌词</string>
+    <string name="native_player_hide_lyrics">隐藏歌词</string>
+    <string name="native_player_open_lyrics">查看歌词</string>
+    <string name="native_player_open_lyrics_caption">查看歌词，%1$s</string>
+    <string name="native_player_return">返回播放页</string>
+    <string name="native_player_return_track">返回播放页，%1$s</string>
+    <string name="native_player_return_track_info">返回播放页，%1$s，%2$s</string>
+    <string name="native_player_volume">接收音量</string>
+    <string name="native_player_volume_value">接收音量，%1$d%%</string>
+    <string name="native_player_settings">接收设置</string>
+    <string name="native_player_progress">播放进度</string>
+    <string name="native_player_previous">上一曲</string>
+    <string name="native_player_play">播放</string>
+    <string name="native_player_pause">暂停</string>
+    <string name="native_player_next">下一曲</string>
+    <string name="native_player_waiting_track">等待曲目信息</string>
+    <string name="native_player_miplay">妙播</string>
+    <string name="native_player_preparing_receiver">正在准备接收</string>
+    <string name="native_player_receiver_stopped">接收已停止</string>
+    <string name="native_player_receiver_disabled">接收已关闭</string>
+    <string name="native_player_waiting_connection">等待连接</string>
+    <string name="native_player_starting_receiver">正在启动接收</string>
+    <string name="native_player_start_receiver_hint">在接收设置中启动接收</string>
+    <string name="native_player_enable_protocol_hint">在接收设置中开启投送方式</string>
+    <string name="native_player_select_receiver_hint">在 %1$s 的设备列表中选择上方名称</string>
+    <string name="native_player_protocol_separator">、</string>
+</resources>

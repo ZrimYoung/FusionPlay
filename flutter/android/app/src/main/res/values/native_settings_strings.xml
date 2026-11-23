@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="native_settings_title">接收设置</string>
+    <string name="native_settings_title">设置</string>
     <string name="native_settings_done">完成</string>
     <string name="native_settings_receiver_status">接收状态</string>
     <string name="native_settings_initializing">正在初始化…</string>
@@ -33,8 +33,9 @@
     <string name="native_settings_device_behavior">设备行为</string>
     <string name="native_settings_startup">开机自启</string>
     <string name="native_settings_auto_wake">自动唤起</string>
+    <string name="native_settings_automatic_behavior_hint">开机自启和自动唤起需要开启 FusionPlay 无障碍服务。</string>
     <string name="native_settings_keep_screen_on">播放时保持亮屏</string>
-    <string name="native_settings_advanced">高级效果</string>
+    <string name="native_settings_advanced">加强歌词边缘模糊</string>
     <string name="native_settings_player">播放显示</string>
     <string name="native_settings_progress">显示进度与时间</string>
     <string name="native_settings_transport">显示播放控制</string>
@@ -48,4 +49,42 @@
     <string name="native_settings_about">关于应用</string>
     <string name="native_settings_version">FusionPlay %1$s</string>
     <string name="native_settings_export">导出日志</string>
+    <string name="native_settings_tab_receiver">接收</string>
+    <string name="native_settings_tab_appearance">外观</string>
+    <string name="native_settings_tab_audio">音频</string>
+    <string name="native_settings_back">返回</string>
+    <string name="native_settings_stopped">已停止接收</string>
+    <string name="native_settings_progress_color">进度条颜色</string>
+    <string name="native_settings_follow_system">跟随系统</string>
+    <string name="native_settings_white">白色</string>
+    <string name="native_settings_custom_color">自定义颜色</string>
+    <string name="native_settings_custom_color_value">自定义颜色 · %1$s</string>
+    <string name="native_settings_hex_color">十六进制颜色</string>
+    <string name="native_settings_hex_error">请输入六位十六进制颜色，如 #83BFE3。</string>
+    <string name="native_settings_backdrop_blur">封面背景模糊</string>
+    <string name="native_settings_percent">%1$d%%</string>
+    <string name="native_settings_dp">%1$d dp</string>
+    <string name="native_settings_lyric_group">歌词</string>
+    <string name="native_settings_lyrics_automatic">自动</string>
+    <string name="native_settings_lyrics_never">始终隐藏</string>
+    <string name="native_settings_lyric_scale">歌词字号</string>
+    <string name="native_settings_lyric_move">歌词滚动时长</string>
+    <string name="native_settings_lyric_shadow">歌词投影</string>
+    <string name="native_settings_shadow_opacity">投影浓度</string>
+    <string name="native_settings_shadow_spread">投影弥散</string>
+    <string name="native_settings_narrow_layout">窄屏布局</string>
+    <string name="native_settings_narrow_paging">窄屏左右分页</string>
+    <string name="native_settings_page_artwork">歌词页显示小封面</string>
+    <string name="native_settings_page_track_info">歌词页显示歌曲信息</string>
+    <string name="native_settings_typography">字体与语言</string>
+    <string name="native_settings_player_font">播放器字体</string>
+    <string name="native_settings_font_sample">音乐响起\nMusic begins · 0123456789</string>
+    <string name="native_settings_font_family">字族</string>
+    <string name="native_settings_system_font">系统字体</string>
+    <string name="native_settings_search_fonts">搜索字体</string>
+    <string name="native_settings_language">界面语言</string>
+    <string name="native_settings_chinese">简体中文</string>
+    <string name="native_settings_english">English</string>
+    <string name="native_settings_text_value">%1$s · %2$s</string>
+    <string name="native_settings_license">开源许可 · AGPL-3.0-only</string>
 </resources>

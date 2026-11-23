@@ -123,8 +123,8 @@ class SettingsStore(
             receiverName = root["receiverName"]?.jsonPrimitive?.contentOrNull,
             outputDeviceId = null,
             xiaomiNetworkAdapterId = null,
-            startupEnabled = root["startupEnabled"]?.jsonPrimitive?.booleanOrNull ?: true,
-            autoWakeEnabled = root["autoWakeEnabled"]?.jsonPrimitive?.booleanOrNull ?: true,
+            startupEnabled = root["startupEnabled"]?.jsonPrimitive?.booleanOrNull ?: false,
+            autoWakeEnabled = root["autoWakeEnabled"]?.jsonPrimitive?.booleanOrNull ?: false,
             keepScreenOnWhilePlaying = root["keepScreenOnWhilePlaying"]?.jsonPrimitive?.booleanOrNull ?: true,
             advancedEffectsEnabled =
                 root["advancedEffectsEnabled"]?.jsonPrimitive?.booleanOrNull ?: false,
