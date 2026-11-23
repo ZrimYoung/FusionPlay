@@ -86,6 +86,8 @@ const FIRST_ENCRYPTED_NOTIFICATION_SEQUENCE: u32 = 8;
 // Keep a bounded, one-shot attribution window without extending confirmation.
 const SEEK_JUMP_GUARD_WINDOW: Duration = Duration::from_secs(10);
 const MAX_RECENT_SEEK_JUMPS: usize = 16;
+const NAVIGATION_PRIOR_POSITION_MS: u64 = 5_000;
+const NAVIGATION_START_POSITION_MS: u64 = 1_500;
 // A companion may finish sending metadata just before OPEN on another socket.
 // Bound how long an inactive source can leave a pending projection behind.
 const PENDING_METADATA_WINDOW: Duration = Duration::from_secs(15);
@@ -210,6 +212,19 @@ struct RemoteEffectState {
     last_position: Option<(u64, u64)>,
     pending: HashMap<u64, PendingRemoteEffect>,
     recent_seek_jumps: Vec<RecentSeekJump>,
+    // Identifies the outstanding navigation whose direct progress restarted.
+    restarted_navigation: Option<u64>,
+}
+
+impl RemoteEffectState {
+    fn pending_navigation(&self, session_id: u64) -> Option<u64> {
+        self.pending.iter().filter_map(|(&effect_id, pending)| {
+            (pending.session_id == session_id
+                && matches!(pending.expected, ExpectedRemoteEffect::TrackChange { baseline_revision }
+                    if baseline_revision == self.track_revision))
+                    .then_some(effect_id)
+        }).max()
+    }
 }
 
 struct SourceMetadata {
@@ -535,16 +550,21 @@ impl ControlHub {
     }
 
     /// Publishes a receiver-originated volume change to the active MiPlay
-    /// source. HyperOS consumes the same type-7 `volume` notification that is
-    /// used to confirm a sender-originated SET_VOLUME command.
+    /// source. Before a source connects, this sets the receiver gain for the
+    /// upcoming route. HyperOS consumes the same type-7 notification used to
+    /// confirm a sender-originated SET_VOLUME command.
     pub fn set_volume(&self, percent: u8) -> Result<()> {
         let percent = u32::from(percent.min(100));
-        let active = self
-            .active
-            .lock()
-            .map_err(|_| anyhow::anyhow!("MiPlay control lock poisoned"))?
-            .clone()
-            .context("no active Xiaomi MiPlay source")?;
+        let active = {
+            let route = self.active
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MiPlay control lock poisoned"))?;
+            let Some(active) = route.as_ref() else {
+                self.volume_percent.store(percent, Ordering::Release);
+                return Ok(());
+            };
+            active.clone()
+        };
         let control_route = self.preferred_control_route(&active);
         let control_sender = control_route
             .as_ref()
@@ -564,6 +584,10 @@ impl ControlHub {
             .context("send Xiaomi MiPlay receiver-volume notification")?;
         self.volume_percent.store(percent, Ordering::Release);
         Ok(())
+    }
+
+    pub(crate) fn volume_percent(&self) -> u32 {
+        self.volume_percent.load(Ordering::Acquire)
     }
 
     fn activate(
@@ -608,6 +632,7 @@ impl ControlHub {
             effects.track_identity = metadata.track_id.clone();
             effects.active_metadata = Some((id, metadata));
             effects.last_position = None;
+            effects.restarted_navigation = None;
             effects.recent_seek_jumps.clear();
         }
         playback_gate
@@ -676,6 +701,13 @@ impl ControlHub {
                     .and_then(|(active_id, metadata)| {
                         (*active_id == id || source == metadata.source).then_some(*active_id)
                     });
+            let navigation_position = active_session.and_then(|session_id| {
+                let pending = effects.pending_navigation(session_id)?;
+                if effects.restarted_navigation != Some(pending) { return None; }
+                effects.last_position
+                    .filter(|(position_session, _)| *position_session == session_id)
+                    .map(|(_, position)| position)
+            });
             let metadata = if let Some((_, active)) = effects.active_metadata.as_mut()
                 && active_session.is_some()
             {
@@ -696,7 +728,15 @@ impl ControlHub {
                 *updated = now;
                 pending
             };
-            metadata.projection.apply(&mut event);
+            metadata.projection.apply_with_navigation(&mut event, navigation_position.is_some());
+            if event["track_transition"] == "new"
+                && event["position_ms"].as_u64().is_none_or(|position| position == 0)
+                && let Some(position) = navigation_position
+            {
+                // The independent restart can arrive before the track packet.
+                event["position_ms"] = position.into();
+                metadata.projection.observe_position(position);
+            }
             if let Some(identity) = event["track_id"].as_str().filter(|id| !id.is_empty()) {
                 metadata.track_id = Some(identity.to_owned());
             }
@@ -714,6 +754,7 @@ impl ControlHub {
             if changed {
                 effects.track_revision = effects.track_revision.wrapping_add(1);
                 effects.last_position = None;
+                effects.restarted_navigation = None;
                 effects.recent_seek_jumps.clear();
             }
             let revision = effects.track_revision;
@@ -744,6 +785,10 @@ impl ControlHub {
                 .is_some_and(|(session_id, previous_ms)| {
                     session_id == id && position_ms > previous_ms.saturating_add(250)
                 });
+            let restarted = position_ms <= NAVIGATION_START_POSITION_MS
+                && effects.last_position.is_some_and(|(session_id, previous_ms)| {
+                    session_id == id && previous_ms >= NAVIGATION_PRIOR_POSITION_MS
+                });
             let changed = effects.last_position != Some((id, position_ms));
             effects.last_position = Some((id, position_ms));
             effects.position_revision = effects.position_revision.wrapping_add(1);
@@ -764,20 +809,25 @@ impl ControlHub {
                 }
                 true
             });
-            (
-                drain_matching_effects(&mut effects, id, |expected| {
-                    matches!(
-                        expected,
-                        ExpectedRemoteEffect::Position { target_ms, baseline_revision, track_revision }
-                            if revision > *baseline_revision
-                                && current_track_revision == *track_revision
-                                && position_ms.abs_diff(*target_ms) <= 2_000
-                    )
-                }),
-                changed,
-                advancing,
-                seek_jump,
-            )
+            let completions = drain_matching_effects(&mut effects, id, |expected| {
+                matches!(
+                    expected,
+                    ExpectedRemoteEffect::Position { target_ms, baseline_revision, track_revision }
+                        if revision > *baseline_revision
+                            && current_track_revision == *track_revision
+                            && position_ms.abs_diff(*target_ms) <= 2_000
+                )
+            });
+            if seek_jump || !completions.is_empty() {
+                if effects.restarted_navigation == effects.pending_navigation(id) {
+                    effects.restarted_navigation = None;
+                }
+            } else if restarted
+                && let Some(effect_id) = effects.pending_navigation(id)
+            {
+                effects.restarted_navigation = Some(effect_id);
+            }
+            (completions, changed, advancing, seek_jump)
         };
         // A seek acknowledgment is a position jump, not evidence of resumed
         // playback. Rebase last_position above, then allow subsequent real
@@ -1596,7 +1646,7 @@ fn run_session(
                 ))?;
             }
             GET_VOLUME => {
-                let percent = hub.volume_percent.load(Ordering::Acquire).min(100);
+                let percent = hub.volume_percent();
                 tx.send(Outgoing::encrypted(
                     GET_VOLUME_ACK,
                     frame.sequence,
@@ -1767,11 +1817,21 @@ fn run_session(
                 }));
             }
             SET_VOLUME => {
-                let percent = decode_volume_percent(&frame.body);
+                // On iOS the saved receiver level owns startup. An incomplete
+                // request or a source that has not opened playback can only
+                // synchronize with the current level.
+                let percent = if cfg!(target_os = "ios")
+                    && (frame.body.len() < 4 || hub.active_source_session_id(session_id, remote.ip()).is_none())
+                {
+                    hub.volume_percent()
+                } else {
+                    let percent = decode_volume_percent(&frame.body);
+                    hub.volume_percent.store(percent, Ordering::Release);
+                    percent
+                };
                 // MiPCAudio acknowledges SET_VOLUME with an empty body. HyperOS
                 // treats this command as a status-only acknowledgement, so the
                 // applied value must not be placed in the ACK body.
-                hub.volume_percent.store(percent, Ordering::Release);
                 tx.send(Outgoing::encrypted(
                     SET_VOLUME_ACK,
                     frame.sequence,
@@ -1787,9 +1847,6 @@ fn run_session(
                     sequence,
                     volume_notification(percent),
                 ))?;
-                // HyperOS may set the remote volume while the media route is
-                // still opening. Preserve that value so the first PCM samples
-                // and every later GET_VOLUME observe one coherent state.
                 emit_volume(percent, &events);
             }
             SET_MEDIA_INFO => {
@@ -2720,6 +2777,16 @@ mod tests {
                 ) => {}
             result => panic!("MiPlay peer should observe immediate disconnect, got {result:?}"),
         }
+    }
+
+    #[test]
+    fn receiver_volume_can_be_set_before_a_source_connects() {
+        let volume = Arc::new(AtomicU32::new(100));
+        let hub = ControlHub::new(Arc::clone(&volume));
+        hub.set_volume(23).unwrap();
+        assert_eq!(volume.load(Ordering::Acquire), 23);
+        hub.set_volume(0).unwrap();
+        assert_eq!(volume.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -3905,6 +3972,167 @@ mod tests {
             hub.remote_effects.lock().unwrap().track_revision,
             before + 1
         );
+    }
+
+    #[test]
+    fn confirmed_navigation_rejects_the_previous_compound_artist() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let (outgoing, incoming) = mpsc::channel();
+        hub.activate(41, source, outgoing, control_notification_sequence());
+        let first = hub.project_media_info(41, source,
+            br#"{"mTitle":"First Song","mArtist":"Artist","mAlbum":"Record","mDuration":167000}"#).unwrap();
+        hub.observe_position(41, 42_000);
+        let dispatch = hub.clone();
+        let worker = thread::spawn(move || dispatch.send_confirmed(MediaAction::Next, Duration::from_secs(2)).unwrap());
+        incoming.recv_timeout(Duration::from_secs(1)).unwrap();
+
+        // A placeholder in metadata, including after a pending Next, is weak.
+        let late = hub.project_media_info(41, source,
+            br#"{"mTitle":"Old caption","mArtist":"First Song - Artist","mAlbum":"Record","mDuration":167000,"mPosition":0}"#).unwrap();
+        assert_eq!(late["track_id"], first["track_id"]);
+        assert_eq!(late["track_transition"], "same");
+        assert!(late["position_ms"].is_null());
+
+        // Independent progress can establish the restart before metadata,
+        // even when the subsequent metadata packet carries no position.
+        hub.observe_position(41, 300);
+        let stale = br#"{"mTitle":"Second Song","mArtist":"First Song - Artist","mAlbum":"Record","mDuration":167000}"#;
+        let next = hub.project_media_info(41, source, stale).unwrap();
+        assert_eq!(next["track_transition"], "new");
+        assert_ne!(next["track_id"], first["track_id"]);
+        assert_eq!(next["display_title"], "Second Song");
+        assert!(next["artist"].is_null());
+        assert_eq!(next["raw_artist"], "First Song - Artist");
+        assert_eq!(next["artist_is_stale"], true);
+        assert_eq!(next["position_ms"], 300);
+        assert!(worker.join().unwrap().confirmed);
+
+        let echo = hub.project_media_info(41, source, stale).unwrap();
+        assert_eq!(echo["track_transition"], "same");
+        assert!(echo["artist"].is_null());
+        let fresh = hub.project_media_info(41, source,
+            br#"{"mTitle":"Second Song","mArtist":"Artist","mAlbum":"Record","mDuration":167000}"#).unwrap();
+        assert_eq!(fresh["track_id"], next["track_id"]);
+        assert_eq!(fresh["track_transition"], "same");
+        assert_eq!(fresh["artist"], "Artist");
+    }
+
+    #[test]
+    fn seek_to_zero_does_not_confirm_pending_navigation_or_replace_track() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let (outgoing, incoming) = mpsc::channel();
+        hub.activate(41, source, outgoing, control_notification_sequence());
+        let first = hub.project_media_info(41, source,
+            br#"{"mTitle":"First Song","mArtist":"Artist","mAlbum":"Record","mDuration":167000}"#).unwrap();
+        hub.observe_position(41, 42_000);
+        let dispatch = hub.clone();
+        let navigate = thread::spawn(move || dispatch.send_confirmed(MediaAction::Next, Duration::from_secs(2)).unwrap());
+        incoming.recv_timeout(Duration::from_secs(1)).unwrap();
+        hub.send_confirmed(MediaAction::Seek(0), Duration::ZERO).unwrap();
+        incoming.recv_timeout(Duration::from_secs(1)).unwrap();
+        hub.observe_position(41, 0);
+        let caption = hub.project_media_info(41, source,
+            br#"{"mTitle":"Another caption","mArtist":"First Song - Artist","mAlbum":"Record","mDuration":167000}"#).unwrap();
+        assert_eq!(caption["track_id"], first["track_id"]);
+        assert_eq!(caption["track_transition"], "same");
+
+        // Strong new metadata still completes the outstanding command.
+        let fresh = hub.project_media_info(41, source,
+            br#"{"mTitle":"Second Song","mArtist":"Artist","mAlbum":"Record","mDuration":167000}"#).unwrap();
+        assert_eq!(fresh["track_transition"], "new");
+        assert!(navigate.join().unwrap().confirmed);
+    }
+
+    #[test]
+    fn lyric_captions_without_a_document_preserve_track_and_seek_identity() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let (outgoing, _incoming) = mpsc::channel();
+        hub.activate(41, source, outgoing, control_notification_sequence());
+        let first = hub.project_media_info(41, source,
+            br#"{"mTitle":"Synthetic Song","mArtist":"Example Artist","mAlbum":"Example Album","mDuration":167000,"mArt":"https://example.invalid/cover.jpg","mLrc":""}"#).unwrap();
+        let revision = hub.remote_effects.lock().unwrap().track_revision;
+        for (index, title) in ["A changing caption", "Another caption", "home"].iter().enumerate() {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "mTitle": title,
+                "mArtist": "Synthetic Song - Example Artist",
+                "mAlbum": "Example Album", "mDuration": 167000,
+                "mPosition": (index + 1) * 1000, "mLrc": "",
+                "mArt": "https://example.invalid/cover.jpg",
+            })).unwrap();
+            let caption = hub.project_media_info(41, source, &body).unwrap();
+            assert_eq!(caption["track_id"], first["track_id"]);
+            assert_eq!(caption["track_transition"], "same");
+            assert_eq!(caption["display_title"], "Synthetic Song");
+            assert_eq!(caption["display_artist"], "Example Artist");
+            assert_eq!(caption["raw_title"], *title);
+            assert_eq!(caption["raw_artist"], "Synthetic Song - Example Artist");
+            assert_eq!(caption["artwork"], first["artwork"]);
+            assert_eq!(caption["duration_ms"], 167000);
+            assert_eq!(caption["position_ms"], (index + 1) * 1000);
+            assert!(caption["lyrics_text"].is_null());
+            assert_eq!(hub.remote_effects.lock().unwrap().track_revision, revision);
+        }
+        // Equal artist, album and duration alone are not song identity.
+        let next = hub.project_media_info(41, source,
+            br#"{"mTitle":"Next Synthetic Song","mArtist":"Example Artist","mAlbum":"Example Album","mDuration":167000,"mPosition":0,"mLrc":""}"#).unwrap();
+        assert_eq!(next["track_transition"], "new");
+        assert_ne!(next["track_id"], first["track_id"]);
+        assert_eq!(hub.remote_effects.lock().unwrap().track_revision, revision + 1);
+    }
+
+    #[test]
+    fn projected_metadata_wire_pipeline_fixture() {
+        let hub = ControlHub::new(Arc::new(AtomicU32::new(100)));
+        let source = Ipv4Addr::LOCALHOST.into();
+        let first = hub.project_media_info(41, source, br#"{"mAudioId":"wire-one","mTitle":"we are going home","mArtist":"Raw Artist","mAlbum":"Raw Album","mDuration":120000,"mPosition":10000,"lyrics":"[ti:Night Walk]\n[ar:Header Artist]\n[al:Header Album]\n[00:10]we are going home\n[00:11]home"}"#).unwrap();
+        let (outgoing, _incoming) = mpsc::channel();
+        hub.activate(42, source, outgoing, control_notification_sequence());
+        let caption = hub.project_media_info(41, source,
+            br#"{"mTitle":"home","mPosition":11000,"lyrics":"[ti:Night Walk]\n[ar:Header Artist]\n[al:Header Album]\n[00:10]we are going home\n[00:11]home"}"#).unwrap();
+        let next = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-two","mTitle":"Home","mArtist":"Next Artist","mAlbum":"Next Album","mDuration":240000,"mPosition":0}"#).unwrap();
+        // Legacy reducers still see the same canonical labels across these
+        // caption updates; only the additive raw fields retain phone text.
+        assert_eq!(first["title"], "Night Walk");
+        assert_eq!(first["artist"], "Header Artist");
+        assert_eq!(first["album"], "Header Album");
+        assert_eq!(first["raw_title"], "we are going home");
+        assert_eq!(first["raw_artist"], "Raw Artist");
+        assert_eq!(first["raw_album"], "Raw Album");
+        assert_eq!(first["display_title"], "Night Walk");
+        assert_eq!(first["display_artist"], "Header Artist");
+        assert_eq!(first["display_album"], "Raw Album");
+        assert_eq!(caption["title"], first["title"]);
+        assert_eq!(caption["artist"], first["artist"]);
+        assert_eq!(caption["album"], first["album"]);
+        assert_eq!(caption["raw_title"], "home");
+        assert_eq!(caption["track_id"], "wire-one");
+        assert_eq!(caption["track_transition"], "same");
+        assert_eq!(next["title"], "Home");
+        assert_eq!(next["track_transition"], "new");
+        assert_eq!(next["display_album"], "Next Album");
+        let rich_first = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-rich","mTitle":"Night Walk (Live)","mArtist":"Alpha/Beta","mAlbum":"Sender Album","mDuration":120000,"mPosition":0,"lyrics":"[ti:Night Walk]\n[ar:Alpha]\n[al:Header Album]\n[00:10]we are heading home"}"#).unwrap();
+        let rich_caption = hub.project_media_info(41, source,
+            br#"{"mAudioId":"wire-rich","mTitle":"we are heading home","mArtist":"Alpha","mAlbum":"","mDuration":120000,"mPosition":10000,"lyrics":"[ti:Night Walk]\n[ar:Alpha]\n[al:Header Album]\n[00:10]we are heading home"}"#).unwrap();
+        assert_eq!(rich_caption["track_id"], rich_first["track_id"]);
+        assert_eq!(rich_caption["track_transition"], "same");
+        assert_eq!(rich_caption["display_title"], "Night Walk (Live)");
+        assert_eq!(rich_caption["display_artist"], "Alpha/Beta");
+        assert_eq!(rich_caption["display_album"], "Sender Album");
+        assert_eq!(rich_caption["raw_title"], "we are heading home");
+        assert_eq!(rich_caption["raw_artist"], "Alpha");
+        assert_eq!(rich_caption["title"], "Night Walk");
+        assert_eq!(rich_caption["artist"], "Alpha");
+        assert_eq!(rich_caption["album"], "Header Album");
+        // The integration script passes these actual production-pipeline
+        // events to the Host reducer test without adding a product test API.
+        if let Ok(path) = std::env::var("FUSIONPLAY_PROJECTED_METADATA_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec(&[first, caption, next, rich_first, rich_caption]).unwrap()).unwrap();
+        }
     }
 
     #[test]

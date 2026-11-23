@@ -50,6 +50,7 @@ public sealed class ReceiverController : IAsyncDisposable
         }
     }
     public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
+    internal bool SeekPending => timeline.IsPending;
     public LyricsDocument Lyrics => lyrics.Document;
     public bool LyricsLoading => lyrics.Loading || lyrics.WaitingForLyrics;
     public bool LyricsAvailable => lyrics.Available;

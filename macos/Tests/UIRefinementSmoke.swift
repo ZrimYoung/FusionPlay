@@ -28,7 +28,7 @@ import SwiftUI
             var values: [String: Any] = ["appLanguage": language, "playerControlsAlwaysVisible": true,
                 "playerShowsTransport": true, "playerShowsProgress": true, "playerLyricsDisplayMode": "automatic", "playerProgressColorMode": "white",
                 "showDockIcon": true, "showMenuBarIcon": true, "playerWindowPinned": false, "playerShowsPinButton": false,
-                "settingsSidebarVisible": true, "uiFontFamily": "", "uiFontWeight": 400, "uiCorrectLyricTitles": false]
+                "settingsSidebarVisible": true, "uiFontFamily": "", "uiFontWeight": 400, "uiCorrectLyricTitles": false, "menuPanelBackgroundStyle": MenuPanelBackgroundStyle.defaultValue.rawValue]
             values.merge(extras) { _, new in new }
             UserDefaults.standard.setVolatileDomain(values, forName: UserDefaults.argumentDomain)
         }
@@ -109,7 +109,7 @@ import SwiftUI
             preferences(language, ["playerLyricsDisplayMode": "always"])
             let lyricModel = ReceiverModel.preview(lyricState, artwork: artwork, root: stateRoot)
             precondition(lyricModel.lyrics.isTimed && lyricModel.lyrics.lines.count == 4)
-            for size in [NSSize(width: 260, height: 440), NSSize(width: 420, height: 700), NSSize(width: 760, height: 400), NSSize(width: 840, height: 300), NSSize(width: 1200, height: 800), NSSize(width: 892, height: 650), NSSize(width: 1040, height: 700)] {
+            for size in [NSSize(width: 260, height: 440), NSSize(width: 420, height: 700), NSSize(width: 760, height: 400), NSSize(width: 840, height: 300), NSSize(width: 1200, height: 800), NSSize(width: 892, height: 650), NSSize(width: 1040, height: 700), NSSize(width: 1710, height: 1112), NSSize(width: 2560, height: 1440)] {
                 try render(PlayerView(model: lyricModel), width: size.width, height: size.height,
                            name: "lyrics-\(language)-\(Int(size.width))")
                 count += 1
@@ -181,7 +181,7 @@ import SwiftUI
         preferences("zh-Hans", ["playerLyricsDisplayMode": "never"])
         try render(PlayerView(model: lyricModel), width: 260, height: 260, name: "never-lyrics-square")
         count += 5
-        precondition(count + 3 == 50 && renderedCases == 50, "Original rendering cases were lost")
+        precondition(count + 3 == 54 && renderedCases == 54, "Original cases or new full-size cases were lost")
 
         // Exercise the production typography modifier, including CJK fallback
         // glyphs in a Latin family and a preserved unavailable-family setting.
@@ -198,6 +198,11 @@ import SwiftUI
                      "The custom-font render must exercise an installed family")
         precondition(AppTypography(family: missingFamily).isMissing)
         for language in ["zh-Hans", "en"] {
+            preferences(language, ["playerLyricsDisplayMode": "always", "lyricsFontScalePercent": 200])
+            try render(PlayerView(model: availableLyrics), width: 420, height: 700,
+                       name: "lyrics-scale-200-compact-\(language)")
+            try render(PlayerView(model: availableLyrics), width: 1710, height: 1112,
+                       name: "lyrics-scale-200-full-\(language)")
             for (label, family, weight) in [("custom", "Helvetica Neue", 600), ("missing", missingFamily, 400)] {
                 preferences(language, ["uiFontFamily": family, "uiFontWeight": weight, "playerLyricsDisplayMode": "never"])
                 try render(SettingsPanel(model: availableLyrics, initialPage: .appearance), width: 660, height: 500,
@@ -302,6 +307,8 @@ import SwiftUI
         preferences("zh-Hans", ["uiCorrectLyricTitles": true, "playerLyricsDisplayMode": "never"])
         try render(ReceiverPanel(model: captionModel), width: 280, height: 180, name: "menu-corrected-title")
         try render(PlayerView(model: captionModel), width: 760, height: 400, name: "player-corrected-title")
+
+        // Native material and menu lifecycle checks live in MenuPanelNativeSmoke.
 
         var metadataGapResult: Result<Void, Error>?
         Task { @MainActor in

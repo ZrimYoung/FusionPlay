@@ -14,8 +14,9 @@ struct ReceiverRootView: View {
     @AppStorage("playerShowsTransport") private var showPlaybackControls = true
     @AppStorage("playerToolbarAlwaysVisible") private var toolbarAlwaysVisible = false
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .largeTitle) private var compactMetadataMinimumWidth: CGFloat = 148
+    @ScaledMetric(relativeTo: .caption) private var compactProgressMinimumWidth: CGFloat = 120
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
     @State private var showingSettings = false
     @State private var showingVolume = false
@@ -53,6 +54,10 @@ struct ReceiverRootView: View {
         reduceMotion ? nil : .easeInOut(duration: 0.36)
     }
 
+    private var layoutAnimation: Animation? {
+        reduceMotion ? nil : .timingCurve(0.22, 0.74, 0.26, 1, duration: 0.40)
+    }
+
     private var lyricPanelTransition: AnyTransition {
         reduceMotion ? .identity : .opacity.combined(with: .offset(x: 0, y: 12))
     }
@@ -76,8 +81,7 @@ struct ReceiverRootView: View {
                         ZStack {
                             playerContent(layout, size: content.size)
                         }
-                        .animation(displayAnimation, value: layout.mode)
-                        .animation(displayAnimation, value: layout.mode != .paged && showLyrics)
+                        .animation(displayAnimation, value: showLyrics)
                         .animation(displayAnimation, value: showProgress)
                         .animation(displayAnimation, value: showPlaybackControls)
                     } else {
@@ -95,13 +99,17 @@ struct ReceiverRootView: View {
             .contentShape(Rectangle())
             .simultaneousGesture(TapGesture().onEnded { revealToolbar() })
             .background { playerBackground }
+            .tint(PlayerPalette.accent)
+            .sheet(isPresented: $showingSettings) {
+                ReceiverSettingsView(model: model, windowWidth: proxy.size.width)
+            }
         }
         .preferredColorScheme(.dark)
-        .tint(PlayerPalette.accent)
         .receiverTypography()
-        .sheet(isPresented: $showingSettings) { ReceiverSettingsView(model: model) }
         .onChange(of: toolbarCanHide, initial: true) { _, _ in revealToolbar() }
-        .onChange(of: lyricsDisplayMode) { _, _ in lyricVisibilityOverride = nil }
+        .onChange(of: lyricsDisplayMode) { _, mode in
+            if mode == .never { lyricVisibilityOverride = nil }
+        }
         .onChange(of: trackKey) { _, _ in
             if !model.lyricsLoading || lyricVisibilityOverride?.visible != false {
                 lyricVisibilityOverride = nil
@@ -152,7 +160,14 @@ struct ReceiverRootView: View {
         let paged = layout.mode == .paged
         let lyricsBesidePlayer = layout.mode == .artworkAndLyrics
         let controlsBesideCover = layout.mode == .artworkAndControls
+        let compact = layout.mode == .stacked || paged
         let playbackWidth = lyricsBesidePlayer ? layout.leadingWidth : layout.contentWidth
+        let minimumDetailsWidth = max(
+            compactMetadataMinimumWidth,
+            showProgress ? compactProgressMinimumWidth : 0,
+            showPlaybackControls ? Self.prominentTransportSize * 3 : 0
+        )
+        let compactDetailsWidth = min(playbackWidth, max(layout.coverSide, minimumDetailsWidth))
         let pageHeight = max(0, size.height)
         let viewportHeight = max(0, pageHeight - layout.verticalInset * 2)
         let lyricSize = CGSize(
@@ -167,9 +182,12 @@ struct ReceiverRootView: View {
             : AnyLayout(VStackLayout(alignment: .center, spacing: lyricsBesidePlayer ? 22 : 24))
         let playback = controlsLayout {
             cover(side: layout.coverSide)
+                .geometryGroup()
                 .frame(width: controlsBesideCover ? layout.leadingWidth : nil)
-            playbackDetails(paged: paged)
+            playbackDetails(paged: paged, compact: compact)
+                .frame(width: compact ? compactDetailsWidth : nil)
                 .frame(maxWidth: controlsBesideCover ? 420 : .infinity)
+                .geometryGroup()
                 .frame(maxWidth: .infinity)
         }
         .frame(width: playbackWidth)
@@ -177,32 +195,36 @@ struct ReceiverRootView: View {
         return ScrollViewReader { reader in
             ScrollView(paged ? .horizontal : .vertical) {
                 panelLayout {
-                    Group {
-                        if paged {
-                            ScrollView {
-                                playback
-                                    .frame(maxWidth: .infinity)
-                                    .frame(minHeight: viewportHeight)
-                                    .padding(.vertical, layout.verticalInset)
-                            }
-                            .scrollBounceBehavior(.basedOnSize)
-                            .frame(width: size.width, height: pageHeight)
-                        } else {
-                            playback
-                        }
+                    // Keep the playback subtree mounted across resize. Outside
+                    // pagination the inner viewport fits its content and lets
+                    // the outer scroll view handle vertical navigation.
+                    ScrollView {
+                        playback
+                            .frame(maxWidth: .infinity)
+                            .frame(minHeight: paged ? viewportHeight : nil)
+                            .padding(.vertical, paged ? layout.verticalInset : 0)
                     }
+                    .scrollDisabled(!paged)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollClipDisabled(!paged)
+                    .fixedSize(horizontal: false, vertical: !paged)
+                    .frame(width: paged ? size.width : playbackWidth, height: paged ? pageHeight : nil)
                     .id(PlayerSection.player)
 
                     if paged || showLyrics {
-                        lyricPanel(paged: paged)
+                        lyricPanel(mode: layout.mode)
                             .frame(width: lyricSize.width, height: lyricSize.height)
                             .padding(.vertical, paged ? layout.verticalInset : 0)
                             .frame(width: paged ? size.width : nil, height: paged ? pageHeight : nil)
                             .animation(nil, value: lyricSize)
+                            .geometryGroup()
                             .id(PlayerSection.lyrics)
                             .transition(lyricPanelTransition)
                     }
                 }
+                // Scope resize motion to panel placement. The enclosing
+                // scroll viewport changes axes and anchors immediately.
+                .animation(layoutAnimation, value: layout.mode)
                 .scrollTargetLayout(isEnabled: paged)
                 .frame(width: paged ? nil : layout.contentWidth)
                 .frame(maxWidth: .infinity)
@@ -213,12 +235,8 @@ struct ReceiverRootView: View {
             .scrollIndicators(paged ? .hidden : .automatic, axes: .horizontal)
             .modifier(PlayerScrollBehavior(paged: paged))
             .scrollPosition(id: paged ? pageSelection : .constant(nil), anchor: .leading)
-            .onChange(of: layout.mode, initial: true) { previous, current in
-                playerMode = current
-                guard current == .stacked, showLyrics else { return }
-                if previous == .artworkAndLyrics || (previous == .paged && selectedPage == .lyrics) {
-                    scrollPlayer(reader, towardLyrics: true)
-                }
+            .onChange(of: layout.mode, initial: true) { _, mode in
+                playerMode = mode
             }
             .onChange(of: showLyrics) { _, shown in
                 guard layout.mode == .stacked else { return }
@@ -227,18 +245,40 @@ struct ReceiverRootView: View {
         }
     }
 
-    private func lyricPanel(paged: Bool) -> some View {
-        let showsHeader = paged && (lyricsPageShowsArtwork || lyricsPageShowsTrackInfo)
-        return VStack(spacing: showsHeader ? 12 : 0) {
-            if showsHeader {
+    private func lyricPanel(mode: PlayerPresentationLayout.Mode) -> some View {
+        let title = model.displayTitle
+        let subtitle = model.displaySubtitle
+        let hasTrackInfo = lyricsPageShowsTrackInfo && (!title.isEmpty || !subtitle.isEmpty)
+        let showsHeader = mode == .paged && (lyricsPageShowsArtwork || hasTrackInfo)
+
+        return VStack(spacing: 0) {
+            Button { selectPage(.player) } label: {
                 CompactLyricsTrackHeader(
                     artwork: model.artwork,
-                    title: model.displayTitle,
-                    subtitle: model.displaySubtitle,
+                    title: title,
+                    subtitle: subtitle,
                     showsArtwork: lyricsPageShowsArtwork,
                     showsTrackInfo: lyricsPageShowsTrackInfo
                 )
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("返回播放页")
+            .accessibilityValue(Text(verbatim: hasTrackInfo ? [title, subtitle].filter { !$0.isEmpty }.joined(separator: ", ") : ""))
+            .accessibilityIdentifier("player.lyrics.return")
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.bottom, 12)
+            .opacity(showsHeader ? 1 : 0)
+            .offset(y: showsHeader || reduceMotion ? 0 : -7)
+            .animation(layoutAnimation, value: showsHeader)
+            // Apply the slot height immediately so this transition only
+            // moves the header and doesn't reflow the lyrics each frame.
+            .frame(height: showsHeader ? nil : 0, alignment: .top)
+            .animation(nil, value: showsHeader)
+            .allowsHitTesting(showsHeader)
+            .accessibilityHidden(!showsHeader)
+
             lyricsPane
         }
     }
@@ -281,16 +321,15 @@ struct ReceiverRootView: View {
                         } else {
                             let visible = !lyricsSelected
                             withAnimation(displayAnimation) {
-                                if lyricsDisplayMode == .automatic {
-                                    lyricVisibilityOverride = (trackKey, visible)
-                                } else {
-                                    lyricsDisplayMode = visible ? .always : .never
+                                if lyricsDisplayMode == .never {
+                                    lyricsDisplayMode = .automatic
                                 }
+                                lyricVisibilityOverride = (trackKey, visible)
                             }
                         }
                     }
-                    ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
                 }
+                ReceiverVolumeControl(model: model, showingVolume: $showingVolume)
                 headerButton("gearshape", label: "接收设置") { showingSettings = true }
             }
             .opacity(toolbarVisible ? 1 : 0)
@@ -341,24 +380,18 @@ struct ReceiverRootView: View {
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 )
-                if let artwork = hasTrack && !reduceTransparency ? model.artwork : nil {
-                    Image(uiImage: artwork)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: proxy.size.width, height: proxy.size.height)
-                        .clipped()
-                        .blur(radius: 62)
-                        .opacity(0.45)
-                        .id(ObjectIdentifier(artwork))
-                        .transition(.opacity)
-                }
+                PlayerArtworkBackdrop(
+                    artwork: hasTrack ? model.artwork?.cgImage : nil,
+                    retainsWhileLoading: hasTrack && (model.artworkStatus == .loading || model.artworkStatus == .retrying)
+                )
+                .frame(width: proxy.size.width, height: proxy.size.height)
+                .opacity(0.45)
                 LinearGradient(
                     colors: [PlayerPalette.background.opacity(0.12), PlayerPalette.background.opacity(0.80)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
             }
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.34), value: model.artwork.map(ObjectIdentifier.init))
             .clipped()
         }
         .ignoresSafeArea()
@@ -410,15 +443,26 @@ struct ReceiverRootView: View {
         .padding(.vertical, 10)
     }
 
-    private func playbackDetails(paged: Bool) -> some View {
+    private func playbackDetails(paged: Bool, compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 13) {
-            PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
+            VStack(alignment: .leading, spacing: 0) {
+                PlayerTrackMetadataView(title: model.displayTitle, subtitle: model.displaySubtitle, trackKey: trackKey)
+                lyricPageLink(visible: paged)
+                    .padding(.top, 13)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(height: paged ? nil : 0, alignment: .top)
+                    .clipped()
+                    .opacity(paged ? 1 : 0)
+                    .allowsHitTesting(paged)
+                    .accessibilityHidden(!paged || selectedPage != .player)
+            }
             if showProgress {
                 ReceiverProgressView(model: model, prioritizesScrubbing: paged)
+                    .geometryGroup()
                     .transition(.opacity)
             }
             if showPlaybackControls {
-                transport.transition(.opacity)
+                transport(compact: compact).transition(.opacity)
             }
             if !model.controlMessage.isEmpty {
                 Text(model.controlMessage)
@@ -427,6 +471,32 @@ struct ReceiverRootView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func lyricPageLink(visible: Bool) -> some View {
+        let document = model.lyrics
+        let live = visible && selectedPage == .player && model.snapshot?.phase == .playing && document.isTimed
+        return TimelineView(.animation(minimumInterval: 0.25, paused: !live)) { _ in
+            let active = model.displayedPositionMs.flatMap { document.activeLineIndex(at: $0) }
+            let current = active.map { document.lines[$0].text }
+            let caption = current.map { $0.isEmpty ? "•••" : $0.replacingOccurrences(of: "\n", with: " ") }
+            Button { selectPage(.lyrics) } label: {
+                Group {
+                    if model.lyricsLoading { Text("正在载入歌词…") }
+                    else if let caption { Text(verbatim: caption) }
+                    else { Text("查看歌词") }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.76))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("查看歌词")
+            .accessibilityValue(Text(verbatim: caption ?? ""))
+            .accessibilityIdentifier("player.lyrics.open")
+        }
     }
 
     private func cover(side: CGFloat) -> some View {
@@ -454,7 +524,9 @@ struct ReceiverRootView: View {
         .accessibilityHidden(true)
     }
 
-    private var transport: some View {
+    private static let prominentTransportSize: CGFloat = 62
+
+    private func transport(compact: Bool) -> some View {
         let playing = model.snapshot?.phase == .playing
         return HStack(spacing: 0) {
             transportButton("backward.end.fill", label: "上一曲") { model.control(.previous) }
@@ -463,7 +535,7 @@ struct ReceiverRootView: View {
             }
             transportButton("forward.end.fill", label: "下一曲") { model.control(.next) }
         }
-        .frame(maxWidth: 326)
+        .frame(maxWidth: compact ? .infinity : 326)
         .frame(maxWidth: .infinity)
         .disabled(!model.canControl)
         .opacity(model.snapshot?.controlsAvailable == true ? 1 : 0.45)
@@ -480,7 +552,8 @@ struct ReceiverRootView: View {
                     .transition(.blurReplace(.downUp))
             }
             .animation(prominent && !reduceMotion ? .easeInOut(duration: 0.24) : nil, value: image)
-            .frame(width: prominent ? 62 : 46, height: prominent ? 62 : 46)
+            .frame(width: prominent ? Self.prominentTransportSize : 46,
+                   height: prominent ? Self.prominentTransportSize : 46)
             .background(.white.opacity(prominent ? 0.14 : 0), in: Circle())
             .contentShape(Rectangle())
             .accessibilityHidden(true)
@@ -560,6 +633,9 @@ private struct ReceiverLyricsView: View {
     let trackKey: String
     let document: LyricsDocument
     @AppStorage(LyricsTypography.storageKey) private var lyricScalePercent = LyricsTypography.defaultScalePercent
+    @AppStorage(LyricsShadowAppearance.enabledKey) private var lyricShadowEnabled = false
+    @AppStorage(LyricsShadowAppearance.opacityKey) private var lyricShadowOpacity = LyricsShadowAppearance.defaultOpacity
+    @AppStorage(LyricsShadowAppearance.spreadKey) private var lyricShadowSpread = LyricsShadowAppearance.defaultSpread
     @AppStorage("staggerLyricMotion") private var staggerLyricMotion = true
     @AppStorage("lyricStaggerMilliseconds") private var lyricStaggerMilliseconds = LyricReflowTiming.defaultStaggerMilliseconds
     @AppStorage(LyricReflowTiming.moveStorageKey) private var lyricLineMoveMilliseconds = LyricReflowTiming.defaultMoveMilliseconds
@@ -574,6 +650,7 @@ private struct ReceiverLyricsView: View {
     @State private var followRevision = 0
     @State private var following = true
     @State private var lastActiveIndex: Int?
+    @State private var lyricAnchor: Int?
     @State private var showsEmptyState = false
     @State private var previousLayout: LayoutMetrics?
     @State private var isSettlingLayout = false
@@ -595,7 +672,16 @@ private struct ReceiverLyricsView: View {
     }
     private var isCurrentTrack: Bool { TrackIdentity(snapshot: model.snapshot).key == trackKey }
 
+    private func lyricScrollPosition(timed: Bool) -> Binding<Int?> {
+        Binding(get: { lyricAnchor }, set: { line in
+            // Geometry reports visible rows during resize. Accept them only
+            // while browsing; during follow the playback cue owns the anchor.
+            if (!timed || !following || voiceOver), let line { lyricAnchor = line }
+        })
+    }
+
     private static let viewport = "receiver.lyrics.viewport"
+    private static let maximumBaseFontSize: CGFloat = 36
     private static let followAnchor = UnitPoint(x: 0.5, y: 0.32)
 
     var body: some View {
@@ -651,6 +737,7 @@ private struct ReceiverLyricsView: View {
                 scrollInMotion = false
                 following = true
                 previousLayout = nil
+                lyricAnchor = nil
                 isSettlingLayout = false
             }
         }
@@ -674,73 +761,79 @@ private struct ReceiverLyricsView: View {
     private func lyricScroll(size: CGSize, document: LyricsDocument, activeIndex: Int?) -> some View {
         let activeID = activeIndex.map { document.lines[$0].id }
         let allowsEffects = !reduceTransparency && !voiceOver && contrast != .increased
-        let bleed: CGFloat = allowsEffects ? 14 : 0
-        let fontSize = min(36, max(26, size.width * 0.076)) * typeScale
+        let shadow = LyricsShadowAppearance(enabled: lyricShadowEnabled, opacityPercent: lyricShadowOpacity,
+                                            spread: lyricShadowSpread)
+        let bleed = max(allowsEffects ? 14 : 0, shadow.radius)
+        let fontSize = min(Self.maximumBaseFontSize, max(26, size.width * 0.076)) * typeScale
             * LyricsTypography.scale(percent: lyricScalePercent)
         let layout = LayoutMetrics(viewport: size, fontSize: fontSize, typography: typography)
         let topBlur: CGFloat = allowsEffects ? 3.5 : 0
         let bottomBlur: CGFloat = allowsEffects ? 10 : 0
         let timed = document.isTimed
 
-        return ScrollViewReader { proxy in
-            trackScroll(timed: timed) {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: min(22, max(17, 17 + (size.width - 350) / 10))) {
-                        ForEach(document.lines) { line in
-                            lyricRow(line, activeID: activeID, timed: timed, fontSize: fontSize)
-                                .modifier(LyricRowStagger(span: staggerSpan, viewport: Self.viewport,
-                                                         viewportHeight: size.height, wave: followWave))
-                                .visualEffect { [height = size.height, viewport = Self.viewport] content, row in
-                                    content.blur(radius: Self.edgeBlurRadius(
-                                        middleY: row.frame(in: .named(viewport)).midY,
-                                        height: height, top: topBlur, bottom: bottomBlur))
-                                }
-                                .id(line.id)
-                        }
+        return trackScroll(timed: timed) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: min(22, max(17, 17 + (size.width - 350) / 10))) {
+                    ForEach(document.lines) { line in
+                        lyricRow(line, activeID: activeID, timed: timed, fontSize: fontSize, shadow: shadow)
+                            .modifier(LyricRowStagger(span: staggerSpan, viewport: Self.viewport,
+                                                     viewportHeight: size.height, wave: followWave))
+                            .visualEffect { [height = size.height, viewport = Self.viewport] content, row in
+                                content.blur(radius: Self.edgeBlurRadius(
+                                    middleY: row.frame(in: .named(viewport)).midY,
+                                    height: height, top: topBlur, bottom: bottomBlur))
+                            }
+                            .id(line.id)
                     }
-                    .padding(.horizontal, bleed)
-                    .padding(.top, timed && !voiceOver ? max(12, size.height * 0.32) : 12)
-                    .padding(.bottom, timed && !voiceOver ? max(16, size.height * 0.68) : 16)
                 }
+                .scrollTargetLayout()
+                .padding(.horizontal, bleed)
+                .padding(.top, timed && !voiceOver ? max(12, size.height * 0.32) : 12)
+                .padding(.bottom, timed && !voiceOver ? max(16, size.height * 0.68) : 16)
             }
-            .environment(\.lyricLineMoveDuration, lineMoveDuration)
-            .coordinateSpace(name: Self.viewport)
-            .scrollClipDisabled()
-            .scrollIndicators(.hidden)
-            .mask {
-                if allowsEffects {
-                    LinearGradient(
-                        stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.09),
-                                .init(color: .black, location: 0.90), .init(color: .clear, location: 1)],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                } else {
-                    Rectangle()
-                }
+        }
+        .environment(\.lyricLineMoveDuration, lineMoveDuration)
+        .coordinateSpace(name: Self.viewport)
+        .scrollPosition(id: lyricScrollPosition(timed: timed), anchor: Self.followAnchor)
+        .scrollClipDisabled()
+        .scrollIndicators(.hidden)
+        .mask {
+            if allowsEffects {
+                LinearGradient(
+                    stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.09),
+                            .init(color: .black, location: 0.90), .init(color: .clear, location: 1)],
+                    startPoint: .top, endPoint: .bottom
+                )
+            } else {
+                Rectangle()
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, -bleed)
-            .onChange(of: activeID, initial: true) { previous, current in
-                scroll(proxy, to: current, animated: previous != current, from: previous)
-            }
-            .task(id: layout) {
-                let prior = previousLayout
+        }
+        .contentShape(Rectangle())
+        .padding(.horizontal, -bleed)
+        .onChange(of: activeID, initial: true) { previous, current in
+            follow(to: current, animated: previous != current, from: previous)
+        }
+        .task(id: layout) {
+            guard let prior = previousLayout else {
                 previousLayout = layout
-                guard let prior, prior != layout || isSettlingLayout else { return }
-                if !reduceMotion && !voiceOver {
-                    isSettlingLayout = true
-                    let reflowDuration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
-                    do { try await Task.sleep(for: .seconds(reflowDuration + staggerSpan + 0.05)) }
-                    catch { return }
-                }
-                isSettlingLayout = false
-                let latest = model.lyrics
-                let index = model.displayedPositionMs.flatMap { latest.activeLineIndex(at: $0) }
-                scroll(proxy, to: index.map { latest.lines[$0].id }, animated: true)
+                return
             }
-            .onChange(of: following) { _, active in
-                if active { scroll(proxy, to: activeID, animated: true) }
+            guard prior != layout || isSettlingLayout else { return }
+            if !reduceMotion && !voiceOver {
+                isSettlingLayout = true
+                let resizeDelay = LyricResizeTiming.staggerSpan(playbackSpan: staggerSpan)
+                do { try await Task.sleep(for: .seconds(LyricResizeTiming.duration + resizeDelay + 0.05)) }
+                catch { return }
             }
+            isSettlingLayout = false
+            previousLayout = layout
+            let latest = model.lyrics
+            let index = model.displayedPositionMs.flatMap { latest.activeLineIndex(at: $0) }
+            let line = index.map { latest.lines[$0].id }
+            follow(to: line, animated: false)
+        }
+        .onChange(of: following) { _, active in
+            if active { follow(to: activeID, animated: true) }
         }
     }
 
@@ -774,7 +867,8 @@ private struct ReceiverLyricsView: View {
     }
 
     @ViewBuilder
-    private func lyricRow(_ line: LyricsLine, activeID: Int?, timed: Bool, fontSize: CGFloat) -> some View {
+    private func lyricRow(_ line: LyricsLine, activeID: Int?, timed: Bool, fontSize: CGFloat,
+                          shadow: LyricsShadowAppearance) -> some View {
         let active = line.id == activeID
         let opacity: Double = {
             if !timed { return 0.88 }
@@ -783,10 +877,13 @@ private struct ReceiverLyricsView: View {
             guard let activeID else { return line.id == 0 ? 0.72 : 0.42 }
             return abs(line.id - activeID) <= 1 ? 0.57 : 0.32
         }()
+        let textScale = fontSize / Self.maximumBaseFontSize
         let label = VStack(alignment: .leading, spacing: 6) {
-            LyricReflowText(line.text.isEmpty ? "•••" : line.text, size: fontSize, weight: .bold, lineSpacing: 2)
+            LyricReflowText(line.text.isEmpty ? "•••" : line.text, size: Self.maximumBaseFontSize,
+                            scale: textScale, weight: .bold, lineSpacing: 2)
             if let translation = line.translation, !translation.isEmpty {
-                LyricReflowText(translation, size: fontSize * 0.60, weight: .semibold)
+                LyricReflowText(translation, size: Self.maximumBaseFontSize * 0.60,
+                                scale: textScale, weight: .semibold)
                     .opacity(0.78)
             }
         }
@@ -794,9 +891,11 @@ private struct ReceiverLyricsView: View {
         .modifier(PlayerTextHeightMotion(
             wrapThreshold: fontSize * 0.45,
             stagesEnabled: line.text.utf8.count <= 1_024 && (line.translation?.utf8.count ?? 0) <= 1_024,
-            animateContentChanges: false
+            animateContentChanges: false,
+            verticalCurve: LyricReflowTiming.verticalMove
         ))
         .foregroundStyle(.white)
+        .shadow(color: .black.opacity(shadow.opacity), radius: shadow.radius, y: shadow.opacity > 0 ? 2 : 0)
         .opacity(opacity)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: active)
         .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -826,8 +925,9 @@ private struct ReceiverLyricsView: View {
         return max(top * topT * topT * (3 - 2 * topT), bottom * bottomT * bottomT * (3 - 2 * bottomT))
     }
 
-    private func scroll(_ proxy: ScrollViewProxy, to id: Int?, animated: Bool, from previous: Int? = nil) {
-        guard isCurrentTrack, following, !isSettlingLayout, !dragging, !scrollInMotion, !voiceOver, let id else { return }
+    private func follow(to id: Int?, animated: Bool, from previous: Int? = nil) {
+        guard isCurrentTrack, following, !isSettlingLayout, !dragging, !scrollInMotion,
+              !voiceOver, let id, lyricAnchor != id else { return }
         let span = staggerSpan
         let moveDuration = lineMoveDuration
         if animated, span > 0, let previous, (1...2).contains(abs(id - previous)) {
@@ -836,8 +936,10 @@ private struct ReceiverLyricsView: View {
         } else {
             followWave = nil
         }
-        withAnimation(animated && !reduceMotion ? .easeInOut(duration: moveDuration) : nil) {
-            proxy.scrollTo(id, anchor: Self.followAnchor)
+        let animation: Animation? = animated && !reduceMotion
+            ? .timingCurve(LyricReflowTiming.verticalMove, duration: moveDuration) : nil
+        withAnimation(animation) {
+            lyricAnchor = id
         }
     }
 }
@@ -848,24 +950,44 @@ private struct LyricRowStagger: ViewModifier {
     let viewportHeight: CGFloat
     let wave: LyricFollowWave?
 
-    @State private var rank = 0
+    private struct Location: Equatable {
+        let rank: Int
+        let isVisible: Bool
+    }
+
+    @State private var location = Location(rank: 0, isVisible: true)
+    @State private var followRank: Int?
+    @State private var resizeClock = LyricResizeClock()
 
     func body(content: Content) -> some View {
-        let position = Double(rank) / Double(LyricReflowTiming.viewportSteps)
-        let delay = LyricReflowTiming.staggerDelay(span: span, position: position)
+        let steps = Double(LyricReflowTiming.viewportSteps)
+        let position = Double(location.rank) / steps
+        let resize = LyricResizeContext(isVisible: location.isVisible,
+                                       delay: LyricResizeTiming.staggerSpan(playbackSpan: span) * position,
+                                       clock: resizeClock)
         let activeWave = span > 0 ? wave : nil
+        let followPosition = Double(followRank ?? location.rank) / steps
         TimelineView(.animation(minimumInterval: 1.0 / 60, paused: activeWave == nil)) { context in
             content
-                .environment(\.lyricMotionDelay, delay)
-                .offset(y: activeWave?.offset(at: context.date, position: position) ?? 0)
+                .environment(\.lyricResizeContext, resize)
+                .offset(y: activeWave?.offset(at: context.date, position: followPosition) ?? 0)
         }
-        .onGeometryChange(for: Int.self) { geometry in
-            guard span > 0, viewportHeight.isFinite, viewportHeight > 0 else { return 0 }
-            let center = geometry.frame(in: .named(viewport)).midY
-            guard center.isFinite else { return 0 }
-            let position = min(1, max(0, center / viewportHeight))
-            return Int((position * CGFloat(LyricReflowTiming.viewportSteps)).rounded())
-        } action: { rank = $0 }
+        .onChange(of: activeWave != nil, initial: true) { _, isFollowing in
+            // Keep each row's delay stable while its viewport position is changing.
+            followRank = isFollowing ? location.rank : nil
+        }
+        .onGeometryChange(for: Location.self) { geometry in
+            let frame = geometry.frame(in: .named(viewport))
+            guard viewportHeight.isFinite, viewportHeight > 0, frame.midY.isFinite else {
+                return Location(rank: 0, isVisible: true)
+            }
+            let position = span > 0 ? min(1, max(0, frame.midY / viewportHeight)) : 0
+            let rank = Int((position * CGFloat(LyricReflowTiming.viewportSteps)).rounded())
+            return Location(rank: rank, isVisible: frame.maxY > 0 && frame.minY < viewportHeight)
+        } action: { measured in
+            location = measured
+            if activeWave != nil, followRank == nil { followRank = measured.rank }
+        }
     }
 }
 
@@ -873,7 +995,8 @@ struct PlayerTextHeightMotion: ViewModifier {
     let wrapThreshold: CGFloat
     let stagesEnabled: Bool
     let animateContentChanges: Bool
-    @Environment(\.lyricMotionDelay) private var delay
+    var verticalCurve: UnitCurve? = nil
+    @Environment(\.lyricResizeContext) private var resizeContext
     @Environment(\.lyricLineMoveDuration) private var lineMoveDuration
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
@@ -890,7 +1013,11 @@ struct PlayerTextHeightMotion: ViewModifier {
                     .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
                         updateHeight(size)
                     }
-                    .frame(height: motion?.height(at: context.date) ?? staticHeight, alignment: .topLeading)
+                    .frame(height: motion?.height(at: context.date, curve: verticalCurve) ?? staticHeight,
+                           alignment: .topLeading)
+            }
+            .onChange(of: resizeContext.isVisible) { _, visible in
+                if !visible { settleHeight() }
             }
             .task(id: motion?.end) {
                 guard let end = motion?.end else { return }
@@ -910,33 +1037,40 @@ struct PlayerTextHeightMotion: ViewModifier {
     private func updateHeight(_ size: CGSize) {
         let previous = previousSize
         previousSize = size
+        guard resizeContext.isVisible else {
+            settleHeight()
+            return
+        }
         guard size.height != previous?.height else { return }
         let isWrap = previous.map {
             (animateContentChanges || $0.width != size.width)
                 && abs($0.height - size.height) >= wrapThreshold
         } ?? false
         let now = Date()
-        let visible = motion?.height(at: now) ?? staticHeight ?? size.height
+        let visible = motion?.height(at: now, curve: verticalCurve) ?? staticHeight ?? size.height
 
         if isWrap {
-            if #available(iOS 18.0, *), stagesEnabled {
-                let duration = LyricReflowTiming.reflowDuration(moveDuration: lineMoveDuration)
-                motion = RowHeightMotion(
-                    from: visible, target: size.height,
-                    start: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowStart),
-                    end: now.addingTimeInterval(delay + duration * LyricReflowTiming.rowEnd)
-                )
+            if #available(iOS 18.0, *), stagesEnabled, resizeContext.clock != nil {
+                let window = resizeContext.timing(at: now).heightWindow(expanding: size.height > visible)
+                motion = RowHeightMotion(from: visible, target: size.height,
+                                         start: max(now, window.lowerBound), end: window.upperBound)
             } else {
-                let duration = 0.22 * lineMoveDuration / LyricReflowTiming.defaultMoveDuration
+                let duration = resizeContext.clock == nil
+                    ? 0.22 * lineMoveDuration / LyricReflowTiming.defaultMoveDuration
+                    : LyricResizeTiming.slideDuration
                 motion = RowHeightMotion(from: visible, target: size.height,
                                          start: now, end: now.addingTimeInterval(duration))
             }
         } else if let current = motion, now < current.end {
             motion = RowHeightMotion(from: visible, target: size.height, start: max(now, current.start), end: current.end)
         } else {
-            staticHeight = size.height
-            motion = nil
+            settleHeight()
         }
+    }
+
+    private func settleHeight() {
+        staticHeight = previousSize?.height
+        motion = nil
     }
 }
 
@@ -946,11 +1080,11 @@ private struct RowHeightMotion {
     let start: Date
     let end: Date
 
-    func height(at time: Date) -> CGFloat {
+    func height(at time: Date, curve: UnitCurve?) -> CGFloat {
         guard time > start else { return from }
         guard time < end else { return target }
         let phase = time.timeIntervalSince(start) / end.timeIntervalSince(start)
-        let ease = CGFloat(phase * phase * (3 - 2 * phase))
+        let ease = CGFloat(curve?.value(at: phase) ?? (phase * phase * (3 - 2 * phase)))
         return from + (target - from) * ease
     }
 }

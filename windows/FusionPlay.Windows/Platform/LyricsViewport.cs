@@ -20,6 +20,12 @@ internal static class LyricsViewport
         double target = currentOffset + rowY - .32 * (viewportHeight - rowHeight);
         return double.IsFinite(target) ? Math.Clamp(target, 0, Math.Max(0, maximumOffset)) : target > 0 ? Math.Max(0, maximumOffset) : 0;
     }
+    internal static double AnchorOffset(double currentOffset, double rowY, double rememberedY, double maximumOffset)
+    {
+        if (!double.IsFinite(currentOffset) || !double.IsFinite(rowY) || !double.IsFinite(rememberedY) || !double.IsFinite(maximumOffset)) return 0;
+        double target = currentOffset + rowY - rememberedY;
+        return Math.Clamp(target, 0, Math.Max(0, maximumOffset));
+    }
     internal static double LineOpacity(bool timed, int index, int active, bool highContrast)
     {
         if (!timed) return .88;

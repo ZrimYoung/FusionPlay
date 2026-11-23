@@ -71,6 +71,8 @@ struct PlaybackProgressView: View {
             .allowsHitTesting(visible).accessibilityHidden(!visible)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(L("播放进度"))
+            .accessibilityIdentifier("fusionplay.player.progress")
+            .background { if visible { PlayerPagingDragExclusion() } }
             .accessibilityValue(PlayerAppearance.time(displayPosition) + " / " + PlayerAppearance.time(observation?.duration))
             .accessibilityAdjustableAction { direction in
                 guard visible, model.canSeek, let duration = observation?.duration else { return }

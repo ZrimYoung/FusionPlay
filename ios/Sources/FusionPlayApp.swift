@@ -8,6 +8,10 @@ struct FusionPlayApp: App {
 
     init() {
         LyricsDisplayMode.migrateLegacyPreference(legacyKey: "showLyrics")
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: LyricsDisplayMode.storageKey) == LyricsDisplayMode.always.rawValue {
+            defaults.set(LyricsDisplayMode.automatic.rawValue, forKey: LyricsDisplayMode.storageKey)
+        }
     }
 
     var body: some Scene {

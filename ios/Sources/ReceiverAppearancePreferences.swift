@@ -47,6 +47,42 @@ enum ReceiverProgressAppearance {
     }
 }
 
+enum ReceiverBackdropAppearance {
+    static let blurKey = "playerBackdropBlurPercent"
+    static let defaultBlurPercent = 50
+    static let blurRange = 0...100
+
+    static func clampedBlurPercent(_ value: Int) -> Int {
+        min(blurRange.upperBound, max(blurRange.lowerBound, value))
+    }
+
+    static func blurRadius(percent: Int) -> Double {
+        14 * Double(clampedBlurPercent(percent)) / 100
+    }
+}
+
+struct LyricsShadowAppearance {
+    static let enabledKey = "lyricShadowEnabled"
+    static let opacityKey = "lyricShadowOpacityPercent"
+    static let spreadKey = "lyricShadowSpreadPoints"
+    static let opacityRange = 0...100
+    static let spreadRange = 0...24
+    static let defaultOpacity = 45
+    static let defaultSpread = 8
+
+    let opacity: Double
+    let radius: CGFloat
+
+    init(enabled: Bool, opacityPercent: Int, spread: Int) {
+        opacity = enabled ? Double(Self.clamp(opacityPercent, to: Self.opacityRange)) / 100 : 0
+        radius = opacity > 0 ? CGFloat(Self.clamp(spread, to: Self.spreadRange)) : 0
+    }
+
+    static func clamp(_ value: Int, to range: ClosedRange<Int>) -> Int {
+        min(range.upperBound, max(range.lowerBound, value))
+    }
+}
+
 struct ReceiverTypography: Equatable {
     static let familyKey = "uiFontFamily"
     static let faceKey = "uiFontFace"

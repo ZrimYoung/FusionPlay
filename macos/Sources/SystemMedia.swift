@@ -58,7 +58,8 @@ struct MediaSeekTrack: Equatable, Sendable {
     let duration: UInt64
 
     init?(_ state: Snapshot) {
-        guard state.controlsAvailable, let duration = state.durationMs, duration > 0, state.positionMs != nil else { return nil }
+        guard state.controlsAvailable, let duration = state.durationMs, duration > 0, state.positionMs != nil,
+              !state.trackId.isEmpty || !state.title.isEmpty else { return nil }
         self.duration = duration
         id = state.trackId
         fallbackTitle = id.isEmpty ? state.title : ""
@@ -74,6 +75,10 @@ struct MediaSeekTrack: Equatable, Sendable {
 struct MediaSeekRequest: Sendable {
     let track: MediaSeekTrack
     let positionMs: UInt64
+
+    func isCurrent(in state: Snapshot, canSeek: Bool) -> Bool {
+        canSeek && MediaSeekTrack(state) == track
+    }
 }
 
 // Remote-command callbacks need not arrive on the main thread. Take a small
@@ -139,7 +144,7 @@ final class SystemMediaController {
                 guard let event = event as? MPChangePlaybackPositionCommandEvent,
                       let request = gate.resolveSeek(event.positionTime) else { return .noActionableNowPlayingItem }
                 DispatchQueue.main.async { seek(request) }
-                return .success
+                return .success // Accepted for dispatch; the phone still confirms the seek.
             }
             targets.append((position, token))
         }

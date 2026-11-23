@@ -78,6 +78,19 @@ internal static class PlayerRefinementCheck
             return true;
         }
         bool LyricsVisible() => Field(main!, "lyricsVisible") is true;
+        void CheckPauseIconCenter(string buttonName)
+        {
+            var button = Find<Button>(buttonName);
+            Require(model!.State.Phase == ReceiverPhase.Playing && button.IsEnabled && Visible(button), "pause_button_fixture_not_ready");
+            var glyph = (PlayPauseGlyph)button.Content;
+            Require(!glyph.IsHitTestVisible && glyph.PauseMark.Opacity == 1 && glyph.PlayMark.Opacity == 0, "hidden_pause_glyph_transitioned");
+            var path = Descendants(glyph.PauseMark).OfType<Microsoft.UI.Xaml.Shapes.Path>().Single();
+            Rect ink = path.Data.Bounds;
+            Point center = path.TransformToVisual(button).TransformPoint(new Point(ink.X + ink.Width / 2, ink.Y + ink.Height / 2));
+            double offsetX = center.X - button.ActualWidth / 2, offsetY = center.Y - button.ActualHeight / 2;
+            samples.Add(new { button = buttonName, glyph_center_offset_x = offsetX, glyph_center_offset_y = offsetY });
+            Require(Math.Abs(offsetX) < .75 && Math.Abs(offsetY) < .75, "pause_glyph_off_center_" + buttonName);
+        }
         async Task Settle(int milliseconds = 260) { await Task.Delay(milliseconds); await OnUi(queue!, Arrange); }
         async Task Parsed()
         {
@@ -148,6 +161,7 @@ internal static class PlayerRefinementCheck
             {
                 Require(!model!.Preferences.Value.CorrectLyricTitles && model.DisplayMetadata.Title == song.Title && model.State == song, "default_display_changed_source");
                 Require(Find<PlayerText>("TitleText").Text == song.Title && Field(main!, "idle") is false, "normal_title_not_restored");
+                CheckPauseIconCenter("PlayButton");
                 model.Preferences.Update(model.Preferences.Value with { CorrectLyricTitles = true });
             }));
             await Settle();
@@ -163,6 +177,8 @@ internal static class PlayerRefinementCheck
                 Require(model.State == song && request != null && request.ExpectedTitle == song.Title && request.ExpectedTrackId == song.TrackId && request.PositionMs == 90_000, "display_correction_changed_control_source");
                 Accept(song with { Phase = ReceiverPhase.Paused }); model.Preferences.Update(model.Preferences.Value with { CorrectLyricTitles = false });
                 Require(Find<PlayerText>("TitleText").Text == song.Title, "paused_preference_did_not_restore_original_title");
+                var glyph = (PlayPauseGlyph)Find<Button>("PlayButton").Content;
+                Require(glyph.PlayMark.Opacity == 1 && glyph.PauseMark.Opacity == 0, "hidden_play_glyph_transitioned");
                 model.Preferences.Update(model.Preferences.Value with { CorrectLyricTitles = true });
                 Require(Find<PlayerText>("TitleText").Text == "A Synthetic Question", "paused_preference_did_not_refresh_title");
             }));
@@ -179,6 +195,7 @@ internal static class PlayerRefinementCheck
                 WindowSizing.ResizeContent(main!, 320, 600);
             }));
             await Parsed();
+            await OnUi(queue!, () => Pass("mini_pause_glyph_centered", () => CheckPauseIconCenter("MiniPlayButton")));
             double rememberedPane = 0, targetHeight = 0; const double initialWidth = 320;
             await OnUi(queue!, () =>
             {
@@ -258,6 +275,48 @@ internal static class PlayerRefinementCheck
                 var material = (PlayerAcrylic)Field(main!, "acrylic")!;
                 Require(!material.IsRequested && !material.IsActive && ReferenceEquals(main!.SystemBackdrop, idleMaterial),
                     "idle_material_not_restored_at_end_of_playback");
+            }));
+            step = "compact_player_lyrics_paging";
+            CompactLyricsPager Pager() => (CompactLyricsPager)Field(main!, "miniPager")!;
+            LyricsView? compactLyrics = null;
+            await OnUi(queue!, () =>
+            {
+                Require(CompactLyricsPager.SwipeDirection(-64, 8, 360) == -1 && CompactLyricsPager.SwipeDirection(64, 8, 360) == 1
+                    && CompactLyricsPager.SwipeDirection(64, 60, 360) == 0 && CompactLyricsPager.SwipeDirection(20, 0, 360) == 0, "paging_gesture_axis_or_threshold");
+                model!.Preferences.Update(model.Preferences.Value with { NarrowLyricsPaging = true, LyricsBackgroundMode = "album" });
+                WindowSizing.ResizeContent(main!, 360, 360);
+                Accept(song);
+            });
+            await Parsed();
+            await OnUi(queue!, () =>
+            {
+                Require(Pager().Active && !Pager().ShowingLyrics && Find<Button>("MiniPageButton").IsEnabled, "compact_paging_not_on_player");
+                Require(Math.Abs(Size().Width - Size().Height) <= 2 && Visible(Find<Grid>("MiniCoverPanel")), "compact_paging_lost_square_player");
+                compactLyrics = (LyricsView)Find<Grid>("MiniLyricsHost").Children[0];
+                Require(Pager().Navigate(true), "compact_lyrics_page_not_selected");
+            });
+            await Settle();
+            await OnUi(queue!, () =>
+            {
+                Require(Visible(Find<Grid>("MiniLyricsHost")) && !Visible(Find<Grid>("MiniCoverPanel")) && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 0,
+                    "compact_lyrics_not_in_own_page");
+                WindowSizing.ResizeContent(main!, 840, 600);
+            });
+            await Settle();
+            await OnUi(queue!, () =>
+            {
+                Require(!Pager().Active && Pager().ShowingLyrics && Visible(Find<Grid>("ExpandedLyricsHost")), "wide_layout_did_not_preserve_page_choice");
+                WindowSizing.ResizeContent(main!, 360, 360);
+            });
+            await Settle();
+            await OnUi(queue!, () => Pass(step, () =>
+            {
+                Require(Pager().Active && Pager().ShowingLyrics && Visible(Find<Grid>("MiniLyricsHost"))
+                    && ReferenceEquals(Find<Grid>("MiniLyricsHost").Children[0], compactLyrics), "resize_replaced_or_lost_lyrics_page");
+                Require(Pager().Navigate(false) && Visible(Find<Grid>("MiniCoverPanel")), "compact_player_page_not_restored");
+                model!.Preferences.Update(model.Preferences.Value with { NarrowLyricsPaging = false });
+                Require(!Pager().Active && Find<Button>("MiniPageButton").Visibility == Visibility.Collapsed && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2,
+                    "paging_preference_did_not_restore_stacked_layout");
                 Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
             }));
             status = "passed"; step = "complete";

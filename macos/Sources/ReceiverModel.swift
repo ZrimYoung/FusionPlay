@@ -13,9 +13,10 @@ final class ReceiverEvents: StateListener, @unchecked Sendable {
 final class ReceiverModel: ObservableObject {
     static let shared = ReceiverModel()
     @Published var miniPlayerRequest = 0
+    private let displayMetadataCache = DisplayMetadataCache()
     var correctedDisplayMetadata: DisplayMetadata {
         guard let state = snapshot else { return DisplayMetadata(title: "", artist: "", album: "") }
-        return DisplayMetadata(state, correctLyricTitles: true)
+        return displayMetadataCache.resolve(state)
     }
     @Published var snapshot: Snapshot?
     @Published private(set) var playbackTimeline = PlaybackTimeline()
@@ -71,7 +72,10 @@ final class ReceiverModel: ObservableObject {
     private var signature = ""
     private var retryCount = 0
     private var appliedSettings: Settings?
-    private lazy var systemMedia = SystemMediaController { [weak self] command in self?.control(command) }
+    private lazy var systemMedia = SystemMediaController(
+        seek: { [weak self] request in self?.handleSystemSeek(request) },
+        send: { [weak self] command in self?.control(command) }
+    )
     private var artworkTask: Task<Void, Never>?
     private var artworkKey = ""
     private var terminating = false
@@ -82,6 +86,7 @@ final class ReceiverModel: ObservableObject {
     static func preview(_ state: Snapshot, artwork: NSImage?, root: URL) -> ReceiverModel {
         ReceiverModel(preview: state, artwork: artwork, root: root)
     }
+    var previewControlCommand: ((PlaybackCommand) -> Void)?
     func previewLyricsUpdate(_ state: Snapshot) {
         snapshot = state
         updateLyrics(state)
@@ -167,15 +172,22 @@ final class ReceiverModel: ObservableObject {
         updateLyrics(state)
         updateArtwork(state)
         if busy || sleeping { systemMedia.clear() }
-        else { systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork) }
+        else { systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, canSeek: canSeek) }
         if state.phase == .failed { error = state.message }
     }
     var canControl: Bool { snapshot?.controlsAvailable == true && !busy && !controlBusy && !sleeping && !terminating }
     func togglePlayback() { control(snapshot?.phase == .playing ? .pause : .play) }
     func control(_ command: PlaybackCommand) {
+#if FUSIONPLAY_UI_CHECKS
+        // A fixture records the real button-to-command route without a receiver.
+        if receiver == nil, canControl, let previewControlCommand {
+            previewControlCommand(command)
+            return
+        }
+#endif
         guard let receiver, canControl, !terminating else { return }
         controlBusy = true; controlMessage = "正在发送到手机…"
-        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artworkLoading ? nil : artwork) }
+        if let snapshot { systemMedia.update(snapshot, busy: true, artwork: artworkLoading ? nil : artwork, canSeek: false) }
         backend.async { [weak self] in
             do {
                 let outcome = try receiver.control(command: command)
@@ -195,6 +207,18 @@ final class ReceiverModel: ObservableObject {
         }
     }
     var canSeek: Bool { canControl && (snapshot?.durationMs ?? 0) > 0 && snapshot?.positionMs != nil }
+    private func handleSystemSeek(_ request: MediaSeekRequest) {
+        guard let state = snapshot else { return }
+        guard request.isCurrent(in: state, canSeek: canSeek) else {
+            // A queued callback can outlive its original track or availability.
+            // Restore the current command gate without resetting the media clock.
+            if receiver != nil, !busy, !sleeping, !terminating {
+                systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, canSeek: canSeek)
+            }
+            return
+        }
+        seek(to: request.positionMs)
+    }
     func seek(to position: UInt64) {
         guard let receiver, let state = snapshot, canSeek, let duration = state.durationMs,
               let token = playbackTimeline.begin(target: min(position, duration), now: ProcessInfo.processInfo.systemUptime) else { return }
@@ -207,7 +231,7 @@ final class ReceiverModel: ObservableObject {
                   self.playbackTimeline.expire(token, now: ProcessInfo.processInfo.systemUptime) else { return }
             self.seekMessage = "手机尚未确认跳转"
         }
-        systemMedia.update(state, busy: true, artwork: artworkLoading ? nil : artwork)
+        systemMedia.update(state, busy: true, artwork: artworkLoading ? nil : artwork, canSeek: false)
         backend.async { [weak self] in
             do {
                 let result = try receiver.seek(positionMs: min(position, duration), expectedTrackId: state.trackId, expectedTitle: state.title)
@@ -239,7 +263,7 @@ final class ReceiverModel: ObservableObject {
         // Preview models have no receiver and must never register a real media
         // session. A live paused session still needs immediate preference edits.
         guard receiver != nil, let state = snapshot, !busy, !sleeping else { return }
-        systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, force: true)
+        systemMedia.update(state, busy: controlBusy, artwork: artworkLoading ? nil : artwork, force: true, canSeek: canSeek)
     }
     private func updateLyricsAvailability() {
         let available = LyricsAutoVisibility.resolve(hasLyrics: !lyrics.lines.isEmpty, loading: lyricsLoading,
@@ -257,6 +281,7 @@ final class ReceiverModel: ObservableObject {
         let changedTrack = key != lyricsKey
         let waitingForMetadata = changedTrack && state.controlsAvailable && source.isEmpty && lyricsAvailable
         if changedTrack || !state.controlsAvailable {
+            displayMetadataCache.reset()
             lyricsTask?.cancel(); lyricsTask = nil; lyricsKey = key; lyricsSource = ""
             lyrics = LyricsDocument(""); lyricsLoading = false
         }
@@ -321,7 +346,7 @@ final class ReceiverModel: ObservableObject {
                 self.clearArtwork()
                 self.artworkStatus = "手机未提供封面"
                 if let state = self.snapshot, !self.busy, !self.sleeping {
-                    self.systemMedia.update(state, busy: self.controlBusy, artwork: nil, force: true)
+                    self.systemMedia.update(state, busy: self.controlBusy, artwork: nil, force: true, canSeek: self.canSeek)
                 }
             }
             return
@@ -336,7 +361,7 @@ final class ReceiverModel: ObservableObject {
                     self.artworkStatus = "已加载"
                     self.recordArtwork(kind: kind, result: "loaded", attempt: attempt)
                     if let state = self.snapshot, !self.busy, !self.sleeping {
-                        self.systemMedia.update(state, busy: self.controlBusy, artwork: self.artwork, force: true)
+                        self.systemMedia.update(state, busy: self.controlBusy, artwork: self.artwork, force: true, canSeek: self.canSeek)
                     }
                     return
                 } catch {
@@ -357,7 +382,7 @@ final class ReceiverModel: ObservableObject {
         guard let snapshot, snapshot.controlsAvailable, !artworkLoading else { return }
         artworkKey = "\0"
         updateArtwork(snapshot)
-        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artworkLoading ? nil : artwork, force: true)
+        systemMedia.update(snapshot, busy: controlBusy || busy, artwork: artworkLoading ? nil : artwork, force: true, canSeek: canSeek)
     }
     private func recordArtwork(kind: String, result: String, attempt: Int) {
         let directory = root.appendingPathComponent("logs")

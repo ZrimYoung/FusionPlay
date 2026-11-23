@@ -33,17 +33,7 @@ struct BridgeSmoke {
             let presentation = MediaPresentation(state)!
             precondition(presentation.info[MPMediaItemPropertyTitle] as? String == "Track")
             precondition(presentation.position == 5 && presentation.duration == 120)
-            let track = MediaSeekTrack(state)!
-            precondition(track.request(at: 17.25)?.positionMs == 17_250)
-            precondition(track.request(at: 300)?.positionMs == 120_000)
-            precondition(track.request(at: -.infinity) == nil && track.request(at: -1) == nil)
-            let seekGate = MediaCommandGate()
-            seekGate.update(enabled: true, playing: true, seekTrack: track)
-            precondition(seekGate.resolveSeek(20)?.track == track)
-            precondition(seekGate.resolve(.pause) == nil, "Seek and transport commands share one reservation")
-            state.trackId = "replacement"
-            precondition(MediaSeekTrack(state) != track, "A queued seek must not target a replacement track")
-            state.trackId = ""
+            SystemMediaSeekChecks.run(state: state)
             state.queueMs = 80
             precondition(MediaPresentation(state) == presentation, "Health updates must not reset elapsed time")
             state.phase = .paused

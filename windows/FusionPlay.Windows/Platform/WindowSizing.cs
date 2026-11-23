@@ -10,11 +10,12 @@ namespace FusionPlay.Windows.Platform;
 internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
-    void SetPlayerLayout(bool lyricsVisible, bool fullScreen);
+    void SetPlayerLayout(bool lyricsVisible, bool fullScreen, bool compactPaging = false);
     void SetLayoutTransition(bool active);
     void RememberLyricsPaneHeight();
     double PreferredLyricsHeight(double width);
     event Action? MoveSizeStarted;
+    event Action? MoveSizeEnded;
 }
 
 internal static class WindowSizing
@@ -43,6 +44,8 @@ internal static class WindowSizing
     public static bool IsCompactContent(double widthDips, double heightDips) => widthDips < 600 || heightDips < 360;
     public static bool IsCompactContent(double widthDips, double heightDips, bool lyricsVisible)
         => lyricsVisible ? widthDips < 600 : IsCompactContent(widthDips, heightDips);
+    internal static bool UsesLyricsGeometry(bool lyrics, bool compactPaging, double widthDips)
+        => lyrics && (!compactPaging || widthDips >= 600);
     private static double Scale(nint hwnd) => Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
     private static bool IsCompact(nint hwnd, int width, int height)
         => IsCompactContent(width / Scale(hwnd), height / Scale(hwnd));
@@ -118,9 +121,10 @@ internal static class WindowSizing
         private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
-        private bool lyricsVisible, fullScreen, expandLyrics, layoutTransition;
+        private bool lyricsVisible, compactPaging, fullScreen, expandLyrics, layoutTransition;
         private double? preferredLyricsPaneHeight;
         public event Action? MoveSizeStarted;
+        public event Action? MoveSizeEnded;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
@@ -162,7 +166,7 @@ internal static class WindowSizing
                 var next = Marshal.PtrToStructure<Rect>(pointer); var frame = Frame(handle);
                 int width = Width(next) - frame.Width, height = Height(next) - frame.Height;
                 if (fullScreen) return DefSubclassProc(handle, message, argument, pointer);
-                if (lyricsVisible)
+                if (UsesLyricsGeometry(lyricsVisible, compactPaging, width / Scale(handle)))
                 {
                     if (width < Math.Ceiling(600 * Scale(handle)))
                     {
@@ -229,12 +233,15 @@ internal static class WindowSizing
             => EndMoveSize();
         private void EndMoveSize()
         {
+            if (!inMoveSize) return;
             inMoveSize = false; resizeStartWidth = resizeStartHeight = 0;
             RememberLyricsPaneHeight(); QueueSettlement(); SetHover(CursorIsOverWindow());
+            try { MoveSizeEnded?.Invoke(); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
         }
         public void RememberLyricsPaneHeight()
         {
-            if (disposed || !lyricsVisible || fullScreen || inMoveSize || layoutTransition || settling
+            if (disposed || !lyricsVisible || compactPaging || fullScreen || inMoveSize || layoutTransition || settling
                 || window.AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Restored }
                 || !GetClientRect(hwnd, out var client)) return;
             double scale = Scale(hwnd), width = Width(client) / scale, height = Height(client) / scale;
@@ -251,13 +258,14 @@ internal static class WindowSizing
             // Stable controls still need new caption and border bounds on resize.
             RefreshRegions(force: changed);
         }
-        public void SetPlayerLayout(bool lyrics, bool fullscreen)
+        public void SetPlayerLayout(bool lyrics, bool fullscreen, bool paging = false)
         {
-            if (disposed || lyricsVisible == lyrics && fullScreen == fullscreen) return;
-            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics)) RememberLyricsPaneHeight();
-            expandLyrics |= !inMoveSize && !lyricsVisible && lyrics && !fullscreen;
-            lyricsVisible = lyrics; fullScreen = fullscreen;
-            if (fullscreen) expandLyrics = false;
+            paging &= lyrics;
+            if (disposed || lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen) return;
+            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging)) RememberLyricsPaneHeight();
+            expandLyrics |= !inMoveSize && (!lyricsVisible || compactPaging) && lyrics && !paging && !fullscreen;
+            lyricsVisible = lyrics; compactPaging = paging; fullScreen = fullscreen;
+            if (fullscreen || paging || !lyrics) expandLyrics = false;
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 // A full-screen transition must not inherit an old lyric pane
@@ -342,7 +350,8 @@ internal static class WindowSizing
         private void QueueSettlement(bool force = false)
         {
             if (disposed || fullScreen || layoutTransition || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
-            if (!force && !lyricsVisible && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
+            if (!force && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
+                && !UsesLyricsGeometry(lyricsVisible, compactPaging, Width(client) / Scale(hwnd))
                 && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client))) return;
             settlementQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
@@ -361,7 +370,7 @@ internal static class WindowSizing
                     if (presenter.PreferredMinimumWidth != minimumWidth) presenter.PreferredMinimumWidth = minimumWidth;
                     if (presenter.PreferredMinimumHeight != minimumHeight) presenter.PreferredMinimumHeight = minimumHeight;
                 }
-                if (lyricsVisible)
+                if (UsesLyricsGeometry(lyricsVisible, compactPaging, Width(client) / Scale(hwnd)))
                 {
                     if (Width(client) >= Math.Ceiling(600 * Scale(hwnd))) { expandLyrics = false; return; }
                     int gap = (int)Math.Ceiling(136 * Scale(hwnd));
@@ -392,6 +401,7 @@ internal static class WindowSizing
         {
             if (disposed) return; disposed = true;
             MoveSizeStarted = null;
+            MoveSizeEnded = null;
             try
             {
                 input.PointerEntered -= PointerEntered; input.PointerMoved -= PointerEntered; input.PointerExited -= PointerExited;

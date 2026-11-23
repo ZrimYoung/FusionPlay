@@ -33,8 +33,10 @@ public sealed class LyricsRowPresenter : Button
     private LyricsRowItem? item;
     private GlyphPlane? plane, sparePlane, outgoingPlane;
     private ContainerVisual? planesVisual;
+    private LyricsGlyphReflow? glyphReflow;
     private DispatcherQueueTimer? wrapTimer;
-    private long wrapDeadline, wrapTransitionsStarted;
+    private long wrapDeadline, wrapTransitionsStarted, glyphReflowTransitionsStarted;
+    private string glyphReflowStatus = "no_wrap";
     private const int WrapDurationMs = 180;
     private CanvasRenderTarget? glyphs => plane?.Glyphs;
     private CompositionDrawingSurface? surface => plane?.Surface;
@@ -63,18 +65,22 @@ public sealed class LyricsRowPresenter : Button
         internal int PixelWidth, PixelHeight;
         internal double Width, Height, Dpi, ContentHeight;
         internal ulong OriginalBreaks, TranslationBreaks;
+        internal LyricsGlyphReflow.LayoutSection[] Layouts = [];
     }
     private sealed record Typography(string Family, ushort Weight, ushort TranslationWeight, double Size, double Scale, bool Enhanced, bool Contrast, bool Compact, string Language);
     internal LyricsRowItem? Item => item;
-    internal bool UsesCompositionSurface => sprite?.IsVisible == true && measurement.Opacity == 0;
+    internal bool UsesCompositionSurface => (glyphReflow != null || sprite?.IsVisible == true) && measurement.Opacity == 0;
     internal long GlyphRasterizations => glyphRasterizations;
     internal long SurfaceCreations => surfaceCreations;
     internal long EdgeUpdates => edgeUpdates;
     internal long WrapTransitionsStarted => wrapTransitionsStarted;
+    internal long GlyphReflowTransitionsStarted => glyphReflowTransitionsStarted;
+    internal int GlyphReflowClusterCount => glyphReflow?.ClusterCount ?? 0;
+    internal string GlyphReflowStatus => glyphReflowStatus;
     internal bool WrapTransitionActive => outgoingPlane != null;
-    internal int WrapTransitionDurationMs => WrapDurationMs;
+    internal int WrapTransitionDurationMs => glyphReflow?.DurationMilliseconds ?? WrapDurationMs;
     internal int CachedPlaneCount => (plane == null ? 0 : 1) + (sparePlane == null ? 0 : 1) + (outgoingPlane == null ? 0 : 1);
-    internal bool GlyphUploadReady => urgentGlyphs || (outgoingPlane == null || item?.Owner.MotionEnabled != true)
+    internal bool GlyphUploadReady => urgentGlyphs || (outgoingPlane == null || glyphReflow != null || item?.Owner.MotionEnabled != true)
         && (surface == null || resizeUploadDeadline == 0 || Stopwatch.GetTimestamp() >= resizeUploadDeadline);
     internal Rect GlyphBounds => new(content.Padding.Left - (item?.Owner.Bleed ?? 0), content.Padding.Top - (item?.Owner.Bleed ?? 0), sourceWidth, sourceHeight);
 
@@ -192,6 +198,8 @@ public sealed class LyricsRowPresenter : Button
             double top = measurement.TransformToVisual(owner).TransformPoint(new Point()).Y - owner.Bleed;
             bool changed = double.IsNaN(appliedEdgeRadius) || Math.Abs(radius - appliedEdgeRadius) > .05 || Math.Abs(top - appliedSurfaceTop) > .5 || appliedViewportHeight != owner.ViewportHeight;
             edgeRadius = radius; surfaceTop = top; viewportHeight = owner.ViewportHeight;
+            if (glyphReflow != null && (WindowSizing.ScreenReaderActive || !CanShowClusterMotion(owner, sourceHeight: plane?.ContentHeight ?? 0)))
+                FinishWrap(queueDraw: false);
             if (owner.HighContrast || faulted) { NativeFallback(); return; }
             if (surface != null && changed) UpdateEffectProperties();
             if (glyphsDirty || surface == null) QueueDraw();
@@ -238,7 +246,15 @@ public sealed class LyricsRowPresenter : Button
     private void ShowSurface()
     {
         if (sprite == null || !actuallyVisible) return;
-        measurement.Opacity = 0; sprite.IsVisible = true;
+        measurement.Opacity = 0; sprite.IsVisible = glyphReflow == null;
+    }
+    private bool CanShowClusterMotion(LyricsView owner, double sourceHeight)
+    {
+        // Cluster sprites share the solid middle of the lyric viewport.
+        // Lines inside the edge gradient keep their existing masked planes.
+        double top = surfaceTop + owner.Bleed;
+        return viewportHeight > 0 && edgeRadius <= .05 && top >= viewportHeight * .09
+            && top + sourceHeight <= viewportHeight * .91;
     }
     private void DrawGlyphs()
     {
@@ -253,17 +269,21 @@ public sealed class LyricsRowPresenter : Button
             faulted = requiredWidth > 8192 || requiredHeight > 8192; ReleaseSurface(); return;
         }
         GlyphPlane? unpublished = null, replacedPlane = null;
+        CanvasTextLayout? first = null, second = null;
         try
         {
             var resources = owner.GetGraphicsResources(); if (resources == null) { faulted = true; NativeFallback(); return; }
-            using var first = CreateTextLayout(resources.Device, original, owner.TextScale);
-            using var second = translation.Visibility == Visibility.Visible ? CreateTextLayout(resources.Device, translation, owner.TextScale) : null;
+            first = CreateTextLayout(resources.Device, original, owner.TextScale);
+            second = translation.Visibility == Visibility.Visible ? CreateTextLayout(resources.Device, translation, owner.TextScale) : null;
+            var originalOrigin = new Vector2((float)bleed);
+            var translationOrigin = new Vector2((float)bleed, (float)(bleed + original.ActualHeight + measurement.Spacing));
             ulong firstBreaks = LineBreaks(first), secondBreaks = second == null ? 0 : LineBreaks(second);
             // A stable glyph plane remains on screen until the replacement upload
             // is complete. Only real line-break/height changes crossfade; small
             // width samples retain the existing 40 ms coalescing deadline.
-            bool animateWrap = !urgentGlyphs && plane != null && plane.Dpi == dpi && owner.MotionEnabled
-                && (plane.OriginalBreaks != firstBreaks || plane.TranslationBreaks != secondBreaks || Math.Abs(plane.ContentHeight - height) > .5);
+            bool animateWrap = !urgentGlyphs && plane != null && plane.Dpi == dpi && owner.MotionEnabled && !WindowSizing.ScreenReaderActive
+                && (glyphReflow != null || plane.OriginalBreaks != firstBreaks || plane.TranslationBreaks != secondBreaks || Math.Abs(plane.ContentHeight - height) > .5);
+            var continuation = animateWrap ? glyphReflow?.Sample() : null;
             FinishWrap(queueDraw: false);
             if (faulted) return;
             var previous = plane;
@@ -287,16 +307,35 @@ public sealed class LyricsRowPresenter : Button
             {
                 draw.Clear(Colors.Transparent);
                 using var enhanced = owner.EnhancedText ? NativeTypography.Enhance(draw) : null;
-                draw.DrawTextLayout(first, (float)bleed, (float)bleed, Colors.White);
-                if (second != null) draw.DrawTextLayout(second, (float)bleed, (float)(bleed + original.ActualHeight + measurement.Spacing), global::Windows.UI.Color.FromArgb(199, 255, 255, 255));
+                draw.DrawTextLayout(first, originalOrigin, Colors.White);
+                if (second != null) draw.DrawTextLayout(second, translationOrigin, global::Windows.UI.Color.FromArgb(199, 255, 255, 255));
             }
             using var gamma = new GammaTransferEffect { Source = target.Glyphs, RedDisable = true, GreenDisable = true, BlueDisable = true, AlphaExponent = owner.EnhancedText ? .94f : 1, ClampOutput = true };
             using (var draw = CanvasComposition.CreateDrawingSession(target.Surface!, new Rect(0, 0, target.PixelWidth, target.PixelHeight), (float)dpi)) { draw.Clear(Colors.Transparent); draw.DrawImage(gamma); }
             target.Sprite!.Offset = new Vector3((float)-bleed, (float)-bleed, 0);
             target.OriginalBreaks = firstBreaks; target.TranslationBreaks = secondBreaks; target.ContentHeight = height;
+            ClearLayouts(target);
+            if (owner.MotionEnabled && LyricsGlyphReflow.Supports(original.Text, translation.Text))
+            {
+                target.Layouts = second == null
+                    ? [new(first, originalOrigin, original.Text)]
+                    : [new(first, originalOrigin, original.Text), new(second, translationOrigin, translation.Text)];
+                first = second = null;
+            }
             plane = target; unpublished = null;
             if (!ReferenceEquals(previous, target)) replacedPlane = previous;
-            if (animateWrap && previous != null) StartWrap(previous);
+            if (animateWrap && previous != null)
+            {
+                glyphReflowStatus = previous.Layouts.Length == 0 || target.Layouts.Length != previous.Layouts.Length
+                    ? "missing_matching_layouts" : "edge_mask_needed";
+                if (previous.Layouts.Length > 0 && target.Layouts.Length == previous.Layouts.Length
+                    && CanShowClusterMotion(owner, Math.Max(previous.ContentHeight, height)))
+                {
+                    glyphReflow = LyricsGlyphReflow.TryStart(resources, previous.Surface!, target.Surface!, previous.Layouts,
+                        target.Layouts, (float)bleed, (float)scale, continuation, out glyphReflowStatus);
+                }
+                StartWrap(previous);
+            }
             else
             {
                 AttachPlanes();
@@ -314,6 +353,7 @@ public sealed class LyricsRowPresenter : Button
             if (!ReferenceEquals(replacedPlane, outgoingPlane)) ClosePlane(replacedPlane);
             faulted = true; ReleaseSurface(); NativeFallback();
         }
+        finally { LyricsGraphicsResources.Close(first); LyricsGraphicsResources.Close(second); }
     }
     private GlyphPlane CreatePlane(LyricsGraphicsResources resources, int width, int height, double dpi)
     {
@@ -356,6 +396,11 @@ public sealed class LyricsRowPresenter : Button
             ElementCompositionPreview.SetElementChildVisual(overlay, planesVisual);
         }
         planesVisual.Children.RemoveAll();
+        if (glyphReflow != null)
+        {
+            planesVisual.Children.InsertAtTop(glyphReflow.Visual);
+            return;
+        }
         if (outgoingPlane?.Sprite is { } previous) planesVisual.Children.InsertAtBottom(previous);
         planesVisual.Children.InsertAtTop(plane.Sprite);
     }
@@ -363,19 +408,28 @@ public sealed class LyricsRowPresenter : Button
     {
         outgoingPlane = previous; AttachPlanes();
         var entering = plane!.Sprite!; var leaving = previous.Sprite!;
-        entering.Opacity = 0; leaving.Opacity = 1; leaving.IsVisible = true;
-        using var easing = entering.Compositor.CreateCubicBezierEasingFunction(new Vector2(.2f, 0), new Vector2(.2f, 1));
-        using var fade = entering.Compositor.CreateScalarKeyFrameAnimation();
-        fade.Duration = TimeSpan.FromMilliseconds(WrapDurationMs); fade.StopBehavior = AnimationStopBehavior.LeaveCurrentValue;
-        fade.InsertKeyFrame(0, 0); fade.InsertKeyFrame(1, 1, easing); entering.StartAnimation("Opacity", fade);
-        fade.InsertKeyFrame(0, 1); fade.InsertKeyFrame(1, 0, easing); leaving.StartAnimation("Opacity", fade);
-        wrapTransitionsStarted++; wrapDeadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * WrapDurationMs / 1000;
+        int duration = WrapDurationMs;
+        if (glyphReflow == null)
+        {
+            entering.Opacity = 0; leaving.Opacity = 1; leaving.IsVisible = true;
+            using var easing = entering.Compositor.CreateCubicBezierEasingFunction(new Vector2(.2f, 0), new Vector2(.2f, 1));
+            using var fade = entering.Compositor.CreateScalarKeyFrameAnimation();
+            fade.Duration = TimeSpan.FromMilliseconds(duration); fade.StopBehavior = AnimationStopBehavior.LeaveCurrentValue;
+            fade.InsertKeyFrame(0, 0); fade.InsertKeyFrame(1, 1, easing); entering.StartAnimation("Opacity", fade);
+            fade.InsertKeyFrame(0, 1); fade.InsertKeyFrame(1, 0, easing); leaving.StartAnimation("Opacity", fade);
+        }
+        else
+        {
+            duration = glyphReflow.DurationMilliseconds;
+            glyphReflowTransitionsStarted++;
+        }
+        wrapTransitionsStarted++; wrapDeadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * duration / 1000;
         if (wrapTimer == null)
         {
             wrapTimer = DispatcherQueue.CreateTimer(); wrapTimer.IsRepeating = false;
             wrapTimer.Tick += WrapExpired;
         }
-        wrapTimer.Stop(); wrapTimer.Interval = TimeSpan.FromMilliseconds(WrapDurationMs + 16); wrapTimer.Start();
+        wrapTimer.Stop(); wrapTimer.Interval = TimeSpan.FromMilliseconds(duration + 16); wrapTimer.Start();
     }
     private void WrapExpired(DispatcherQueueTimer sender, object args)
     {
@@ -394,14 +448,16 @@ public sealed class LyricsRowPresenter : Button
         if (outgoingPlane == null) return;
         wrapTimer?.Stop(); wrapDeadline = 0;
         var retired = outgoingPlane; outgoingPlane = null;
+        var retiredMotion = glyphReflow; glyphReflow = null;
         var replacedSpare = sparePlane; sparePlane = retired; ClosePlane(replacedSpare);
         try
         {
-            if (plane?.Sprite is { } current) { current.StopAnimation("Opacity"); current.Opacity = 1; }
+            if (plane?.Sprite is { } current) { current.StopAnimation("Opacity"); current.Opacity = 1; current.IsVisible = actuallyVisible; }
             if (retired.Sprite is { } old) { old.StopAnimation("Opacity"); old.Opacity = 1; old.IsVisible = false; }
             AttachPlanes();
         }
         catch (Exception error) when (error is COMException or ObjectDisposedException) { faulted = true; ReleaseSurface(); }
+        finally { retiredMotion?.Dispose(); }
         if (queueDraw && glyphsDirty) QueueDraw();
     }
     // Explicit diagnostic capture of the real cache and current effect state. It never
@@ -456,17 +512,20 @@ public sealed class LyricsRowPresenter : Button
         if (wrapTimer is { } timer) { timer.Stop(); timer.Tick -= WrapExpired; wrapTimer = null; }
         wrapDeadline = 0;
         var oldPlane = plane; var oldSpare = sparePlane; var oldOutgoing = outgoingPlane; var oldVisual = planesVisual;
+        var oldMotion = glyphReflow; glyphReflow = null;
         // Native close callbacks can reenter layout. Publish the fallback state
         // before releasing any shared brush graph or drawing resource.
         plane = sparePlane = outgoingPlane = null; planesVisual = null;
         glyphsDirty = true; urgentGlyphs = true; resizeUploadDeadline = 0; appliedEdgeRadius = appliedSurfaceTop = appliedViewportHeight = double.NaN; NativeFallback();
         try { ElementCompositionPreview.SetElementChildVisual(overlay, null); oldVisual?.Children.RemoveAll(); }
         catch (Exception error) when (error is COMException or ObjectDisposedException) { }
+        oldMotion?.Dispose();
         ClosePlane(oldPlane); ClosePlane(oldSpare); ClosePlane(oldOutgoing); LyricsGraphicsResources.Close(oldVisual);
     }
     private static void ClosePlane(GlyphPlane? target)
     {
         if (target == null) return;
+        ClearLayouts(target);
         var oldSprite = target.Sprite; var oldMasked = target.MaskedBrush; var oldMask = target.MaskBrush; var oldBlur = target.BlurBrush; var oldBrush = target.SurfaceBrush;
         var oldSurface = target.Surface; var oldGlyphs = target.Glyphs; var stops = target.MaskStops.ToArray();
         target.Sprite = null; target.MaskedBrush = null; target.MaskBrush = null; target.BlurBrush = null; target.SurfaceBrush = null; target.Surface = null; target.Glyphs = null; target.MaskStops.Clear();
@@ -480,6 +539,11 @@ public sealed class LyricsRowPresenter : Button
         LyricsGraphicsResources.Close(oldSprite); LyricsGraphicsResources.Close(oldMasked); LyricsGraphicsResources.Close(oldMask); LyricsGraphicsResources.Close(oldBlur); LyricsGraphicsResources.Close(oldBrush);
         foreach (var stop in stops) LyricsGraphicsResources.Close(stop);
         LyricsGraphicsResources.Close(oldSurface); LyricsGraphicsResources.Close(oldGlyphs);
+    }
+    private static void ClearLayouts(GlyphPlane target)
+    {
+        foreach (var section in target.Layouts) LyricsGraphicsResources.Close(section.Layout);
+        target.Layouts = [];
     }
     protected override AutomationPeer OnCreateAutomationPeer() => new LyricPeer(this);
     private sealed class LyricPeer(LyricsRowPresenter owner) : ButtonAutomationPeer(owner)

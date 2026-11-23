@@ -18,7 +18,11 @@ struct PlayerFullScreenCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .toolbar) {
-            Button(L("切换全屏")) { NSApp.keyWindow?.toggleFullScreen(nil) }
+            Button(L("切换全屏")) {
+                PlayerWindowDiagnostics.record("fullscreen-command", window: NSApp.keyWindow,
+                                               details: ["focusedPlayer": String(supportsFullScreen == true)], force: true)
+                NSApp.keyWindow?.toggleFullScreen(nil)
+            }
                 .keyboardShortcut("f", modifiers: [.control, .command])
                 .disabled(supportsFullScreen != true)
         }
