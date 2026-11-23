@@ -120,19 +120,23 @@ class MainActivity : Activity() {
     private fun showSettings() {
         if (settingsDialog != null || isFinishing || isDestroyed) return
         player.exitRemoteLyrics()
-        val dialog = object : Dialog(this) {
-            @Suppress("DEPRECATION")
-            override fun onBackPressed() {
-                if (settingsView?.navigateBack() != true) super.onBackPressed()
-            }
+        val configuration = resources.configuration
+        val fullScreen = !isTelevision && (configuration.screenWidthDp < 600 || configuration.smallestScreenWidthDp in 1..599)
+        val light = configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK != Configuration.UI_MODE_NIGHT_YES
+        val theme = when {
+            fullScreen && light -> android.R.style.Theme_Material_Light_NoActionBar
+            fullScreen -> android.R.style.Theme_Material_NoActionBar
+            light -> android.R.style.Theme_Material_Light_Dialog_Alert
+            else -> android.R.style.Theme_Material_Dialog_Alert
         }
+        val dialog = Dialog(this, theme)
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
-        val content = NativeSettingsView(this, ::applySettingsAction, dialog::dismiss, restoreSettingsPage)
+        val content = NativeSettingsView(dialog.context, ::applySettingsAction, dialog::dismiss, restoreSettingsPage, fullScreen)
         restoreSettingsPage = null
         settingsView = content
         settingsDialog = dialog
         dialog.setContentView(content)
-        dialog.setCanceledOnTouchOutside(true)
+        dialog.setCanceledOnTouchOutside(!fullScreen)
         dialog.setOnDismissListener {
             settingsDialog = null
             settingsView = null
@@ -146,21 +150,46 @@ class MainActivity : Activity() {
         runtime.refreshReceiverDiagnostics()
         render(runtime.uiState.value)
         dialog.show()
-        if (Build.VERSION.SDK_INT >= 33) {
-            dialog.onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT) {
-                if (!content.navigateBack()) dialog.dismiss()
-            }
-        }
         dialog.window?.let { settingsWindow ->
             settingsWindow.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
             settingsWindow.setGravity(Gravity.CENTER)
-            val density = resources.displayMetrics.density
-            val width = (minOf(560, resources.configuration.screenWidthDp - 24) * density).toInt()
-            val height = (minOf(740, resources.configuration.screenHeightDp - 24) * density).toInt()
-            settingsWindow.setLayout(width.coerceAtLeast(1), height.coerceAtLeast(1))
+            if (fullScreen) {
+                configureFullScreenSettings(settingsWindow, content, light)
+            } else {
+                val density = resources.displayMetrics.density
+                val width = (minOf(632, configuration.screenWidthDp - 24) * density).toInt()
+                val height = (minOf(740, configuration.screenHeightDp - 24) * density).toInt()
+                settingsWindow.setLayout(width.coerceAtLeast(1), height.coerceAtLeast(1))
+            }
+            @Suppress("DEPRECATION")
             settingsWindow.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         if (isTelevision) content.focusEntry()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun configureFullScreenSettings(window: Window, view: NativeSettingsView, light: Boolean) {
+        window.setLayout(MATCH_PARENT, MATCH_PARENT)
+        window.clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.TRANSPARENT
+        if (Build.VERSION.SDK_INT >= 29) {
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(view) { content, insets ->
+            val safe = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.ime(),
+            )
+            content.setPadding(safe.left, safe.top, safe.right, safe.bottom)
+            WindowInsetsCompat.CONSUMED
+        }
+        ViewCompat.requestApplyInsets(view)
     }
 
     private fun applySettingsAction(action: NativeSettingsAction) {

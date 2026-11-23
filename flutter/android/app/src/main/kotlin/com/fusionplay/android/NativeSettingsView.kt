@@ -3,26 +3,22 @@ package com.fusionplay.android
 import android.app.AlertDialog
 import android.content.Context
 import android.content.res.ColorStateList
-import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.RippleDrawable
-import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.text.InputFilter
 import android.text.InputType
-import android.text.TextUtils
 import android.widget.ArrayAdapter
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
-import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.ScrollView
@@ -74,9 +70,11 @@ internal class NativeSettingsView(
     private val onAction: (NativeSettingsAction) -> Unit,
     onClose: () -> Unit,
     initialPage: NativeSettingsPage? = null,
+    fullScreen: Boolean,
 ) : LinearLayout(context) {
     private data class RenderKey(
         val settings: AppSettings,
+        val effectiveReceiverName: String,
         val canEditReceiver: Boolean,
         val status: Int,
         val error: String?,
@@ -84,10 +82,9 @@ internal class NativeSettingsView(
         val preferences: NativePlayerPreferences,
     )
 
-    private val colors = SettingsColors(context)
+    private val colors = NativeSettingsStyle(context)
     private var currentSettings = AppSettings()
     private var playerPreferences = NativePlayerPreferences()
-    private var draftName = ""
     private var canEditReceiver = false
     private var binding = false
     private var openDialog: AlertDialog? = null
@@ -95,45 +92,38 @@ internal class NativeSettingsView(
     private val chooserScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var fontChooser: Job? = null
     private var fontFamilies: List<NativePlayerFonts.Family> = emptyList()
-    private val compact = resources.configuration.screenWidthDp - 24 < 500 ||
-        resources.configuration.fontScale >= 1.35f
-    var page = initialPage ?: if (compact) null else NativeSettingsPage.RECEIVER
+    var page = initialPage ?: NativeSettingsPage.RECEIVER
         private set
 
-    private val body = SettingsColumn(context)
-    private val categoryList = LinearLayout(context).apply { orientation = VERTICAL }
-    private val pages = NativeSettingsPage.entries.associateWith { LinearLayout(context).apply { orientation = VERTICAL } }
+    private val pages = NativeSettingsPage.entries.associateWith {
+        SettingsColumn(context).apply {
+            orientation = VERTICAL
+            setPaddingRelative(dp(16), dp(20), dp(16), dp(8))
+        }
+    }
+    private val scrollPages = pages.mapValues { (_, body) ->
+        ScrollView(context).apply {
+            clipToPadding = false
+            isFillViewport = true
+            isVerticalFadingEdgeEnabled = false
+            isFocusable = false
+            addView(centered(body), FrameLayout.LayoutParams(MATCH, WRAP))
+        }
+    }
     private val tabBar = LinearLayout(context).apply {
         orientation = HORIZONTAL
-        background = shape(colors.button, 13)
-        setPadding(dp(3), dp(3), dp(3), dp(3))
     }
-    private val tabButtons = NativeSettingsPage.entries.associateWith { item ->
-        button(item.title) { selectPage(item) }
-    }
-    private val heading = label(R.string.native_settings_title, size = 22, bold = true).apply {
+    private val tabs = NativeSettingsPage.entries.associateWith { SettingsTab(it) }
+    private val heading = colors.label(R.string.native_settings_title, size = 24, bold = true).apply {
         if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
     }
-    private val back = button(R.string.native_settings_back) { navigateBack() }
-    private val scroll = ScrollView(context).apply {
-        clipToPadding = false
-        isFillViewport = true
-        isVerticalFadingEdgeEnabled = false
-    }
-    private val statusValue = label(size = 16)
-    private val warning = label(size = 14, color = colors.warning).apply {
+    private val back = colors.back(onClose)
+    private val statusValue = note(size = 16, color = colors.accent)
+    private val warning = note(size = 14, color = colors.warning).apply {
         accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
         visibility = GONE
     }
-    private val editName = button(R.string.native_settings_default_name) { editName() }
-    private val applyName = button(R.string.native_settings_apply_name, emphasized = true) {
-        onAction(NativeSettingsAction.ReceiverName(draftName.trim()))
-    }
-    private val resetName = button(R.string.native_settings_reset_name) {
-        draftName = ""
-        bindName()
-        onAction(NativeSettingsAction.ReceiverName(""))
-    }
+    private val editName = colors.choice(R.string.native_settings_device_name, ::showReceiverNameEditor)
 
     private val miPlay = toggle(R.string.native_settings_miplay) {
         onAction(NativeSettingsAction.Protocol(ReceiverProtocol.MIPLAY, it))
@@ -144,7 +134,7 @@ internal class NativeSettingsView(
     private val dlna = toggle(R.string.native_settings_dlna) {
         onAction(NativeSettingsAction.Protocol(ReceiverProtocol.DLNA, it))
     }
-    private val identity = button(R.string.native_settings_identity) { chooseIdentity() }
+    private val identity = colors.choice(R.string.native_settings_identity, ::chooseIdentity)
     private val receiverControls = NativeReceiverSettingsControls(
         context,
         { onAction(NativeSettingsAction.ReceiverRunning(it)) },
@@ -156,7 +146,7 @@ internal class NativeSettingsView(
     private val castSwitch = toggle(R.string.native_settings_cast_pause) {
         onAction(NativeSettingsAction.NativeCast(it))
     }
-    private val castNote = label(size = 14, color = colors.secondary)
+    private val castNote = note(size = 14, color = colors.secondary)
     private val castGroup = section(R.string.native_settings_native_cast, castSwitch, castNote)
 
     private val startup = toggle(R.string.native_settings_startup) {
@@ -181,9 +171,9 @@ internal class NativeSettingsView(
     private val wrapMetadata = toggle(R.string.native_settings_wrap_metadata) { enabled ->
         changePlayerPreferences { copy(wrapMetadata = enabled) }
     }
-    private val lyrics: Button = button(R.string.native_settings_lyrics, action = ::chooseLyricsMode)
-    private val progressColor: Button = button(R.string.native_settings_progress_color, action = ::chooseProgressColor)
-    private val customColor = button(R.string.native_settings_custom_color, action = ::editProgressColor)
+    private val lyrics: NativeSettingsChoiceRow = colors.choice(R.string.native_settings_lyrics, ::chooseLyricsMode)
+    private val progressColor: NativeSettingsChoiceRow = colors.choice(R.string.native_settings_progress_color, ::chooseProgressColor)
+    private val customColor = colors.choice(R.string.native_settings_custom_color, ::editProgressColor)
     private val backdrop = PreferenceSlider(R.string.native_settings_backdrop_blur, 0..100, R.string.native_settings_percent) {
         changePlayerPreferences { copy(backgroundBlurPercent = it) }
     }
@@ -215,9 +205,9 @@ internal class NativeSettingsView(
     private val pageTrack = toggle(R.string.native_settings_page_track_info) { enabled ->
         changePlayerPreferences { copy(lyricsPageShowsTrackInfo = enabled) }
     }
-    private val font = button(R.string.native_settings_player_font, action = ::chooseFont)
-    private val fontSample = label(R.string.native_settings_font_sample, size = 18).apply { maxLines = 2 }
-    private val language: Button = button(R.string.native_settings_language, action = ::chooseLanguage)
+    private val font = colors.choice(R.string.native_settings_player_font, ::chooseFont)
+    private val fontSample = note(R.string.native_settings_font_sample, size = 17).apply { maxLines = 2 }
+    private val language: NativeSettingsChoiceRow = colors.choice(R.string.native_settings_language, ::chooseLanguage)
     private val staggerLyrics = toggle(R.string.native_settings_lyric_stagger) { enabled ->
         changePlayerPreferences { copy(staggerLyricMotion = enabled) }
     }
@@ -230,8 +220,8 @@ internal class NativeSettingsView(
         minimumHeight = dp(48)
         isFocusable = true
         contentDescription = context.getString(R.string.native_settings_lyric_stagger_span)
-        progressTintList = ColorStateList.valueOf(colors.action)
-        thumbTintList = ColorStateList.valueOf(colors.action)
+        progressTintList = ColorStateList.valueOf(colors.accent)
+        thumbTintList = progressTintList
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
             override fun onStopTrackingTouch(seekBar: SeekBar) = Unit
@@ -245,6 +235,7 @@ internal class NativeSettingsView(
     }
     private val staggerControl = LinearLayout(context).apply {
         orientation = VERTICAL
+        setPaddingRelative(dp(12), dp(4), dp(12), 0)
         addView(LinearLayout(context).apply {
             gravity = Gravity.CENTER_VERTICAL
             addView(label(R.string.native_settings_lyric_stagger_span, size = 15), LayoutParams(0, WRAP, 1f))
@@ -258,48 +249,50 @@ internal class NativeSettingsView(
     private val correctTitles = toggle(R.string.native_settings_correct_lyric_titles) { enabled ->
         changePlayerPreferences { copy(correctLyricTitles = enabled) }
     }
-    private val exportLogs = button(R.string.native_settings_export) {
+    private val exportLogs = colors.action(R.string.native_settings_export) {
         onAction(NativeSettingsAction.ExportLogs)
     }
-    private val done = button(R.string.native_settings_done, emphasized = true, action = onClose)
-
     init {
         orientation = VERTICAL
-        setBackgroundColor(colors.background)
+        background = colors.shape(colors.background, if (fullScreen) 0 else 24)
+        clipToOutline = !fullScreen
         val header = SettingsColumn(context).apply {
             orientation = HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(16), dp(8), dp(16), dp(8))
-            addView(back, LayoutParams(WRAP, WRAP).apply { marginEnd = dp(10) })
+            setPaddingRelative(dp(10), dp(4), dp(16), dp(2))
+            addView(back, LayoutParams(dp(48), dp(48)).apply { marginEnd = dp(8) })
             addView(heading, LayoutParams(0, WRAP, 1f))
-            addView(done, LayoutParams(WRAP, WRAP).apply { marginStart = dp(12) })
         }
         addView(centered(header), LayoutParams(MATCH, WRAP))
-        NativeSettingsPage.entries.forEach { item ->
-            tabBar.addView(tabButtons.getValue(item), LayoutParams(0, WRAP, 1f))
-            categoryList.addView(button(item.title) { selectPage(item) }.apply {
-                gravity = Gravity.START or Gravity.CENTER_VERTICAL
-                setPadding(dp(16), dp(10), dp(16), dp(10))
-            }, LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(8) })
+        tabs.values.forEach { tabBar.addView(it, LayoutParams(WRAP, WRAP, 1f)) }
+        val navigation = HorizontalScrollView(context).apply {
+            isFillViewport = true
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = OVER_SCROLL_NEVER
+            isFocusable = false
+            setPaddingRelative(dp(12), 0, dp(12), 0)
+            addView(tabBar, FrameLayout.LayoutParams(WRAP, WRAP))
         }
-        if (!compact) addView(centered(tabBar), LayoutParams(MATCH, WRAP).apply {
-            marginStart = dp(16)
-            marginEnd = dp(16)
-            bottomMargin = dp(8)
-        })
+        addView(centered(SettingsColumn(context).apply {
+            orientation = VERTICAL
+            addView(navigation, LayoutParams(MATCH, WRAP))
+            addView(View(context).apply { setBackgroundColor(colors.divider) }, LayoutParams(MATCH, dp(1)).apply {
+                marginStart = dp(16)
+                marginEnd = dp(16)
+            })
+        }), LayoutParams(MATCH, WRAP))
 
-        val version = label(size = 16).apply {
+        val version = note(size = 17).apply {
             text = context.getString(R.string.native_settings_version, BuildConfig.VERSION_NAME)
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         }
-        body.orientation = VERTICAL
-        body.setPadding(dp(16), 0, dp(16), dp(24))
         val receiver = pages.getValue(NativeSettingsPage.RECEIVER)
         receiver.addView(section(R.string.native_settings_receiver_status, statusValue, receiverControls.receiver, warning))
-        receiver.addView(section(R.string.native_settings_device_name, editName, buttonRow(resetName, applyName)))
-        receiver.addView(section(R.string.native_settings_protocols, miPlay, airPlay, dlna, identity))
+        receiver.addView(section(R.string.native_settings_device, editName, identity))
+        receiver.addView(section(R.string.native_settings_protocols, miPlay, airPlay, dlna))
         receiver.addView(castGroup)
         receiver.addView(section(R.string.native_settings_device_behavior, startup, autoWake,
-            label(R.string.native_settings_automatic_behavior_hint, size = 14, color = colors.secondary), keepScreenOn))
+            note(R.string.native_settings_automatic_behavior_hint, size = 14, color = colors.secondary), keepScreenOn))
 
         val appearance = pages.getValue(NativeSettingsPage.APPEARANCE)
         appearance.addView(section(R.string.native_settings_player,
@@ -309,13 +302,12 @@ internal class NativeSettingsView(
         appearance.addView(section(R.string.native_settings_narrow_layout, narrowPaging, pageArtwork, pageTrack))
         appearance.addView(section(R.string.native_settings_typography, font, fontSample, language))
         pages.getValue(NativeSettingsPage.AUDIO).addView(receiverControls.audio, LayoutParams(MATCH, WRAP))
-        pages.getValue(NativeSettingsPage.ABOUT).addView(section(R.string.native_settings_about, version,
-            label(R.string.native_settings_license, size = 15), exportLogs))
+        pages.getValue(NativeSettingsPage.ABOUT).addView(section(null, version,
+            note(R.string.native_settings_license, size = 15, color = colors.secondary), exportLogs))
 
-        body.addView(categoryList, LayoutParams(MATCH, WRAP))
-        pages.values.forEach { body.addView(it, LayoutParams(MATCH, WRAP)) }
-        scroll.addView(centered(body), FrameLayout.LayoutParams(MATCH, WRAP))
-        addView(scroll, LayoutParams(MATCH, 0, 1f))
+        val content = FrameLayout(context)
+        scrollPages.values.forEach { content.addView(it, FrameLayout.LayoutParams(MATCH, MATCH)) }
+        addView(content, LayoutParams(MATCH, 0, 1f))
         selectPage(page)
     }
 
@@ -335,6 +327,7 @@ internal class NativeSettingsView(
         }
         val next = RenderKey(
             state.settings,
+            ui.receiverName,
             state.initialized && !state.busy,
             status,
             state.lastError,
@@ -345,12 +338,11 @@ internal class NativeSettingsView(
         lastRender = next
         binding = true
         try {
-            val oldName = currentSettings.receiverName.orEmpty()
-            if (draftName == oldName) draftName = next.settings.receiverName.orEmpty()
             currentSettings = next.settings
             playerPreferences = preferences
             canEditReceiver = next.canEditReceiver
-            bindName()
+            editName.setValue(next.effectiveReceiverName.ifBlank { context.getString(R.string.native_settings_default_name) })
+            editName.isEnabled = canEditReceiver
 
             statusValue.setText(next.status)
             warning.bindNote(next.error.orEmpty())
@@ -358,7 +350,7 @@ internal class NativeSettingsView(
             miPlay.bind(currentSettings.miPlayEnabled, canEditReceiver)
             airPlay.bind(currentSettings.airPlayEnabled, canEditReceiver)
             dlna.bind(currentSettings.dlnaEnabled, canEditReceiver)
-            identity.text = context.getString(R.string.native_settings_current_identity, currentSettings.miPlayDeviceIdentity.displayName)
+            identity.setValue(currentSettings.miPlayDeviceIdentity.displayName)
             identity.isEnabled = canEditReceiver
             castGroup.visibility = if (cast.supported) VISIBLE else GONE
             castSwitch.bind(cast.paused, canEditReceiver && !cast.busy)
@@ -385,37 +377,14 @@ internal class NativeSettingsView(
 
     fun focusEntry() {
         post {
-            if (isShown && !isInTouchMode) {
-                val entry = when {
-                    page == null -> categoryList.getChildAt(0)
-                    !compact -> tabButtons[page]
-                    else -> back
-                }
-                (entry ?: done).requestFocus()
-            }
+            if (isShown && !isInTouchMode) tabs.getValue(page).button.requestFocus()
         }
     }
 
-    fun navigateBack(): Boolean {
-        if (!compact || page == null) return false
-        selectPage(null)
-        return true
-    }
-
-    private fun selectPage(item: NativeSettingsPage?) {
+    private fun selectPage(item: NativeSettingsPage) {
         page = item
-        pages.forEach { (key, view) -> view.visibility = if (key == item) VISIBLE else GONE }
-        categoryList.visibility = if (item == null) VISIBLE else GONE
-        back.visibility = if (compact && item != null) VISIBLE else GONE
-        heading.setText(if (compact && item != null) item.title else R.string.native_settings_title)
-        if (!compact) tabButtons.forEach { (key, button) ->
-            val selected = key == item
-            button.isSelected = selected
-            button.background = interactiveBackground(if (selected) colors.action else colors.button)
-            button.setTextColor(if (selected) colors.actionText else colors.text)
-        }
-        scroll.scrollTo(0, 0)
-        if (compact) focusEntry()
+        scrollPages.forEach { (key, view) -> view.visibility = if (key == item) VISIBLE else GONE }
+        tabs.forEach { (key, tab) -> tab.bind(key == item) }
     }
 
     override fun onDetachedFromWindow() {
@@ -424,25 +393,24 @@ internal class NativeSettingsView(
         super.onDetachedFromWindow()
     }
 
-    private fun bindName() {
-        val saved = currentSettings.receiverName.orEmpty()
-        editName.text = draftName.ifBlank { context.getString(R.string.native_settings_default_name) }
-        editName.contentDescription = context.getString(R.string.native_settings_edit_name, editName.text)
-        editName.isEnabled = canEditReceiver
-        applyName.isEnabled = canEditReceiver && draftName.trim() != saved
-        resetName.isEnabled = canEditReceiver && (saved.isNotEmpty() || draftName.isNotEmpty())
-    }
-
-    private fun editName() {
+    private fun showReceiverNameEditor() {
         if (!canEditReceiver || openDialog != null) return
+        val savedName = currentSettings.receiverName.orEmpty()
         val editor = EditText(context).apply {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             filters = arrayOf(InputFilter.LengthFilter(AppSettings.MAX_RECEIVER_NAME_LENGTH))
-            hint = context.getString(R.string.native_settings_default_name)
-            setText(draftName)
+            hint = lastRender?.effectiveReceiverName?.takeIf(String::isNotBlank)
+                ?: context.getString(R.string.native_settings_default_name)
+            setText(savedName)
             setSelection(text.length)
+        }
+        fun saveName(value: String) {
+            val name = value.trim()
+            if (name != currentSettings.receiverName.orEmpty()) {
+                onAction(NativeSettingsAction.ReceiverName(name))
+            }
         }
         val dialog = AlertDialog.Builder(context)
             .setTitle(R.string.native_settings_device_name)
@@ -451,14 +419,14 @@ internal class NativeSettingsView(
                 addView(editor, FrameLayout.LayoutParams(MATCH, WRAP))
             })
             .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(R.string.native_settings_done) { _, _ ->
-                draftName = editor.text.toString()
-                bindName()
-            }
+            .setPositiveButton(R.string.native_settings_done) { _, _ -> saveName(editor.text.toString()) }
+            .apply { if (savedName.isNotEmpty()) setNeutralButton(R.string.native_settings_reset_name) { _, _ -> saveName("") } }
             .create()
-        editor.setOnEditorActionListener { _, action, _ ->
-            if (action != EditorInfo.IME_ACTION_DONE) return@setOnEditorActionListener false
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.performClick() == true
+        editor.setOnEditorActionListener { _, action, event ->
+            val enter = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
+            if (action == EditorInfo.IME_ACTION_DONE || enter) {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.performClick() == true
+            } else false
         }
         dialog.setOnShowListener {
             editor.requestFocus()
@@ -511,11 +479,11 @@ internal class NativeSettingsView(
     }
 
     private fun bindAppearance(preferences: NativePlayerPreferences) {
-        lyrics.text = choiceSummary(R.string.native_settings_lyrics, lyricsModeLabel(preferences.lyricsDisplayMode))
-        progressColor.text = choiceSummary(R.string.native_settings_progress_color, progressColorLabel(preferences.progressColorMode))
+        lyrics.setValue(context.getText(lyricsModeLabel(preferences.lyricsDisplayMode)))
+        progressColor.setValue(context.getText(progressColorLabel(preferences.progressColorMode)))
         val custom = preferences.progressColorMode == NativeProgressColorMode.CUSTOM
         customColor.visibility = if (custom) VISIBLE else GONE
-        customColor.text = context.getString(R.string.native_settings_custom_color_value, colorHex(preferences.customProgressColor))
+        customColor.setValue(colorHex(preferences.customProgressColor))
         backdrop.bind(preferences.backgroundBlurPercent)
         lyricScale.bind(preferences.lyricAppearance.scalePercent)
         lyricMove.bind(preferences.lyricAppearance.moveMilliseconds)
@@ -532,12 +500,11 @@ internal class NativeSettingsView(
         pageTrack.visibility = pageArtwork.visibility
         val face = NativePlayerFonts.typeface(preferences.fontFaceId)
         val fontName = NativePlayerFonts.faceLabel(preferences.fontFaceId)
-        font.text = if (fontName != null) {
-            context.getString(R.string.native_settings_text_value, context.getString(R.string.native_settings_player_font), fontName)
-        } else context.getString(R.string.native_settings_player_font)
+        font.setValue(fontName ?: context.getText(R.string.native_settings_system_font))
         font.isEnabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && fontChooser?.isActive != true
         fontSample.typeface = face ?: Typeface.DEFAULT
-        language.text = choiceSummary(R.string.native_settings_language, languageLabel(preferences.appLanguage))
+        fontSample.visibility = if (face != null) VISIBLE else GONE
+        language.setValue(context.getText(languageLabel(preferences.appLanguage)))
     }
 
     private fun lyricsModeLabel(value: NativeLyricsDisplayMode) = when (value) {
@@ -556,10 +523,6 @@ internal class NativeSettingsView(
         NativeAppLanguage.CHINESE -> R.string.native_settings_chinese
         NativeAppLanguage.ENGLISH -> R.string.native_settings_english
     }
-
-    private fun choiceSummary(label: Int, value: Int) = context.getString(
-        R.string.native_settings_text_value, context.getString(label), context.getString(value),
-    )
 
     private fun chooseLyricsMode() = chooseOption(R.string.native_settings_lyrics, NativeLyricsDisplayMode.entries,
         playerPreferences.lyricsDisplayMode, ::lyricsModeLabel, lyrics) { value ->
@@ -594,6 +557,7 @@ internal class NativeSettingsView(
         val editor = EditText(context).apply {
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             setSingleLine(true)
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
             filters = arrayOf(InputFilter.LengthFilter(7))
             hint = "#83BFE3"
             contentDescription = context.getString(R.string.native_settings_hex_color)
@@ -609,13 +573,19 @@ internal class NativeSettingsView(
             addView(editor, LayoutParams(MATCH, WRAP))
         }
         fun updateSwatch() {
-            swatch.background = shape(parsed() ?: playerPreferences.customProgressColor, 10)
+            swatch.background = colors.shape(parsed() ?: playerPreferences.customProgressColor, 10)
         }
         updateSwatch()
         editor.doAfterTextChanged { updateSwatch() }
         val dialog = AlertDialog.Builder(context).setTitle(R.string.native_settings_custom_color)
             .setView(fields).setNegativeButton(android.R.string.cancel, null)
             .setPositiveButton(R.string.native_settings_done, null).create()
+        editor.setOnEditorActionListener { _, action, event ->
+            val enter = event?.keyCode == KeyEvent.KEYCODE_ENTER && event.action == KeyEvent.ACTION_DOWN
+            if (action == EditorInfo.IME_ACTION_DONE || enter) {
+                dialog.getButton(AlertDialog.BUTTON_POSITIVE)?.performClick() == true
+            } else false
+        }
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val color = parsed()
@@ -672,28 +642,26 @@ internal class NativeSettingsView(
     }
 
     private fun chooseFontFace(family: NativePlayerFonts.Family) {
-        var selected = family.faces.indexOfFirst { it.id == playerPreferences.fontFaceId }
-        if (selected < 0) selected = family.faces.indexOfFirst { it.weight == 400 && !it.italic }.coerceAtLeast(0)
+        val selected = family.faces.indexOfFirst { it.id == playerPreferences.fontFaceId }
+        val sampleIndex = if (selected >= 0) selected else family.faces.indexOfFirst { it.weight == 400 && !it.italic }.coerceAtLeast(0)
         val sample = label(R.string.native_settings_font_sample, size = 22)
         val choices = ListView(context).apply {
             choiceMode = ListView.CHOICE_MODE_SINGLE
             adapter = ArrayAdapter(context, android.R.layout.simple_list_item_single_choice, family.faces.map { it.style })
-            setItemChecked(selected, true)
+            if (selected >= 0) setItemChecked(selected, true)
             setOnItemClickListener { _, _, index, _ ->
-                selected = index
-                sample.typeface = NativePlayerFonts.typeface(family.faces[index].id) ?: Typeface.DEFAULT
+                val faceId = family.faces[index].id
+                sample.typeface = NativePlayerFonts.typeface(faceId) ?: Typeface.DEFAULT
+                changePlayerPreferences { copy(fontFaceId = faceId) }
             }
         }
-        sample.typeface = NativePlayerFonts.typeface(family.faces[selected].id) ?: Typeface.DEFAULT
+        sample.typeface = NativePlayerFonts.typeface(family.faces[sampleIndex].id) ?: Typeface.DEFAULT
         show(AlertDialog.Builder(context).setTitle(family.name)
             .setView(dialogColumn().apply {
                 addView(choices, LayoutParams(MATCH, dp((family.faces.size * 48).coerceIn(48, 240))))
                 addView(sample, LayoutParams(MATCH, WRAP))
             })
-            .setNegativeButton(android.R.string.cancel, null)
-            .setPositiveButton(R.string.native_settings_done) { _, _ ->
-                changePlayerPreferences { copy(fontFaceId = family.faces[selected].id) }
-            }.create(), font)
+            .setPositiveButton(R.string.native_settings_done, null).create(), font)
     }
 
     private fun dialogColumn() = LinearLayout(context).apply {
@@ -712,7 +680,7 @@ internal class NativeSettingsView(
             minimumHeight = dp(48)
             isFocusable = true
             contentDescription = context.getString(title)
-            progressTintList = ColorStateList.valueOf(colors.switchOn)
+            progressTintList = ColorStateList.valueOf(colors.accent)
             thumbTintList = progressTintList
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onStartTrackingTouch(seekBar: SeekBar) = Unit
@@ -725,6 +693,7 @@ internal class NativeSettingsView(
 
         init {
             orientation = VERTICAL
+            setPaddingRelative(dp(12), dp(4), dp(12), 0)
             addView(LinearLayout(context).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 addView(label(title, size = 15), LayoutParams(0, WRAP, 1f))
@@ -768,130 +737,57 @@ internal class NativeSettingsView(
         addView(child, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL))
     }
 
-    private fun section(title: Int, vararg rows: View): LinearLayout = LinearLayout(context).apply {
-        orientation = VERTICAL
-        layoutParams = LayoutParams(MATCH, WRAP).apply { bottomMargin = dp(18) }
-        addView(label(title, size = 15, color = colors.secondary, bold = true).apply {
-            setPadding(dp(12), dp(3), dp(12), dp(6))
-            if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
-        }, LayoutParams(MATCH, WRAP))
-        val card = LinearLayout(context).apply {
-            orientation = VERTICAL
-            background = shape(colors.card, 20)
-            setPadding(dp(12), dp(4), dp(12), dp(4))
-            rows.forEach { row ->
-                addView(row, LayoutParams(MATCH, WRAP).apply { topMargin = dp(2); bottomMargin = dp(2) })
-            }
+    private fun section(title: Int?, vararg rows: View) = colors.section(title, *rows)
+
+    private fun label(id: Int? = null, size: Int, color: Int = colors.text): TextView = colors.label(id, size, color).apply {
+        setPaddingRelative(dp(4), dp(6), dp(4), dp(6))
+    }
+
+    private fun note(id: Int? = null, size: Int, color: Int = colors.text): TextView = colors.label(id, size, color).apply {
+        setPaddingRelative(dp(16), dp(14), dp(16), dp(14))
+    }
+
+    private fun toggle(id: Int, onChanged: (Boolean) -> Unit): Switch = colors.toggle(id) { enabled ->
+        if (!binding) onChanged(enabled)
+    }
+
+    private fun dp(value: Int) = colors.dp(value)
+
+    private inner class SettingsTab(item: NativeSettingsPage) : FrameLayout(context) {
+        val button = colors.action(item.title) { selectPage(item) }.apply {
+            textSize = 15f
+            gravity = Gravity.CENTER
+            minimumWidth = dp(64)
+            maxLines = 1
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            setPaddingRelative(dp(12), dp(6), dp(12), dp(9))
         }
-        addView(card, LayoutParams(MATCH, WRAP))
-    }
+        private val indicator = View(context).apply {
+            background = colors.shape(colors.accent, 2)
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
 
-    private fun buttonRow(vararg buttons: Button): LinearLayout = LinearLayout(context).apply {
-        orientation = HORIZONTAL
-        buttons.forEachIndexed { index, action ->
-            addView(action, LayoutParams(0, WRAP, 1f).apply { if (index > 0) marginStart = dp(8) })
+        init {
+            addView(button, LayoutParams(MATCH, WRAP))
+            addView(indicator, LayoutParams(dp(23), dp(3), Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL))
+        }
+
+        fun bind(selected: Boolean) {
+            button.isSelected = selected
+            button.setTextColor(if (selected) colors.accent else colors.secondary)
+            indicator.visibility = if (selected) VISIBLE else INVISIBLE
         }
     }
-
-    private fun label(id: Int? = null, size: Int, color: Int = colors.text, bold: Boolean = false): TextView = TextView(context).apply {
-        if (id != null) setText(id)
-        textSize = size.toFloat()
-        setTextColor(color)
-        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        setPadding(dp(4), dp(6), dp(4), dp(6))
-    }
-
-    private fun button(id: Int, emphasized: Boolean = false, action: () -> Unit): Button = Button(context).apply {
-        setText(id)
-        textSize = 15f
-        setTextColor(ColorStateList(
-            arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-            intArrayOf(colors.disabledText, if (emphasized) colors.actionText else colors.text),
-        ))
-        setAllCaps(false)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        maxLines = 2
-        ellipsize = TextUtils.TruncateAt.END
-        minHeight = dp(48)
-        minimumHeight = dp(48)
-        minWidth = 0
-        minimumWidth = 0
-        setPadding(dp(10), dp(5), dp(10), dp(5))
-        background = interactiveBackground(if (emphasized) colors.action else colors.button)
-        stateListAnimator = null
-        isFocusable = true
-        setOnClickListener { action() }
-    }
-
-    private fun toggle(id: Int, onChanged: (Boolean) -> Unit): Switch = Switch(context).apply {
-        setText(id)
-        textSize = 16f
-        setTextColor(ColorStateList(
-            arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
-            intArrayOf(colors.disabledText, colors.text),
-        ))
-        minHeight = dp(52)
-        setPadding(dp(8), dp(6), dp(8), dp(6))
-        switchPadding = dp(12)
-        showText = false
-        splitTrack = false
-        isFocusable = true
-        background = interactiveBackground(colors.card)
-        thumbTintList = checkedColors(colors.thumbOn, colors.thumbOff, colors.trackOff)
-        trackTintList = checkedColors(colors.switchOn, colors.trackOff, colors.button)
-        setOnCheckedChangeListener { _, enabled -> if (!binding) onChanged(enabled) }
-    }
-
-    private fun checkedColors(on: Int, off: Int, disabled: Int) = ColorStateList(
-        arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf(android.R.attr.state_checked), intArrayOf()),
-        intArrayOf(disabled, on, off),
-    )
-
-    private fun interactiveBackground(fill: Int) = RippleDrawable(
-        ColorStateList.valueOf(colors.ripple),
-        StateListDrawable().apply {
-            addState(intArrayOf(android.R.attr.state_focused), shape(fill, 12, colors.focus))
-            addState(intArrayOf(), shape(fill, 12))
-        },
-        shape(-1, 12),
-    )
-
-    private fun shape(fill: Int, radius: Int, stroke: Int? = null) = GradientDrawable().apply {
-        setColor(fill)
-        cornerRadius = dp(radius).toFloat()
-        if (stroke != null) setStroke(dp(2), stroke)
-    }
-
-    private fun dp(value: Int) = (value * resources.displayMetrics.density).roundToInt()
 
     private class SettingsColumn(context: Context) : LinearLayout(context) {
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            val cap = (560 * resources.displayMetrics.density).roundToInt()
+            val cap = (620 * resources.displayMetrics.density).roundToInt()
             val width = when (MeasureSpec.getMode(widthMeasureSpec)) {
                 MeasureSpec.UNSPECIFIED -> cap
                 else -> MeasureSpec.getSize(widthMeasureSpec).coerceAtMost(cap)
             }
             super.onMeasure(MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY), heightMeasureSpec)
         }
-    }
-
-    private class SettingsColors(context: Context) {
-        private val night = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
-        val background = if (night) 0xFF141416.toInt() else 0xFFF2F2F7.toInt()
-        val card = if (night) 0xFF222225.toInt() else 0xFFFFFFFF.toInt()
-        val button = if (night) 0xFF303037.toInt() else 0xFFECECF1.toInt()
-        val text = if (night) 0xFFF6F6FA.toInt() else 0xFF19191C.toInt()
-        val secondary = if (night) 0xFFB7B7C2.toInt() else 0xFF5E5E69.toInt()
-        val warning = if (night) 0xFFFFBB89.toInt() else 0xFF993D1A.toInt()
-        val disabledText = if (night) 0xFF9D9DA5.toInt() else 0xFF6F6F7B.toInt()
-        val action = if (night) 0xFF18416C.toInt() else 0xFFDFECFF.toInt()
-        val actionText = if (night) 0xFFE5F1FF.toInt() else 0xFF074A95.toInt()
-        val focus = if (night) 0xFF9ACCFF.toInt() else 0xFF1260AF.toInt()
-        val ripple = if (night) 0x30FFFFFF else 0x22000000
-        val thumbOn = 0xFFFFFFFF.toInt()
-        val thumbOff = if (night) 0xFFEBEBEF.toInt() else 0xFFFFFFFF.toInt()
-        val trackOff = if (night) 0xFF626268.toInt() else 0xFF73737E.toInt()
-        val switchOn = if (night) 0xFF53A3FF.toInt() else 0xFF1460B9.toInt()
     }
 
     private companion object {

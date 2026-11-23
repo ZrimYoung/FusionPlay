@@ -9,17 +9,15 @@
     <string name="native_settings_connected">已连接</string>
     <string name="native_settings_waiting">等待投送</string>
     <string name="native_settings_protocols_off">全部接收协议已关闭</string>
+    <string name="native_settings_device">设备</string>
     <string name="native_settings_device_name">设备名称</string>
     <string name="native_settings_default_name">使用默认名称</string>
-    <string name="native_settings_edit_name">编辑名称，%1$s</string>
-    <string name="native_settings_apply_name">保存名称</string>
     <string name="native_settings_reset_name">恢复默认</string>
     <string name="native_settings_protocols">接收协议</string>
     <string name="native_settings_miplay">MiPlay 妙播</string>
     <string name="native_settings_airplay">AirPlay</string>
     <string name="native_settings_dlna">DLNA</string>
     <string name="native_settings_identity">妙播设备类型</string>
-    <string name="native_settings_current_identity">妙播设备类型：%1$s</string>
     <string name="native_settings_audio_sync">声音同步校准</string>
     <string name="native_settings_advance_value">提前 %1$d 毫秒</string>
     <string name="native_settings_audio_hint">此设备比其他音响慢时增加。调整时会短暂淡出再恢复。更换输出设备后请重新校准。</string>
@@ -46,7 +44,7 @@
     <string name="native_settings_lyric_stagger_value">%1$d ms</string>
     <string name="native_settings_toolbar">始终显示顶部按钮</string>
     <string name="native_settings_correct_lyric_titles">修正歌词标题</string>
-    <string name="native_settings_about">关于应用</string>
+    <string name="native_settings_about">关于</string>
     <string name="native_settings_version">FusionPlay %1$s</string>
     <string name="native_settings_export">导出日志</string>
     <string name="native_settings_tab_receiver">接收</string>
@@ -58,7 +56,6 @@
     <string name="native_settings_follow_system">跟随系统</string>
     <string name="native_settings_white">白色</string>
     <string name="native_settings_custom_color">自定义颜色</string>
-    <string name="native_settings_custom_color_value">自定义颜色 · %1$s</string>
     <string name="native_settings_hex_color">十六进制颜色</string>
     <string name="native_settings_hex_error">请输入六位十六进制颜色，如 #83BFE3。</string>
     <string name="native_settings_backdrop_blur">封面背景模糊</string>

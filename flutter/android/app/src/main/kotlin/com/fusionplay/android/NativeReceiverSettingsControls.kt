@@ -1,28 +1,25 @@
 package com.fusionplay.android
 
+import android.app.AlertDialog
 import android.content.Context
-import android.content.res.Configuration
-import android.graphics.Color
-import android.graphics.Typeface
-import android.graphics.drawable.GradientDrawable
+import android.content.res.ColorStateList
 import android.os.Build
 import android.text.InputFilter
 import android.text.InputType
 import android.view.Gravity
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
-import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.SeekBar
-import android.widget.Switch
-import android.widget.TextView
 import androidx.core.widget.doAfterTextChanged
 import com.fusionplay.android.FusionPlayRuntime.Companion.SYNC_OFFSET_MAX
 import com.fusionplay.android.FusionPlayRuntime.Companion.SYNC_OFFSET_MIN
-import kotlin.math.roundToInt
 
 internal class NativeReceiverSettingsControls(
     private val context: Context,
@@ -32,117 +29,111 @@ internal class NativeReceiverSettingsControls(
     private val onRefreshDiagnostics: () -> Unit,
     onExportLogs: () -> Unit,
 ) {
-    private val dark = context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-        Configuration.UI_MODE_NIGHT_YES
-    private val primary = if (dark) Color.rgb(240, 241, 245) else Color.rgb(24, 25, 29)
-    private val secondary = if (dark) Color.rgb(181, 184, 194) else Color.rgb(81, 85, 95)
+    private val style = NativeSettingsStyle(context)
     private var state: ReceiverUiState? = null
     private var binding = false
     private var trackingOffset = false
+    private var cancelledOffsetGesture = false
     private var offset = 0
+    private var offsetEditor: AlertDialog? = null
     private var lastDiagnostics: NativeReceiverDiagnostics? = null
 
-    private val receiverToggle = button(R.string.native_receiver_start) {
+    private val receiverToggle = style.action(R.string.native_receiver_start) {
         state?.let { onReceiverRunning(!it.receiverRunning) }
     }
-    private val automatic = Switch(context).apply {
-        setText(R.string.native_receiver_auto_open)
-        setTextColor(primary)
-        textSize = 15f
-        minHeight = dp(48)
-        setOnCheckedChangeListener { _, enabled -> if (!binding) onAutoReceiveOnLaunch(enabled) }
+    private val automatic = style.toggle(R.string.native_receiver_auto_open) { enabled ->
+        if (!binding) onAutoReceiveOnLaunch(enabled)
     }
-    private val lanAddress = label()
-    private val lanInterface = label()
-    val receiver: View = column().apply {
-        addView(receiverToggle, rowParams())
-        addView(automatic, rowParams())
-        addView(lanAddress, rowParams())
-        addView(lanInterface, rowParams())
-    }
+    private val lanAddress = ValueRow(R.string.native_receiver_lan_ip)
+    private val lanInterface = ValueRow(R.string.native_receiver_lan_interface)
+    val receiver: View = column().apply { addRows(receiverToggle, automatic, lanAddress, lanInterface) }
 
-    private val enteredOffset = EditText(context).apply {
-        setSingleLine(true)
-        setTextColor(primary)
-        setHintTextColor(secondary)
-        inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
-        imeOptions = EditorInfo.IME_ACTION_DONE
-        filters = arrayOf(InputFilter.LengthFilter(5))
-        gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        contentDescription = context.getString(R.string.native_receiver_sync_numeric)
-        doAfterTextChanged { error = null }
-        setOnEditorActionListener { _, action, _ ->
-            if (action == EditorInfo.IME_ACTION_DONE) {
-                applyEnteredOffset()
-                true
-            } else false
-        }
+    private val offsetRow = style.choice(R.string.native_receiver_sync_numeric, ::editOffset)
+    private val minus = style.action(R.string.native_receiver_sync_earlier) { setOffset(offset - 10) }.apply {
+        gravity = Gravity.CENTER
+        background = style.interactive(style.control)
     }
-    private val applyOffset = button(R.string.native_receiver_sync_apply, ::applyEnteredOffset)
-    private val minus = button(R.string.native_receiver_sync_earlier) { setOffset(offset - 10) }
-    private val plus = button(R.string.native_receiver_sync_later) { setOffset(offset + 10) }
-    private val reset = button(R.string.native_receiver_sync_reset) { setOffset(0) }
+    private val plus = style.action(R.string.native_receiver_sync_later) { setOffset(offset + 10) }.apply {
+        gravity = Gravity.CENTER
+        background = style.interactive(style.control)
+    }
+    private val reset = style.action(R.string.native_receiver_sync_reset) { setOffset(0) }
     private val slider = SeekBar(context).apply {
         max = SYNC_OFFSET_MAX - SYNC_OFFSET_MIN
         keyProgressIncrement = 10
+        minimumHeight = dp(44)
+        setPadding(dp(16), paddingTop, dp(16), paddingBottom)
         contentDescription = context.getString(R.string.native_receiver_sync_title)
+        progressTintList = ColorStateList.valueOf(style.accent)
+        thumbTintList = progressTintList
+        setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> cancelledOffsetGesture = false
+                MotionEvent.ACTION_CANCEL -> cancelledOffsetGesture = true
+            }
+            false
+        }
         setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(bar: SeekBar) { trackingOffset = true }
             override fun onProgressChanged(bar: SeekBar, progress: Int, fromUser: Boolean) {
                 if (!fromUser) return
                 val value = progress + SYNC_OFFSET_MIN
-                if (trackingOffset) bindDraftText(value) else setOffset(value)
+                if (trackingOffset) displayOffset(value, updateSlider = false) else setOffset(value)
             }
             override fun onStopTrackingTouch(bar: SeekBar) {
                 trackingOffset = false
-                setOffset(bar.progress + SYNC_OFFSET_MIN)
+                if (cancelledOffsetGesture) displayOffset(offset) else setOffset(bar.progress + SYNC_OFFSET_MIN)
             }
         })
     }
-    private val outputRoute = label()
-    private val buffer = label()
-    private val latency = label()
-    private val scheduling = label()
-    private val underruns = label()
-    private val recoveries = label()
-    private val synchronization = label()
-    private val coverState = label()
-    private val refresh = button(R.string.native_receiver_refresh_diagnostics, onRefreshDiagnostics)
+    private val outputRoute = ValueRow(R.string.native_receiver_audio_route_system)
+    private val buffer = ValueRow(R.string.native_receiver_audio_buffer)
+    private val latency = ValueRow(R.string.native_receiver_audio_latency_estimate)
+    private val scheduling = ValueRow(R.string.native_receiver_audio_schedule)
+    private val underruns = ValueRow(R.string.native_receiver_audio_underruns)
+    private val recoveries = ValueRow(R.string.native_receiver_audio_recoveries)
+    private val synchronization = ValueRow(R.string.native_receiver_audio_mode)
+    private val coverState = ValueRow(R.string.native_receiver_cover)
+    private val refresh = style.action(R.string.native_receiver_refresh_diagnostics, onClick = onRefreshDiagnostics)
     private val details = column().apply {
         visibility = View.GONE
-        listOf(buffer, latency, scheduling, underruns, recoveries, synchronization, coverState).forEach {
-            addView(it, rowParams())
-        }
+        addRows(buffer, latency, scheduling, underruns, recoveries, synchronization, coverState)
     }
-    private val disclosure = button(R.string.native_receiver_diagnostics_title) {
+    private val disclosure = style.choice(R.string.native_receiver_diagnostics_title, ::toggleDiagnostics)
+
+    private fun toggleDiagnostics() {
         val expanded = details.visibility != View.VISIBLE
         details.visibility = if (expanded) View.VISIBLE else View.GONE
-        if (Build.VERSION.SDK_INT >= 30) disclosureExpanded(expanded)
+        bindDisclosure(expanded)
         if (expanded) onRefreshDiagnostics()
     }
 
     val audio: View = column().apply {
-        addView(section(R.string.native_receiver_sync_title, column().apply {
-            addView(label(R.string.native_receiver_sync_hint), rowParams())
-            addView(horizontal().apply {
-                addView(enteredOffset, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                addView(label(R.string.native_receiver_unit_ms), LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
-                addView(applyOffset, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply { marginStart = dp(8) })
-            }, rowParams())
+        bindDisclosure(expanded = false)
+        val calibration = column().apply {
+            addView(offsetRow, rowParams())
             addView(slider, rowParams())
             addView(horizontal().apply {
-                addView(minus, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                addView(plus, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                setPaddingRelative(dp(16), 0, dp(16), 0)
+                addView(minus, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = dp(4) })
+                addView(plus, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(4) })
             }, rowParams())
-            addView(reset, rowParams())
-        }), rowParams())
-        addView(section(R.string.native_receiver_output_diagnostics, column().apply {
-            addView(outputRoute, rowParams())
+            addView(style.label(R.string.native_receiver_sync_hint, size = 13, color = style.secondary).apply {
+                setPadding(dp(16), dp(6), dp(16), dp(12))
+            }, rowParams())
+        }
+        val diagnostics = column().apply {
             addView(disclosure, rowParams())
             addView(details, rowParams())
-            addView(refresh, rowParams())
-            addView(button(R.string.native_receiver_share_logs, onExportLogs), rowParams())
-        }), rowParams())
+        }
+        addView(style.section(R.string.native_receiver_sync_title, calibration, reset))
+        addView(style.section(R.string.native_receiver_output_diagnostics,
+            outputRoute, diagnostics, refresh, style.action(R.string.native_receiver_share_logs, onClick = onExportLogs),
+        ))
+        addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) = Unit
+            override fun onViewDetachedFromWindow(view: View) { offsetEditor?.dismiss() }
+        })
     }
 
     fun render(ui: ReceiverUiState) {
@@ -159,14 +150,11 @@ internal class NativeReceiverSettingsControls(
             automatic.isChecked = ui.autoReceiveOnLaunch
             binding = false
         }
+        val offsetChanged = offset != ui.miPlaySyncOffsetMs
         offset = ui.miPlaySyncOffsetMs
-        if (!trackingOffset && previous?.miPlaySyncOffsetMs != offset) {
-            slider.progress = offset - SYNC_OFFSET_MIN
-            if (!enteredOffset.hasFocus() || previous == null) bindDraftText(offset)
-        }
+        if (!trackingOffset && (previous == null || offsetChanged)) displayOffset(offset)
         slider.isEnabled = enabled
-        enteredOffset.isEnabled = enabled
-        applyOffset.isEnabled = enabled
+        offsetRow.isEnabled = enabled
         minus.isEnabled = enabled && offset > SYNC_OFFSET_MIN
         plus.isEnabled = enabled && offset < SYNC_OFFSET_MAX
         reset.isEnabled = enabled && offset != 0
@@ -175,63 +163,110 @@ internal class NativeReceiverSettingsControls(
         if (lastDiagnostics == measurements) return
         lastDiagnostics = measurements
         val unavailable = context.getString(R.string.native_receiver_unavailable)
-        lanAddress.text = context.getString(R.string.native_receiver_lan_ip, measurements.lanAddress ?: unavailable)
-        lanInterface.text = context.getString(R.string.native_receiver_lan_interface, measurements.lanInterface ?: unavailable)
+        lanAddress.value = measurements.lanAddress ?: unavailable
+        lanInterface.value = measurements.lanInterface ?: unavailable
         val routeTitle = if (measurements.audioRouteObserved) R.string.native_receiver_audio_route_active
             else R.string.native_receiver_audio_route_system
-        outputRoute.text = context.getString(routeTitle, measurements.audioRoute ?: unavailable)
-        buffer.text = metric(R.string.native_receiver_audio_buffer, measurements.bufferedFrames?.div(48.0))
+        outputRoute.setTitle(routeTitle)
+        outputRoute.value = measurements.audioRoute ?: unavailable
+        buffer.value = metric(measurements.bufferedFrames?.div(48.0))
         val latencyFormat = if (measurements.endpointLatencyCalibrated == true) R.string.native_receiver_audio_latency
             else R.string.native_receiver_audio_latency_estimate
-        latency.text = metric(latencyFormat, measurements.outputLatencyMs)
-        scheduling.text = metric(R.string.native_receiver_audio_schedule, measurements.scheduleErrorMs)
-        underruns.text = context.getString(R.string.native_receiver_audio_underruns, measurements.underrunCallbacks?.toString() ?: unavailable)
-        recoveries.text = context.getString(R.string.native_receiver_audio_recoveries, measurements.outputRecoveries)
-        val mode = when (measurements.synchronizationMode) {
+        latency.setTitle(latencyFormat)
+        latency.value = metric(measurements.outputLatencyMs)
+        scheduling.value = metric(measurements.scheduleErrorMs)
+        underruns.value = measurements.underrunCallbacks?.toString() ?: unavailable
+        recoveries.value = measurements.outputRecoveries.toString()
+        synchronization.value = when (measurements.synchronizationMode) {
             "sender_clock" -> context.getString(R.string.native_receiver_sync_sender_clock)
             "buffer_window" -> context.getString(R.string.native_receiver_sync_buffer_window)
             else -> unavailable
         }
-        synchronization.text = context.getString(R.string.native_receiver_audio_mode, mode)
         val artwork = if (measurements.coverAvailable) R.string.native_receiver_cover_received else R.string.native_receiver_cover_missing
-        coverState.text = context.getString(R.string.native_receiver_cover, context.getString(artwork))
+        coverState.value = context.getString(artwork)
     }
 
-    private fun disclosureExpanded(expanded: Boolean) {
-        disclosure.stateDescription = context.getString(
+    private fun bindDisclosure(expanded: Boolean) {
+        disclosure.setValue(context.getString(
             if (expanded) R.string.native_receiver_diagnostics_open else R.string.native_receiver_diagnostics_closed,
-        )
+        ))
     }
 
-    private fun metric(template: Int, milliseconds: Double?): String = context.getString(
-        template,
-        milliseconds?.let { context.getString(R.string.native_receiver_ms_value, it) }
-            ?: context.getString(R.string.native_receiver_unavailable),
-    )
-
-    private fun applyEnteredOffset() {
-        val value = enteredOffset.text.toString().trim().toIntOrNull()
-        if (value == null || value !in SYNC_OFFSET_MIN..SYNC_OFFSET_MAX) {
-            enteredOffset.error = context.getString(R.string.native_receiver_sync_range, SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)
-            return
-        }
-        enteredOffset.clearFocus()
-        setOffset(value)
-    }
+    private fun metric(milliseconds: Double?): String = milliseconds?.let { context.getString(R.string.native_receiver_ms_value, it) }
+        ?: context.getString(R.string.native_receiver_unavailable)
 
     private fun setOffset(value: Int) {
+        if (state?.state?.let { it.initialized && !it.busy } != true) {
+            displayOffset(offset)
+            return
+        }
         val clamped = value.coerceIn(SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)
-        bindDraftText(clamped)
-        if (slider.progress != clamped - SYNC_OFFSET_MIN) slider.progress = clamped - SYNC_OFFSET_MIN
+        displayOffset(clamped)
         if (clamped != offset) onSyncOffset(clamped)
     }
 
-    private fun bindDraftText(value: Int) {
-        val text = value.toString()
-        if (enteredOffset.text.toString() != text) enteredOffset.setText(text)
+    private fun displayOffset(value: Int, updateSlider: Boolean = true) {
+        val formatted = context.getString(R.string.native_receiver_signed_ms_value, value)
+        offsetRow.setValue(formatted)
+        if (updateSlider && slider.progress != value - SYNC_OFFSET_MIN) slider.progress = value - SYNC_OFFSET_MIN
         if (Build.VERSION.SDK_INT >= 30) {
-            slider.stateDescription = context.getString(R.string.native_receiver_signed_ms_value, value)
+            slider.stateDescription = formatted
+        } else {
+            slider.contentDescription = context.getString(R.string.native_settings_text_value,
+                context.getString(R.string.native_receiver_sync_title), formatted)
         }
+    }
+
+    private fun editOffset() {
+        if (!offsetRow.isEnabled || offsetEditor != null) return
+        val field = EditText(context).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED
+            imeOptions = EditorInfo.IME_ACTION_DONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+            filters = arrayOf(InputFilter.LengthFilter(5))
+            setTextColor(style.text)
+            setText(offset.toString())
+            contentDescription = context.getString(R.string.native_receiver_sync_numeric)
+            doAfterTextChanged { error = null }
+        }
+        val editor = AlertDialog.Builder(context)
+            .setTitle(R.string.native_receiver_sync_numeric)
+            .setView(column().apply {
+                setPadding(dp(24), dp(4), dp(24), 0)
+                addView(field, rowParams())
+            })
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.native_settings_done, null)
+            .create()
+        fun completeInput() {
+            if (offsetEditor !== editor) return
+            val value = field.text.toString().trim().toIntOrNull()
+            if (value == null || value !in SYNC_OFFSET_MIN..SYNC_OFFSET_MAX) {
+                field.error = context.getString(R.string.native_receiver_sync_range, SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)
+                return
+            }
+            offsetEditor = null
+            setOffset(value)
+            editor.dismiss()
+        }
+        field.setOnEditorActionListener { _, action, event ->
+            val hardwareDone = event?.let { it.keyCode == KeyEvent.KEYCODE_ENTER && it.action == KeyEvent.ACTION_UP } == true
+            val done = action == EditorInfo.IME_ACTION_DONE || hardwareDone
+            if (done) completeInput()
+            done
+        }
+        editor.setOnShowListener {
+            editor.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener { completeInput() }
+            field.requestFocus()
+            field.selectAll()
+            editor.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE)
+        }
+        editor.setOnDismissListener {
+            if (offsetEditor === editor) offsetEditor = null
+            if (offsetRow.isShown && offsetRow.isEnabled && !offsetRow.isInTouchMode) offsetRow.requestFocus()
+        }
+        offsetEditor = editor
+        editor.show()
     }
 
     private fun column(): LinearLayout = LinearLayout(context).apply { orientation = LinearLayout.VERTICAL }
@@ -241,35 +276,46 @@ internal class NativeReceiverSettingsControls(
         gravity = Gravity.CENTER_VERTICAL
     }
 
-    private fun button(id: Int, action: () -> Unit) = Button(context).apply {
-        setText(id)
-        isAllCaps = false
-        setOnClickListener { action() }
+    private fun LinearLayout.addRows(vararg rows: View) {
+        rows.forEachIndexed { index, row ->
+            if (index != 0) addView(View(context).apply {
+                setBackgroundColor(style.divider)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }, LinearLayout.LayoutParams(MATCH_PARENT, 1).apply {
+                marginStart = dp(16)
+                marginEnd = dp(16)
+            })
+            addView(row, rowParams())
+        }
     }
 
-    private fun label(id: Int? = null) = TextView(context).apply {
-        if (id != null) setText(id)
-        textSize = 14f
-        setTextColor(secondary)
-        setPadding(dp(4), dp(4), dp(4), dp(4))
-    }
+    private inner class ValueRow(titleId: Int) : LinearLayout(context) {
+        private val title = style.label(titleId, size = 15)
+        private val valueLabel = style.label(size = 14, color = style.secondary).apply { gravity = Gravity.END }
+        private var currentTitleId = titleId
 
-    private fun section(id: Int, content: View): View = column().apply {
-        addView(label(id).apply {
-            setPadding(dp(12), dp(4), dp(12), dp(6))
-            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-            if (Build.VERSION.SDK_INT >= 28) isAccessibilityHeading = true
-        }, rowParams())
-        addView(content.apply {
-            background = GradientDrawable().apply {
-                setColor(if (dark) Color.rgb(37, 39, 47) else Color.rgb(247, 247, 251))
-                cornerRadius = dp(20).toFloat()
-            }
-            setPadding(dp(12), dp(5), dp(12), dp(7))
-        }, rowParams().apply { bottomMargin = dp(16) })
+        var value: CharSequence
+            get() = valueLabel.text
+            set(text) { if (valueLabel.text != text) valueLabel.text = text }
+
+        init {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = dp(52)
+            setPaddingRelative(dp(16), dp(10), dp(16), dp(10))
+            if (Build.VERSION.SDK_INT >= 28) isScreenReaderFocusable = true
+            addView(title, LayoutParams(0, WRAP_CONTENT, 1.2f).apply { marginEnd = dp(12) })
+            addView(valueLabel, LayoutParams(0, WRAP_CONTENT, 1f))
+        }
+
+        fun setTitle(id: Int) {
+            if (currentTitleId == id) return
+            currentTitleId = id
+            title.setText(id)
+        }
     }
 
     private fun rowParams() = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
 
-    private fun dp(value: Int): Int = (value * context.resources.displayMetrics.density).roundToInt()
+    private fun dp(value: Int): Int = style.dp(value)
 }

@@ -9,17 +9,15 @@
     <string name="native_settings_connected">Connected</string>
     <string name="native_settings_waiting">Waiting to cast</string>
     <string name="native_settings_protocols_off">All receiver protocols are off</string>
+    <string name="native_settings_device">Device</string>
     <string name="native_settings_device_name">Device name</string>
     <string name="native_settings_default_name">Use default name</string>
-    <string name="native_settings_edit_name">Edit name, %1$s</string>
-    <string name="native_settings_apply_name">Save name</string>
     <string name="native_settings_reset_name">Restore default</string>
     <string name="native_settings_protocols">Receiver protocols</string>
     <string name="native_settings_miplay">MiPlay</string>
     <string name="native_settings_airplay">AirPlay</string>
     <string name="native_settings_dlna">DLNA</string>
     <string name="native_settings_identity">MiPlay device type</string>
-    <string name="native_settings_current_identity">MiPlay device type: %1$s</string>
     <string name="native_settings_audio_sync">Audio sync calibration</string>
     <string name="native_settings_advance_value">Advance %1$d ms</string>
     <string name="native_settings_audio_hint">Increase this if the receiver is behind other speakers. Recalibrate when the audio output changes.</string>
@@ -58,7 +56,6 @@
     <string name="native_settings_follow_system">Follow system</string>
     <string name="native_settings_white">White</string>
     <string name="native_settings_custom_color">Custom color</string>
-    <string name="native_settings_custom_color_value">Custom color · %1$s</string>
     <string name="native_settings_hex_color">Hex color</string>
     <string name="native_settings_hex_error">Enter a six-digit hex color, such as #83BFE3.</string>
     <string name="native_settings_backdrop_blur">Artwork background blur</string>
