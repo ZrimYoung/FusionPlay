@@ -34,6 +34,7 @@ public sealed class LyricsRowPresenter : Button
     private GlyphPlane? plane, sparePlane, outgoingPlane;
     private ContainerVisual? planesVisual;
     private InsetClip? resizeClip;
+    private float resizeBottomInset;
     private LyricsGlyphReflow? glyphReflow;
     private DispatcherQueueTimer? wrapTimer;
     private long wrapDeadline, wrapTransitionsStarted, glyphReflowTransitionsStarted;
@@ -109,6 +110,8 @@ public sealed class LyricsRowPresenter : Button
             if (args.NewSize.Width != args.PreviousSize.Width || args.NewSize.Height != args.PreviousSize.Height)
                 InvalidateGlyphs(widthResize: args.NewSize.Width != args.PreviousSize.Width || resizeUploadDeadline != 0 && !urgentGlyphs);
             if (item?.Owner.InteractiveResize != true) UpdateEdge();
+            else if (resizeClip != null && args.NewSize.Height != args.PreviousSize.Height)
+                RefreshResizeClip();
         };
         Click += (_, _) => { if (item is { } current) current.Owner.RequestSeek(current); };
     }
@@ -266,26 +269,43 @@ public sealed class LyricsRowPresenter : Button
     {
         nextLiveGlyphUpload = 0;
         FinishWrap(queueDraw: false);
-        try { SetResizeClip(true); }
+        RefreshResizeClip();
+    }
+    private void RefreshResizeClip()
+    {
+        try { UpdateResizeClip(resizing: true); }
         catch (Exception error) when (error is COMException or ObjectDisposedException) { faulted = true; NativeFallback(); }
     }
     private void UpdateResizeClip(bool resizing)
-        => SetResizeClip(resizing || resizeClip != null && (glyphsDirty || outgoingPlane != null));
-
-    private void SetResizeClip(bool active)
     {
-        if (planesVisual == null || (resizeClip != null) == active) return;
-        if (active)
+        if (planesVisual == null || item is not { } row) return;
+        bool active = resizing || resizeClip != null && (glyphsDirty || outgoingPlane != null);
+        if (!active)
         {
-            // The old line breaks can outgrow the newly measured row. Clip the
-            // cached pixels to the row without scaling the glyphs.
-            resizeClip = planesVisual.Compositor.CreateInsetClip();
-            planesVisual.Clip = resizeClip;
-        }
-        else
-        {
+            if (resizeClip == null) return;
             planesVisual.Clip = null;
-            resizeClip?.Dispose(); resizeClip = null;
+            resizeClip.Dispose(); resizeClip = null;
+            return;
+        }
+
+        // The clip runs after the blur. Include the existing transparent halo
+        // around the text box so its feather doesn't end at a hard edge.
+        float bleed = (float)row.Owner.Bleed;
+        double paintedHeight = Math.Max(plane?.ContentHeight ?? 0, outgoingPlane?.ContentHeight ?? 0);
+        // During rewrap an older layout can still be taller than the row. Let
+        // its lower halo extend into the gap, stopping before the next row.
+        float bottomInset = paintedHeight > overlay.ActualHeight + .5
+            ? -(float)Math.Min(bleed, content.Padding.Bottom + Margin.Bottom * .5) : -bleed;
+        if (resizeClip == null)
+        {
+            resizeClip = planesVisual.Compositor.CreateInsetClip(-bleed, -bleed, -bleed, bottomInset);
+            planesVisual.Clip = resizeClip;
+            resizeBottomInset = bottomInset;
+        }
+        else if (resizeBottomInset != bottomInset)
+        {
+            resizeClip.BottomInset = bottomInset;
+            resizeBottomInset = bottomInset;
         }
     }
     private void NativeFallback()

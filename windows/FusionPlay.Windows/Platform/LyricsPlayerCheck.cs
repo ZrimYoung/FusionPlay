@@ -5,6 +5,7 @@ using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Text;
 using System.Text.Json;
 using FusionPlay.Core;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
@@ -575,6 +576,7 @@ internal static class LyricsPlayerCheck
             double initialTextHeight = 0, anchorTop = 0, maximumAnchorDrift = 0;
             double? initialGlyphHeight = null;
             int liveSamples = 0, blurSamples = 0;
+            int paddedBlurRows = 0, leftFeatherPixels = 0, rightFeatherPixels = 0;
             NativeRect originalWindow = default;
             double rasterScale = 1, windowAspect = 1;
             int frameWidth = 0, frameHeight = 0;
@@ -607,6 +609,49 @@ internal static class LyricsPlayerCheck
                     "resize_font_metadata_surface_changed_during_hold");
                 Require(row!.CachedPlaneCount <= 2, "native_resize_exceeded_two_glyph_planes");
                 if (HasBlur(view!)) blurSamples++;
+            }
+
+            void CheckBlurFeather()
+            {
+                var activeView = view!;
+                if (!activeView.EffectsEnabled) return;
+                double bleed = activeView.Bleed;
+                foreach (var candidate in Descendants(activeView).OfType<LyricsRowPresenter>())
+                {
+                    if (!candidate.UsesCompositionSurface || Field(candidate, "appliedEdgeRadius") is not double radius || radius <= .5
+                        || Field(candidate, "resizeClip") is not InsetClip clip
+                        || Field(candidate, "overlay") is not FrameworkElement overlay
+                        || Field(candidate, "appliedSurfaceTop") is not double surfaceTop
+                        || Field(candidate, "appliedViewportHeight") is not double viewportHeight) continue;
+
+                    Require(Math.Abs(clip.LeftInset + bleed) <= .1 && Math.Abs(clip.RightInset + bleed) <= .1
+                        && Math.Abs(clip.TopInset + bleed) <= .1 && clip.BottomInset <= 0 && clip.BottomInset >= -bleed,
+                        "native_resize_blur_soft_edges_hard_clipped");
+                    var origin = overlay.TransformToVisual(Root()).TransformPoint(new Point());
+                    Require(origin.X + clip.LeftInset >= -1 && origin.X + overlay.ActualWidth - clip.RightInset <= Root().ActualWidth + 1,
+                        "native_resize_blur_guard_exceeds_window");
+                    paddedBlurRows++;
+
+                    using var capture = candidate.CaptureForCheck();
+                    if (capture == null) continue;
+                    int width = checked((int)capture.SizeInPixels.Width), height = checked((int)capture.SizeInPixels.Height);
+                    double scale = width / capture.Size.Width;
+                    byte[] pixels = capture.GetPixelBytes();
+                    for (int y = 0; y < height; y++)
+                    {
+                        double viewY = surfaceTop + (y + .5) / scale;
+                        int index = (y * width * 4) + 3;
+                        for (int x = 0; x < width; x++, index += 4)
+                        {
+                            if (pixels[index] <= 2) continue;
+                            Require(viewY >= -1 && viewY <= viewportHeight + 1, "native_resize_blur_escaped_vertical_viewport_mask");
+                            double localX = (x + .5) / scale - bleed;
+                            if (localX >= clip.LeftInset && localX < 0) leftFeatherPixels++;
+                            if (localX > overlay.ActualWidth && localX <= overlay.ActualWidth - clip.RightInset) rightFeatherPixels++;
+                        }
+                    }
+                }
+                Require(paddedBlurRows > 0 && leftFeatherPixels + rightFeatherPixels > 0, "native_resize_blur_no_pixels_in_feather_allowance");
             }
             try
             {
@@ -670,6 +715,7 @@ internal static class LyricsPlayerCheck
                     Require(((TextBlock)Field(row!, "original")!).ActualHeight > initialTextHeight + 2, "native_resize_narrower_measurement_did_not_wrap");
                     Require(!composition || measuredNarrowGlyphs, "native_resize_froze_the_old_glyphs_until_release");
                     Require(!view!.EffectsEnabled || blurSamples > 1, "resize_font_edge_blur_disappeared_during_hold");
+                    CheckBlurFeather();
                     transitionsBeforeRelease = row!.WrapTransitionsStarted;
                     // Change to a differently wrapped width and release in one
                     // UI turn, before the scheduled live redraw can run.
@@ -704,6 +750,7 @@ internal static class LyricsPlayerCheck
                 SampleAnchor();
                 animationSamples.Add(new { stage = "native_resize_typography", composition, enhanced_metadata = enhancedMetadata,
                     edge_blur_maintained = blurSamples > 1, checked_widths = widths, maximum_anchor_drift = maximumAnchorDrift,
+                    padded_blur_rows = paddedBlurRows, left_feather_pixels = leftFeatherPixels, right_feather_pixels = rightFeatherPixels,
                     reading_anchor_samples = liveSamples, final_wrap_motion_expected = expectWrapMotion, observed_final_wrap = observedFinalWrap,
                     originalStyle.Family, originalStyle.Weight, size_during_hold = originalStyle.Size, size_after_release = settled.Size,
                     rasterizations_during_hold = glyphsDuringHold, added_rasterizations_after_release = active.GlyphRasterizations - glyphs - glyphsDuringHold });
