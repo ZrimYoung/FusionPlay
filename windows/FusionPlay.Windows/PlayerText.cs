@@ -13,7 +13,7 @@ using FusionPlay.Windows.Platform;
 namespace FusionPlay.Windows;
 
 /// <summary>Native XAML measurement/accessibility with a DPI-matched DirectWrite
-/// surface. A native TextBlock remains the fallback for high contrast or device loss.</summary>
+/// surface. A native TextBlock also supports live resize, high contrast and device loss.</summary>
 public sealed class PlayerText : UserControl
 {
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(nameof(Text), typeof(string), typeof(PlayerText), new PropertyMetadata("", Changed));
@@ -33,7 +33,7 @@ public sealed class PlayerText : UserControl
     private XamlRoot? subscribedRoot;
     private double surfaceWidth, surfaceHeight, surfaceDpi;
     private double rootScale;
-    private bool enhanced = true, queued, renderFaulted, attached;
+    private bool enhanced = true, queued, renderFaulted, attached, interactiveResize;
     internal bool Enhanced { get => enhanced; set { if (enhanced == value) return; enhanced = value; Refresh(); } }
     internal bool UsesEnhancedSurface => image.Visibility == Visibility.Visible;
 
@@ -91,15 +91,23 @@ public sealed class PlayerText : UserControl
         measurement.CharacterSpacing = CharacterSpacing;
         if (Foreground != null) measurement.Foreground = Foreground;
     }
+    internal void SetInteractiveResize(bool active)
+    {
+        if (interactiveResize == active) return;
+        interactiveResize = active;
+        if (active) NativeFallback();
+        else QueueDraw();
+    }
     private void QueueDraw()
     {
-        if (!attached || queued) return;
+        if (!attached || queued || interactiveResize) return;
         queued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { queued = false; if (attached) Draw(); });
     }
     private void NativeFallback() { measurement.Opacity = 1; image.Visibility = Visibility.Collapsed; }
     internal bool RenderForCheck() { Draw(allowUnloaded: true); return UsesEnhancedSurface; }
     private void Draw(bool allowUnloaded = false)
     {
+        if (interactiveResize) return;
         if ((!attached && !allowUnloaded) || !enhanced || accessibility.HighContrast || renderFaulted || Text.Length == 0)
         { NativeFallback(); return; }
         double width = ActualWidth, height = ActualHeight, dpi = 96 * (XamlRoot?.RasterizationScale ?? 1);

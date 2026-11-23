@@ -15,6 +15,7 @@ internal interface ISquareWindow : IDisposable
     void RememberLyricsPaneHeight();
     double PreferredLyricsHeight(double width);
     event Action? MoveSizeStarted;
+    event Action? ResizeStarted;
     event Action? MoveSizeEnded;
 }
 
@@ -121,9 +122,11 @@ internal static class WindowSizing
         private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
+        private bool inResize, regionRefreshDeferred;
         private bool lyricsVisible, compactPaging, fullScreen, expandLyrics, layoutTransition;
         private double? preferredLyricsPaneHeight;
         public event Action? MoveSizeStarted;
+        public event Action? ResizeStarted;
         public event Action? MoveSizeEnded;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
@@ -159,13 +162,13 @@ internal static class WindowSizing
                 BeginMoveSize();
                 if (GetClientRect(handle, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
             }
-            if (message == 0x0214 && GetClientRect(handle, out var client))
+            if (message == 0x0214 && !fullScreen && GetClientRect(handle, out var client)) // WM_SIZING
             {
+                BeginResize();
                 // The OS applies this one rectangle during manual resize. No second
                 // WINDOWPOS correction, position clamping, or queued resize runs here.
                 var next = Marshal.PtrToStructure<Rect>(pointer); var frame = Frame(handle);
                 int width = Width(next) - frame.Width, height = Height(next) - frame.Height;
-                if (fullScreen) return DefSubclassProc(handle, message, argument, pointer);
                 if (UsesLyricsGeometry(lyricsVisible, compactPaging, width / Scale(handle)))
                 {
                     if (width < Math.Ceiling(600 * Scale(handle)))
@@ -229,15 +232,23 @@ internal static class WindowSizing
             try { MoveSizeStarted?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
         }
+        private void BeginResize()
+        {
+            if (!inMoveSize || inResize) return;
+            inResize = true;
+            try { ResizeStarted?.Invoke(); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+        }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
             => EndMoveSize();
         private void EndMoveSize()
         {
             if (!inMoveSize) return;
-            inMoveSize = false; resizeStartWidth = resizeStartHeight = 0;
+            inMoveSize = inResize = false; resizeStartWidth = resizeStartHeight = 0;
             RememberLyricsPaneHeight(); QueueSettlement(); SetHover(CursorIsOverWindow());
             try { MoveSizeEnded?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+            if (regionRefreshDeferred) QueueRegionRefresh(force: true);
         }
         public void RememberLyricsPaneHeight()
         {
@@ -262,6 +273,7 @@ internal static class WindowSizing
         {
             paging &= lyrics;
             if (disposed || lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen) return;
+            bool fullscreenChanged = fullScreen != fullscreen;
             if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging)) RememberLyricsPaneHeight();
             expandLyrics |= !inMoveSize && (!lyricsVisible || compactPaging) && lyrics && !paging && !fullscreen;
             lyricsVisible = lyrics; compactPaging = paging; fullScreen = fullscreen;
@@ -273,7 +285,7 @@ internal static class WindowSizing
                 presenter.PreferredMinimumWidth = fullscreen ? 0 : (int)Math.Ceiling(260 * Scale(hwnd));
                 presenter.PreferredMinimumHeight = fullscreen ? 0 : (int)Math.Ceiling(260 * Scale(hwnd));
             }
-            RefreshRegions(force: true);
+            RefreshRegions(force: true, allowDuringResize: fullscreenChanged);
             if (!fullscreen) QueueSettlement(force: true);
         }
         public void SetLayoutTransition(bool active)
@@ -285,7 +297,13 @@ internal static class WindowSizing
         private void QueueRegionRefresh(bool force = false)
         {
             if (disposed || regionRefreshQueued) return;
-            if (!force && GetClientRect(hwnd, out var client) && Width(client) == regionWidth && Height(client) == regionHeight) return;
+            // The system owns the active sizing border until the modal loop exits.
+            if (inResize && !fullScreen)
+            {
+                regionRefreshDeferred = true;
+                return;
+            }
+            if (!force && !regionRefreshDeferred && GetClientRect(hwnd, out var client) && Width(client) == regionWidth && Height(client) == regionHeight) return;
             regionRefreshQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
             {
@@ -293,11 +311,18 @@ internal static class WindowSizing
                 if (!disposed) RefreshRegions();
             })) regionRefreshQueued = false;
         }
-        private void RefreshRegions(bool force = false)
+        private void RefreshRegions(bool force = false, bool allowDuringResize = false)
         {
-            if (disposed || IsIconic(hwnd) || !GetClientRect(hwnd, out var client)) return;
+            if (disposed) return;
+            if (inResize && !fullScreen && !allowDuringResize)
+            {
+                regionRefreshDeferred = true;
+                return;
+            }
+            if (IsIconic(hwnd) || !GetClientRect(hwnd, out var client)) return;
             int width = Width(client), height = Height(client);
-            if (width < 1 || height < 1 || !force && width == regionWidth && height == regionHeight) return;
+            if (width < 1 || height < 1 || !force && !regionRefreshDeferred && width == regionWidth && height == regionHeight) return;
+            regionRefreshDeferred = false;
             regionWidth = width; regionHeight = height;
             if (fullScreen)
             {
@@ -401,6 +426,7 @@ internal static class WindowSizing
         {
             if (disposed) return; disposed = true;
             MoveSizeStarted = null;
+            ResizeStarted = null;
             MoveSizeEnded = null;
             try
             {

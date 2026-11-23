@@ -24,7 +24,10 @@ internal static class LyricsPerformanceCheck
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out NativeRect rect);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out NativeRect rect);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] private static extern nint SendMessage(nint window, uint message, nuint argument, nint data);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] private static extern nint SendSizing(nint window, uint message, nuint argument, ref NativeRect rect);
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private readonly record struct TickSample(int Index, double ProducerLatenessMs, double QueueDelayMs, double ActionMs, double Width, double Height);
     private sealed class CheckFailure(string code) : Exception(code);
@@ -220,6 +223,20 @@ internal static class LyricsPerformanceCheck
             // This pause separates scenarios and is intentionally outside their metrics.
             await Task.Delay(180);
         }
+        async Task MeasureResize(string name, LyricsView view, Action<int> resize)
+        {
+            await OnUi(queue!, () =>
+            {
+                Background();
+                Require(GetWindowRect(mainHwnd, out var bounds), "performance_native_resize_bounds_missing");
+                // Enter the native border-resize path on this hidden HWND before
+                // delivering the same stream of size changes on every build.
+                _ = SendMessage(mainHwnd, 0x0231, 0, 0); // WM_ENTERSIZEMOVE
+                _ = SendSizing(mainHwnd, 0x0214, 8, ref bounds); // WM_SIZING, WMSZ_BOTTOMRIGHT
+            });
+            try { await Measure(name, 150, view, resize); }
+            finally { await OnUi(queue!, () => { _ = SendMessage(mainHwnd, 0x0232, 0, 0); }); }
+        }
 
         try
         {
@@ -265,18 +282,28 @@ internal static class LyricsPerformanceCheck
             await OnUi(queue!, () => Require(controller!.Lyrics.Lines.Count == 300, "performance_synthetic_document_not_ready"));
             await Prepare(420, 640);
             step = "mini_continuous_resize";
-            await Measure(step, 150, View(true), frame =>
+            await MeasureResize(step, View(true), frame =>
             {
                 int width = 390 + (int)Math.Round(Math.Sin(frame * Math.PI / 36) * 60);
                 WindowSizing.ResizeContent(main!, width, width + 180);
             });
             await Prepare(840, 600);
             step = "expanded_continuous_resize";
-            await Measure(step, 150, View(false), frame =>
+            await MeasureResize(step, View(false), frame =>
             {
                 int width = 840 + (int)Math.Round(Math.Sin(frame * Math.PI / 40) * 100), height = 550 + (int)Math.Round(Math.Cos(frame * Math.PI / 40) * 70);
                 WindowSizing.ResizeContent(main!, width, height);
             });
+            await OnUi(queue!, () => controller!.Preferences.Update(controller.Preferences.Value with { LyricsDisplayMode = "never" }));
+            await Prepare(840, 600);
+            step = "cover_only_continuous_resize";
+            await MeasureResize(step, View(false), frame =>
+            {
+                int width = 840 + (int)Math.Round(Math.Sin(frame * Math.PI / 40) * 100);
+                int height = 550 + (int)Math.Round(Math.Cos(frame * Math.PI / 40) * 70);
+                WindowSizing.ResizeContent(main!, width, height);
+            });
+            await OnUi(queue!, () => controller!.Preferences.Update(controller.Preferences.Value with { LyricsDisplayMode = "always" }));
             await Prepare(840, 600);
             step = "source_position_and_automatic_follow";
             await Measure(step, 180, View(false), frame => Publish((ulong)frame * 100));

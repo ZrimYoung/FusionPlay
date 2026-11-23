@@ -20,8 +20,10 @@ internal static class WindowInputCheck
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint window);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint window, out NativeRect rect);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint window, out NativeRect rect);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint window);
     [DllImport("user32.dll")] private static extern nint SendMessage(nint hwnd, uint message, nuint wParam, nint lParam);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")] private static extern nint SendSizing(nint hwnd, uint message, nuint wParam, ref NativeRect bounds);
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
     private sealed class CheckFailure(string code, object? details = null) : Exception { public string Code { get; } = code; public object? Details { get; } = details; }
     private sealed record Sample(double RequestedWidthDips, double RequestedHeightDips, string Mode, int WidthPixels, int HeightPixels, Dictionary<string, int> RegionCounts, long CoveredPixels);
@@ -160,6 +162,31 @@ internal static class WindowInputCheck
                 Require(!motion || !gestureCompletion, "manual_move_completed_cancelled_animation");
                 _ = SendMessage(hwnd, 0x0232, 0, 0);
                 motionSamples.Add(new { name = "own_window_move_message_cancels_animation", gestureCompletion });
+            });
+            step = "native_resize_starts_only_on_sizing";
+            await OnUi(queue!, () =>
+            {
+                RequireBackground();
+                int starts = 0;
+                void Started() => starts++;
+                square!.ResizeStarted += Started;
+                try
+                {
+                    _ = SendMessage(hwnd, 0x0231, 0, 0);
+                    _ = SendMessage(hwnd, 0x0232, 0, 0);
+                    Require(starts == 0, "moving_window_started_resize_mode");
+                    Require(GetWindowRect(hwnd, out var bounds), "native_resize_fixture_bounds_unavailable");
+                    for (int gesture = 1; gesture <= 2; gesture++)
+                    {
+                        _ = SendMessage(hwnd, 0x0231, 0, 0);
+                        _ = SendSizing(hwnd, 0x0214, 8, ref bounds);
+                        _ = SendSizing(hwnd, 0x0214, 8, ref bounds);
+                        Require(starts == gesture, "resize_signal_not_once_per_gesture");
+                        _ = SendMessage(hwnd, 0x0232, 0, 0);
+                    }
+                    motionSamples.Add(new { name = step, starts });
+                }
+                finally { square.ResizeStarted -= Started; }
             });
             step = "controlled_compositor_layout_transition";
             Border? card = null; bool contentComplete = false; int commits = 0, completions = 0;

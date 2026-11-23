@@ -53,6 +53,7 @@ public sealed partial class MainWindow : Window
     private bool? windowActionsShown;
     private long layoutTransitionVersion;
     private bool inputRegionsQueued;
+    private bool interactiveResize;
     private bool pointerInside, focusInside, controlsShown = true, captionShown = true, fullscreenCaptionShown = true, progressShown, lyricsVisible, closed, compact = true, rendering = true, revealMiniRequested;
     private string lyricsTrackId = "", lyricsTitle = "";
     private string preferenceError = "";
@@ -114,6 +115,7 @@ public sealed partial class MainWindow : Window
             [MiniRoot, ExpandedRoot], () => compact ? MiniRoot : ExpandedRoot,
             [(MiniArtworkLayer, CoverFrame), (MiniControlsTransitionLayer, ExpandedDetails)], ClientFrame);
         squareSizing.MoveSizeStarted += WindowMoveSizeStarted;
+        squareSizing.ResizeStarted += WindowResizeStarted;
         squareSizing.MoveSizeEnded += WindowMoveSizeEnded;
         fullScreen = new PlayerFullScreen(this, () => model.Preferences.Value.Pinned,
             active => SetNativePlayerLayout(lyricsVisible, active));
@@ -194,6 +196,7 @@ public sealed partial class MainWindow : Window
             miniLyrics.SeekRequested -= SeekLyric; expandedLyrics.SeekRequested -= SeekLyric;
             miniPager.Dispose(); miniLyrics.Dispose(); expandedLyrics.Dispose(); fullScreen.Changed -= FullScreenChanged; fullScreen.Changing -= FullScreenChanging; fullScreen.Dispose(); acrylic.Dispose();
             squareSizing.MoveSizeStarted -= WindowMoveSizeStarted;
+            squareSizing.ResizeStarted -= WindowResizeStarted;
             squareSizing.MoveSizeEnded -= WindowMoveSizeEnded;
             layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
@@ -495,6 +498,13 @@ public sealed partial class MainWindow : Window
         requestedLyricsLayout = visible;
         if (first) { lyricsVisible = visible; return; }
         miniPager.FinishInteraction();
+        if (interactiveResize)
+        {
+            // The native border gesture owns the window rectangle until release.
+            lyricsVisible = visible;
+            appliedLayout = null;
+            return;
+        }
         bool useLyricsSizing = StackedLyrics(visible, RootGrid.ActualWidth, IsFullScreen);
         if (!animate)
         {
@@ -532,7 +542,8 @@ public sealed partial class MainWindow : Window
             contentTransitionDone = true; CompleteLyricsTransition(request);
         }, true, visible ? null : compact ? MiniLyricsHost : ExpandedLyricsHost);
     }
-    private bool CanAnimateLayout => RootGrid.IsLoaded && (AppWindow.IsVisible || AnimateHiddenLayoutForCheck) && Backdrop.AnimationsEnabled;
+    private bool CanAnimateLayout => !interactiveResize && RootGrid.IsLoaded
+        && (AppWindow.IsVisible || AnimateHiddenLayoutForCheck) && Backdrop.AnimationsEnabled;
     private long BeginSceneTransition(bool useRemembered)
     {
         miniPager.FinishInteraction();
@@ -559,7 +570,7 @@ public sealed partial class MainWindow : Window
     }
     private void WindowFrameChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
-        if (closed || lyricsLayoutTransitioning || presenterTransitionPending || !args.DidPositionChange) return;
+        if (closed || interactiveResize || lyricsLayoutTransitioning || presenterTransitionPending || !args.DidPositionChange) return;
         layoutTransition.Remember();
     }
     private void CompleteLyricsTransition(long request)
@@ -587,15 +598,33 @@ public sealed partial class MainWindow : Window
     {
         if (closed) return;
         miniPager.FinishInteraction();
+        if (lyricsLayoutTransitioning) CancelLyricsTransition(snapResize: false);
+    }
+    private void WindowResizeStarted()
+    {
+        if (closed || interactiveResize) return;
+        interactiveResize = true;
         miniLyrics.BeginViewportResize();
         expandedLyrics.BeginViewportResize();
-        if (lyricsLayoutTransitioning) CancelLyricsTransition(snapResize: false);
+        SetResizeTextRendering(true);
     }
     private void WindowMoveSizeEnded()
     {
-        if (closed) return;
+        if (closed || !interactiveResize) return;
+        interactiveResize = false;
         miniLyrics.EndViewportResize();
         expandedLyrics.EndViewportResize();
+        SetResizeTextRendering(false);
+        ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
+        layoutTransition.Remember();
+        QueueInputRegions();
+    }
+    private void SetResizeTextRendering(bool active)
+    {
+        miniLyrics.SetInteractiveResize(active);
+        expandedLyrics.SetInteractiveResize(active);
+        foreach (var text in new[] { TitleText, ArtistText, PositionText, DurationText, MiniTitle, MiniArtist, MiniPosition, MiniDuration })
+            text.SetInteractiveResize(active);
     }
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
     {
@@ -650,11 +679,14 @@ public sealed partial class MainWindow : Window
         var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight,
             metadataHeight, preferences.WrapTrackMetadata, fullScreen, idle, paged);
         if (appliedLayout is { } previousLayout && previousLayout == layout) return;
+        if (appliedLayout?.WrapMetadata != preferences.WrapTrackMetadata)
+        {
+            TextWrapping metadataWrapping = preferences.WrapTrackMetadata ? TextWrapping.Wrap : TextWrapping.NoWrap;
+            int metadataLines = preferences.WrapTrackMetadata ? 2 : 1;
+            TitleText.TextWrapping = ArtistText.TextWrapping = MiniTitle.TextWrapping = MiniArtist.TextWrapping = metadataWrapping;
+            TitleText.MaxLines = ArtistText.MaxLines = MiniTitle.MaxLines = MiniArtist.MaxLines = metadataLines;
+        }
         appliedLayout = layout;
-        TextWrapping metadataWrapping = preferences.WrapTrackMetadata ? TextWrapping.Wrap : TextWrapping.NoWrap;
-        int metadataLines = preferences.WrapTrackMetadata ? 2 : 1;
-        TitleText.TextWrapping = ArtistText.TextWrapping = MiniTitle.TextWrapping = MiniArtist.TextWrapping = metadataWrapping;
-        TitleText.MaxLines = ArtistText.MaxLines = MiniTitle.MaxLines = MiniArtist.MaxLines = metadataLines;
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
         compact = nextCompact;
         ExpandedRoot.Visibility = !compact || ReferenceEquals(layoutTransition?.RetainedScene, ExpandedRoot) ? Visibility.Visible : Visibility.Collapsed;
@@ -748,6 +780,7 @@ public sealed partial class MainWindow : Window
     private void MiniControls_SizeChanged(object sender, SizeChangedEventArgs e) { UpdateBlurCoverage(); QueueInputRegions(); }
     private void Root_LayoutUpdated(object? sender, object e)
     {
+        if (interactiveResize) return;
         // This is a cached comparison, not a forced layout pass. Natural
         // section-height ticks also release the corresponding cover budget.
         if (!closed && !presenterTransitionPending && lyricsVisible && !compact) ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
@@ -756,7 +789,7 @@ public sealed partial class MainWindow : Window
     }
     private void QueueInputRegions()
     {
-        if (closed || inputRegionsQueued) return;
+        if (closed || interactiveResize || inputRegionsQueued) return;
         inputRegionsQueued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             inputRegionsQueued = false;
@@ -773,7 +806,7 @@ public sealed partial class MainWindow : Window
     }
     private void UpdateInputRegions()
     {
-        if (closed || squareSizing == null || RootGrid.XamlRoot == null) return;
+        if (closed || interactiveResize || squareSizing == null || RootGrid.XamlRoot == null) return;
         double scale = RootGrid.XamlRoot.RasterizationScale;
         var rectangles = new List<global::Windows.Graphics.RectInt32>();
         void Add(FrameworkElement element, FrameworkElement? viewport = null)

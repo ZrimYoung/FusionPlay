@@ -73,7 +73,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
     internal global::Windows.UI.Text.FontWeight TranslationWeight { get; private set; } = Microsoft.UI.Text.FontWeights.SemiBold;
     internal double TextScale => observedTextScale;
     internal double Bleed => compact ? 16 : 24;
-    internal double BodySize => compact ? Math.Clamp(ActualWidth * .075, 20, 28) : Math.Clamp(ActualWidth * .075, 25, 34);
+    private double ResponsiveBodySize => compact ? Math.Clamp(ActualWidth * .075, 20, 28) : Math.Clamp(ActualWidth * .075, 25, 34);
+    internal double BodySize => heldResizeBodySize ?? ResponsiveBodySize;
     internal double LyricsFontScale => preferences.LyricsTextScalePercent / 100d;
     internal bool CanSeek => canSeek && connected && !loading;
     internal int ActiveIndex => activeIndex;
@@ -247,7 +248,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
         if (widthChanged && args.PreviousSize.Width > 0 && PresentationLoaded)
             BeginReflow();
         UpdateGeometry();
-        if (widthChanged) RefreshRows(style: true);
+        if (widthChanged && !InteractiveResize) RefreshRows(style: true);
         if (viewportReflow) QueueReadingAnchorRestore();
         else ScheduleFollow(animated: false);
     }
@@ -380,10 +381,10 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void QueueEdges()
     {
-        if (!PresentationLoaded || edgeQueued) return;
+        if (!PresentationLoaded || InteractiveResize || edgeQueued) return;
         edgeQueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
-            edgeQueued = false; if (!PresentationLoaded) return;
+            edgeQueued = false; if (!PresentationLoaded || InteractiveResize) return;
             foreach (var row in realized.ToArray()) row.UpdateEdge();
         });
     }
@@ -414,6 +415,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
         for (DependencyObject? current = this; current != null; current = VisualTreeHelper.GetParent(current))
             if (current is FrameworkElement element && element.Visibility != Visibility.Visible) { visible = false; break; }
         bool changed = visible != presentationVisible; presentationVisible = visible;
+        if (InteractiveResize && PresentationLoaded)
+            heldResizeBodySize ??= ResponsiveBodySize;
         if (!visible && (changed || pendingGlyphs.Count > 0))
         {
             CancelGlyphQueue();
@@ -441,12 +444,12 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     internal void QueueGlyphDraw(LyricsRowPresenter row)
     {
-        if (!PresentationLoaded || !pendingGlyphs.Add(row)) return;
+        if (!PresentationLoaded || InteractiveResize || !pendingGlyphs.Add(row)) return;
         glyphQueue.Enqueue(row); if (!glyphTimer.IsRunning) glyphTimer.Start();
     }
     private void DrawQueuedGlyphs(DispatcherQueueTimer sender, object args)
     {
-        if (!PresentationLoaded) { CancelGlyphQueue(); return; }
+        if (!PresentationLoaded || InteractiveResize) { CancelGlyphQueue(); return; }
         // Resize can invalidate several rows together. Bound their CPU uploads,
         // while scroll blur and fading continue immediately on the compositor.
         long started = Stopwatch.GetTimestamp(); int drawn = 0, remaining = glyphQueue.Count;

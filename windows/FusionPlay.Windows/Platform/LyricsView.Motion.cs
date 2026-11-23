@@ -18,12 +18,32 @@ public sealed partial class LyricsView
     private (double Current, double Target)? requestedAnchorOffset;
     private bool allowFollowMotion;
     private LyricsFollowMotion? followMotion;
+    private double? heldResizeBodySize;
 
     private readonly record struct ReadingAnchor(LyricsRowItem Item, double Top);
 
+    internal bool InteractiveResize { get; private set; }
     private bool ViewportResizePending => nativeViewportResize || viewportReflow;
     private bool CanAnimateFollow => PresentationLoaded && MotionEnabled && allowFollowMotion && connected && !loading
-        && !browsing && !ViewportResizePending && !WindowSizing.ScreenReaderActive;
+        && !browsing && !ViewportResizePending && !InteractiveResize && !WindowSizing.ScreenReaderActive;
+
+    internal void SetInteractiveResize(bool active)
+    {
+        if (disposed || InteractiveResize == active) return;
+        InteractiveResize = active;
+        if (active)
+        {
+            // Keep XAML wrapping live while holding typography and deferring glyph uploads.
+            heldResizeBodySize = PresentationLoaded ? ResponsiveBodySize : null;
+            CancelGlyphQueue();
+            foreach (var row in realized.ToArray()) row.ShowNativeTextForResize();
+        }
+        else
+        {
+            heldResizeBodySize = null;
+            RefreshRows(style: true);
+        }
+    }
 
     internal void CancelFollowAnimation()
     {
