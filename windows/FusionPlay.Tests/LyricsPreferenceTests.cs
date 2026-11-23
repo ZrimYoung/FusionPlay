@@ -48,19 +48,41 @@ internal static class LyricsPreferenceTests
             File.WriteAllText(path, "{\"show_progress\":false}");
             var store = new UiPreferencesStore(temporary.Path);
             Require(store.Value is { LyricsStaggerEnabled: true, LyricsStaggerMilliseconds: 140,
-                LyricsFollowDurationMilliseconds: 420, NarrowLyricsPaging: false }, "old files did not receive motion defaults");
+                LyricsFollowDurationMilliseconds: 420, NarrowLyricsPaging: false, LyricsTextScalePercent: 100,
+                WrapTrackMetadata: true }, "old files did not receive lyrics and track display defaults");
             store.Update(store.Value with { LyricsStaggerEnabled = false, LyricsStaggerMilliseconds = 1000,
-                LyricsFollowDurationMilliseconds = 1500, NarrowLyricsPaging = true });
-            Require(new UiPreferencesStore(temporary.Path).Value == store.Value, "motion or paging settings did not persist");
+                LyricsFollowDurationMilliseconds = 1500, NarrowLyricsPaging = true, LyricsTextScalePercent = 200,
+                WrapTrackMetadata = false });
+            Require(new UiPreferencesStore(temporary.Path).Value == store.Value, "lyrics and track display settings did not persist");
             var before = store.Value;
             byte[] saved = File.ReadAllBytes(path);
             foreach (var invalid in new[] { before with { LyricsStaggerMilliseconds = -1 }, before with { LyricsStaggerMilliseconds = 1001 },
-                before with { LyricsFollowDurationMilliseconds = 99 }, before with { LyricsFollowDurationMilliseconds = 1501 } })
+                before with { LyricsFollowDurationMilliseconds = 99 }, before with { LyricsFollowDurationMilliseconds = 1501 },
+                before with { LyricsTextScalePercent = 74 }, before with { LyricsTextScalePercent = 201 } })
             {
                 try { store.Update(invalid); throw new InvalidOperationException("invalid motion timing accepted"); }
                 catch (ArgumentException) { }
                 Require(store.Value == before && File.ReadAllBytes(path).AsSpan().SequenceEqual(saved), "invalid timing modified preferences");
             }
+        });
+        check("expanded lyrics: fullscreen content stays centered and bounded independently of the cover height", () =>
+        {
+            var desktop = ExpandedLyricsLayout.ForWindow(2400, 800, fullScreen: false, reservedHeight: 160);
+            Require(desktop.ContentWidth > ExpandedLyricsLayout.MaximumFullScreenContentWidth, "normal window unexpectedly received the fullscreen cap");
+            var narrowFullScreen = ExpandedLyricsLayout.ForWindow(650, 410, fullScreen: true, reservedHeight: 160);
+            Require(narrowFullScreen.ContentWidth < ExpandedLyricsLayout.MaximumFullScreenContentWidth
+                && narrowFullScreen.ArtworkSide <= narrowFullScreen.ArtworkColumn, "narrow fullscreen artwork exceeded its layout");
+            foreach (double width in new[] { 1920d, 3440d })
+            {
+                var fullScreen = ExpandedLyricsLayout.ForWindow(width, 900, fullScreen: true, reservedHeight: 160);
+                Require(fullScreen.ContentWidth == ExpandedLyricsLayout.MaximumFullScreenContentWidth
+                    && fullScreen.ContentWidth + 2 * fullScreen.HorizontalInset <= width
+                    && fullScreen.ArtworkColumn + fullScreen.ColumnGap < fullScreen.ContentWidth,
+                    "wide fullscreen overflowed the centered reading bounds");
+            }
+            var shortFullScreen = ExpandedLyricsLayout.ForWindow(1920, 340, fullScreen: true, reservedHeight: 225);
+            Require(Math.Abs(shortFullScreen.ArtworkSide - (340 - 2 * shortFullScreen.VerticalInset - 225)) < .01,
+                "cover did not leave room for wrapped metadata and playback controls");
         });
         check("lyrics display: automatic follows parsed availability, explicit choices stay stable", () =>
         {

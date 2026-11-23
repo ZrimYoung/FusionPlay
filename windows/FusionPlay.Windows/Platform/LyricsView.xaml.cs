@@ -74,6 +74,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     internal double TextScale => observedTextScale;
     internal double Bleed => compact ? 16 : 24;
     internal double BodySize => compact ? Math.Clamp(ActualWidth * .075, 20, 28) : Math.Clamp(ActualWidth * .075, 25, 34);
+    internal double LyricsFontScale => preferences.LyricsTextScalePercent / 100d;
     internal bool CanSeek => canSeek && connected && !loading;
     internal int ActiveIndex => activeIndex;
     internal bool Timed => document.IsTimed;
@@ -165,7 +166,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private bool SetTypography(UiPreferences value)
     {
         if (ReferenceEquals(preferences, value) && typographyKey.Length > 0) return false;
-        string key = value.UiFontFamily + ":" + value.UiFontWeight + ":" + value.PlayerTextRendering;
+        string key = value.UiFontFamily + ":" + value.UiFontWeight + ":" + value.PlayerTextRendering + ":" + value.LyricsTextScalePercent;
         preferences = value;
         if (key == typographyKey) return false;
         typographyKey = key; var family = UiTypography.Resolve(value.UiFontFamily); LyricFont = new FontFamily(family.Name);

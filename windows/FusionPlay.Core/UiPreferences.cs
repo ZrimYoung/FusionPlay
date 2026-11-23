@@ -9,11 +9,13 @@ public sealed record UiPreferences
     public bool ShowProgress { get; init; } = true;
     public string LyricsDisplayMode { get; init; } = "automatic";
     public string LyricsBackgroundMode { get; init; } = "album";
+    public int LyricsTextScalePercent { get; init; } = 100;
     public bool LyricsStaggerEnabled { get; init; } = true;
     public int LyricsStaggerMilliseconds { get; init; } = 140;
     public int LyricsFollowDurationMilliseconds { get; init; } = 420;
     public bool NarrowLyricsPaging { get; init; }
     public bool CorrectLyricTitles { get; init; }
+    public bool WrapTrackMetadata { get; init; } = true;
     public bool AlwaysShowControls { get; init; }
     public bool Pinned { get; init; }
     public bool ShowPinButton { get; init; }
@@ -93,6 +95,8 @@ public sealed class UiPreferencesStore
             throw new ArgumentException("Unsupported lyrics display mode.", nameof(preferences));
         if (preferences.LyricsBackgroundMode is not ("album" or "acrylic"))
             throw new ArgumentException("Unsupported lyrics background mode.", nameof(preferences));
+        if (preferences.LyricsTextScalePercent is < 75 or > 200)
+            throw new ArgumentException("Invalid lyrics text scale.", nameof(preferences));
         if (preferences.LyricsStaggerMilliseconds is < 0 or > 1000
             || preferences.LyricsFollowDurationMilliseconds is < 100 or > 1500)
             throw new ArgumentException("Invalid lyrics motion timing.", nameof(preferences));

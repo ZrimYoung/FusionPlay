@@ -7,11 +7,13 @@ internal sealed class LyricsFollowMotion
 {
     private const int RankSteps = 32;
     private const double MaxLag = 36;
+    internal const int MaximumTrackedRows = 128;
     private readonly long started;
     private readonly double startOffset, targetOffset, duration, span, direction;
-    private readonly float[]? carried;
+    private readonly Dictionary<int, RowMotion> rows = [];
+    private readonly record struct RowMotion(int Rank, float CarriedOffset);
 
-    internal LyricsFollowMotion(long started, double startOffset, double targetOffset, double durationMs, double spanMs, LyricsFollowMotion? previous)
+    internal LyricsFollowMotion(long started, double startOffset, double targetOffset, double durationMs, double spanMs)
     {
         this.started = started;
         this.startOffset = startOffset;
@@ -19,29 +21,38 @@ internal sealed class LyricsFollowMotion
         duration = Math.Clamp(durationMs, 100, 1500);
         span = Math.Clamp(spanMs, 0, 1000);
         direction = Math.Sign(targetOffset - startOffset);
-        if (previous == null || previous.IsComplete(started)) return;
-        // Carry only the current offsets, never a chain of obsolete waves.
-        carried = new float[RankSteps + 1];
-        for (int rank = 0; rank <= RankSteps; rank++) carried[rank] = previous.RowOffset(started, rank);
     }
 
     internal bool IsComplete(long now) => Elapsed(now) >= duration + span;
 
     internal double ScrollOffset(long now) => startOffset + (targetOffset - startOffset) * Ease(Elapsed(now));
 
-    internal float RowOffset(long now, int rank)
+    internal void CaptureRank(int index, double middle, double viewportHeight, float presentedOffset) =>
+        TryGetRow(index, middle, viewportHeight, presentedOffset, out _);
+
+    internal float RowOffset(long now, int index, double middle, double viewportHeight)
     {
+        if (!TryGetRow(index, middle, viewportHeight, 0, out var row)) return 0;
         double time = Elapsed(now);
         double progress = Ease(time);
-        double delay = span * rank / RankSteps;
+        double delay = span * row.Rank / RankSteps;
         double lag = direction * MaxLag * (progress - Ease(time - delay));
-        double residual = (carried?[rank] ?? 0) * (1 - progress);
+        double residual = row.CarriedOffset * (1 - progress);
         double sharedDirection = Math.Max(0, lag >= 0 ? residual : -residual);
         return (float)(residual + lag * (1 - sharedDirection / MaxLag));
     }
 
-    internal static int Rank(double middle, double viewportHeight)
-        => (int)Math.Round(Math.Clamp(middle / viewportHeight, 0, 1) * RankSteps);
+    private bool TryGetRow(int index, double middle, double viewportHeight, float presentedOffset, out RowMotion row)
+    {
+        if (rows.TryGetValue(index, out row)) return true;
+        if (rows.Count == MaximumTrackedRows) return false;
+        // The document's index identifies the row even when its container is recycled.
+        // A newly visible row joins using its position on the first visible frame.
+        int rank = (int)Math.Round(Math.Clamp(middle / viewportHeight, 0, 1) * RankSteps);
+        row = new(rank, presentedOffset);
+        rows.Add(index, row);
+        return true;
+    }
 
     private double Elapsed(long now) => Stopwatch.GetElapsedTime(started, now).TotalMilliseconds;
 

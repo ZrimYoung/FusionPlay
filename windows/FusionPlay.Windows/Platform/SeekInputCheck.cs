@@ -96,7 +96,7 @@ internal static class SeekInputCheck
             await OnUi(queue!, () =>
             {
                 Pass("native_target_24_dip_bar_3_dip", () => Require(target!.ActualHeight >= 24 && bar!.Height == 3, "seek_target_dimensions"));
-                NoRequest("release_without_press_rejected", () => Require(!target!.CommitPointerClick(), "unexpected_click"));
+                NoRequest("release_without_press_rejected", () => Require(!target!.ReleasePointer(1, 75, 300), "unexpected_click"));
                 Pass("left_mouse_and_touch_only", () =>
                 {
                     Require(ProgressSeekButton.AllowsPointer(PointerDeviceType.Mouse, true, false, false), "left_mouse_rejected");
@@ -110,42 +110,83 @@ internal static class SeekInputCheck
                     target!.BeginPointer(1, 75, 300, true);
                     snapshot = initial with { PositionMs = 60_000 };
                     int before = requests.Count;
-                    Require(target.CommitPointerClick() && requests.Count == before + 1, "click_not_dispatched_once");
+                    Require(target.ReleasePointer(1, 75, 300) && requests.Count == before + 1, "click_not_dispatched_once");
                     Require(requests[^1] == new SeekRequest(50_000, initial.TrackId, initial.Title), "captured_point_mismatch");
-                    Require(!target.CommitPointerClick() && requests.Count == before + 1, "duplicate_click");
+                    Require(!target.ReleasePointer(1, 75, 300) && requests.Count == before + 1, "duplicate_click");
                     Require(snapshot.PositionMs == 60_000 && bar!.Value == 25, "local_progress_was_fabricated");
+                });
+                Pass("drag_previews_current_geometry_then_dispatches_latest_point_once", () =>
+                {
+                    snapshot = initial;
+                    var seek = target!;
+                    int before = requests.Count;
+                    var previews = new List<ulong?>();
+                    void RecordPreview() { previews.Add(seek.PointerPreviewPositionMs); }
+                    seek.PointerPreviewChanged += RecordPreview;
+                    try
+                    {
+                        Require(seek.BeginPointer(25, 75, 300, true) && seek.PointerPreviewPositionMs == 50_000, "drag_did_not_preview_press");
+                        Require(!seek.MovePointer(26, 250, 300) && seek.PointerPreviewPositionMs == 50_000, "other_pointer_changed_preview");
+                        Require(seek.MovePointer(25, 150, 300) && seek.PointerPreviewPositionMs == 100_000, "drag_did_not_preview_move");
+                        Require(seek.MovePointer(25, 175, 350) && previews.Count == 2, "same_preview_or_resize_republished");
+                        snapshot = initial with { PositionMs = 62_000, Title = "Current lyric caption" };
+                        seek.RefreshState();
+                        Require(seek.PointerPreviewPositionMs == 100_000 && snapshot.PositionMs == 62_000 && requests.Count == before,
+                            "source_poll_overrode_drag_preview_or_drag_dispatched_early");
+                        Require(seek.ReleasePointer(25, 280, 350) && requests.Count == before + 1 &&
+                            requests[^1] == new SeekRequest(160_000, initial.TrackId, initial.Title), "release_did_not_use_latest_point_and_raw_press_identity");
+                        Require(!seek.ReleasePointer(25, 280, 350) && !seek.PointerSeekActive && requests.Count == before + 1 &&
+                            previews.SequenceEqual(new ulong?[] { 50_000, 100_000, 160_000, null }), "release_did_not_clear_or_dispatched_twice");
+                    }
+                    finally { seek.PointerPreviewChanged -= RecordPreview; seek.CancelPointer(); }
                 });
                 foreach (var invalid in new[]
                 {
                     initial with { TrackId = "other-track" }, initial with { TrackId = "" },
                     initial with { Phase = ReceiverPhase.Ready, ControlsAvailable = false },
+                    initial with { DurationMs = 190_000 }, initial with { DurationMs = 210_000 },
                     initial with { DurationMs = null }, initial with { PositionMs = null }, initial with { ControlsAvailable = false }
                 })
                 {
                     NoRequest("changed_or_invalid_snapshot_rejected", () =>
                     {
                         snapshot = initial; target!.BeginPointer(2, 150, 300, true); snapshot = invalid;
-                        target.RefreshState(); Require(!target.CommitPointerClick(), "stale_request_dispatched");
+                        target.RefreshState(); Require(!target.ReleasePointer(2, 150, 300) && target.PointerPreviewPositionMs == null, "stale_request_dispatched_or_preview_retained");
                     });
                 }
+                NoRequest("replacement_during_drag_cannot_become_a_seek_for_the_new_song", () =>
+                {
+                    snapshot = initial;
+                    var seek = target!;
+                    Require(seek.BeginPointer(27, 90, 300, true) && seek.MovePointer(27, 150, 300), "drag_was_not_captured");
+                    snapshot = initial with { TrackId = "replacement", Title = "A different song" };
+                    // Simulate a raw identity change between the last UI refresh and pointer input.
+                    Require(!seek.MovePointer(27, 210, 300) && !seek.ReleasePointer(27, 240, 300) && seek.PointerPreviewPositionMs == null,
+                        "stale_drag_preview_was_retained_or_committed");
+                    snapshot = initial;
+                    Require(seek.BeginPointer(28, 90, 300, true), "initial_release_race_drag_was_not_captured");
+                    snapshot = initial with { TrackId = "replacement", Title = "A different song" };
+                    Require(!seek.ReleasePointer(28, 240, 300) && seek.PointerPreviewPositionMs == null,
+                        "release_after_replacement_dispatched_to_the_new_song");
+                });
                 Pass("stable_track_caption_does_not_cancel_captured_seek", () =>
                 {
                     snapshot = initial; target!.BeginPointer(20, 150, 300, true);
                     snapshot = initial with { Title = "Current lyric caption" }; target.RefreshState();
                     int before = requests.Count;
-                    Require(target.CommitPointerClick() && requests.Count == before + 1 && requests[^1].ExpectedTrackId == initial.TrackId, "caption_cancelled_stable_track_seek");
+                    Require(target.ReleasePointer(20, 150, 300) && requests.Count == before + 1 && requests[^1].ExpectedTrackId == initial.TrackId, "caption_cancelled_stable_track_seek");
                 });
                 NoRequest("title_fallback_rejects_replacement_without_stable_id", () =>
                 {
                     snapshot = initial with { TrackId = "" }; target!.BeginPointer(21, 150, 300, true);
                     snapshot = snapshot with { Title = "Replacement" }; target.RefreshState();
-                    Require(!target.CommitPointerClick(), "fallback_title_change_dispatched");
+                    Require(!target.ReleasePointer(21, 150, 300), "fallback_title_change_dispatched");
                 });
                 snapshot = initial;
-                NoRequest("disabled_target_rejected", () => { target!.BeginPointer(3, 150, 300, true); target.IsEnabled = false; Require(!target.CommitPointerClick(), "disabled_request_dispatched"); target.IsEnabled = true; });
-                NoRequest("canceled_pointer_rejected", () => { target!.BeginPointer(4, 150, 300, true); target.CancelPointer(); Require(!target.CommitPointerClick(), "canceled_request_dispatched"); });
-                NoRequest("unsupported_pointer_rejected", () => { target!.BeginPointer(5, 150, 300, false); Require(!target.CommitPointerClick(), "unsupported_request_dispatched"); });
-                NoRequest("multiple_pointers_canceled", () => { target!.BeginPointer(6, 150, 300, true); target.BeginPointer(7, 50, 300, true); Require(!target.CommitPointerClick(), "multiple_pointer_request_dispatched"); });
+                NoRequest("disabled_target_rejected", () => { target!.BeginPointer(3, 150, 300, true); target.IsEnabled = false; Require(!target.ReleasePointer(3, 150, 300), "disabled_request_dispatched"); target.IsEnabled = true; });
+                NoRequest("canceled_pointer_rejected", () => { target!.BeginPointer(4, 150, 300, true); target.CancelPointer(); Require(!target.ReleasePointer(4, 150, 300), "canceled_request_dispatched"); });
+                NoRequest("unsupported_pointer_rejected", () => { target!.BeginPointer(5, 150, 300, false); Require(!target.ReleasePointer(5, 150, 300), "unsupported_request_dispatched"); });
+                NoRequest("multiple_pointers_canceled", () => { target!.BeginPointer(6, 150, 300, true); target.BeginPointer(7, 50, 300, true); Require(!target.ReleasePointer(6, 150, 300) && !target.ReleasePointer(7, 50, 300), "multiple_pointer_request_dispatched"); });
                 Pass("keyboard_seek_from_source_timeline", () =>
                 {
                     foreach (var (key, position) in new[] { (VirtualKey.Left, 40_000UL), (VirtualKey.Right, 60_000UL), (VirtualKey.Home, 0UL), (VirtualKey.End, 200_000UL) })
@@ -173,14 +214,14 @@ internal static class SeekInputCheck
                         var range = (IRangeValueProvider)peer!.GetPattern(PatternInterface.RangeValue);
                         Require(range.Value == 60 && snapshot.PositionMs == 50_000, "presentation_changed_source_or_accessibility_mismatch");
                         target.BeginPointer(9, 150, 300, true); target.CancelPointer(); target.IsEnabled = false;
-                        Require(!target.CommitPointerClick(), "hidden_progress_committed_request");
+                        Require(!target.ReleasePointer(9, 150, 300), "hidden_progress_committed_request");
                     }
                     finally { target.Snapshot = () => snapshot; target.IsEnabled = true; }
                 });
                 Pass("progress_visual_color_preserved", () =>
                 {
                     var white = new SolidColorBrush(Microsoft.UI.Colors.White); bar!.Foreground = white;
-                    target!.BeginPointer(8, 150, 300, true); target.CommitPointerClick(); Require(ReferenceEquals(bar.Foreground, white), "white_color_changed");
+                    target!.BeginPointer(8, 150, 300, true); target.ReleasePointer(8, 150, 300); Require(ReferenceEquals(bar.Foreground, white), "white_color_changed");
                     var custom = new SolidColorBrush(Microsoft.UI.Colors.CornflowerBlue); bar.Foreground = custom;
                     target.SeekFromKey(VirtualKey.Right); Require(ReferenceEquals(bar.Foreground, custom), "custom_color_changed");
                     bar.ClearValue(Control.ForegroundProperty);
@@ -322,6 +363,25 @@ internal static class SeekInputCheck
                 step = "real_main_seek_presentation_feedback_" + mode;
                 await OnUi(queue!, () =>
                 {
+                    Pass("real_main_drag_previews_fill_and_clock_without_changing_source_" + mode, () =>
+                    {
+                        ArrangeMain(width, height);
+                        bool mini = mode == "compact";
+                        var seek = Find<ProgressSeekButton>(mini ? "MiniProgressSeek" : "ProgressSeek");
+                        var progress = Find<ProgressBar>(mini ? "MiniProgress" : "Progress");
+                        var position = Find<PlayerText>(mini ? "MiniPosition" : "PositionText");
+                        Require(seek.BeginPointer(43, seek.ActualWidth / 2, seek.ActualWidth, true) &&
+                            seek.MovePointer(43, seek.ActualWidth * .75, seek.ActualWidth), "main_drag_fixture_not_captured");
+                        Require(progress.Value == 75 && position.Text == "2:30" && controller!.State.PositionMs == 50_000 &&
+                            controller.DisplayPositionMs == 50_000 && !mainTimeline!.IsPending, "main_preview_changed_source_or_ignored_drag_position");
+                        AcceptMain(initial with { PositionMs = 60_000 });
+                        Require(progress.Value == 75 && position.Text == "2:30" && controller!.State.PositionMs == 60_000,
+                            "main_preview_was_overridden_by_source_tick");
+                        seek.CancelPointer();
+                        Require(progress.Value == 30 && position.Text == "1:00" && !seek.PointerSeekActive,
+                            "main_cancel_did_not_restore_latest_source_position");
+                        AcceptMain(initial);
+                    });
                     Pass("real_main_pending_seek_updates_actual_progress_" + mode, () =>
                     {
                         Require(mainTimeline!.Begin(new SeekRequest(120_000, initial.TrackId, initial.Title)) != 0, "real_main_pending_seek_fixture_rejected");
@@ -356,9 +416,9 @@ internal static class SeekInputCheck
                     transportSlotHeight = Find<FrameworkElement>(mode == "compact" ? "MiniTransport" : "TransportPanel").ActualHeight;
                     var seek = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
                     seek.BeginPointer(32, seek.ActualWidth / 2, seek.ActualWidth, true);
-                    Require(PendingRequest(seek) != null, "track_transition_gesture_fixture_missing");
+                    Require(seek.PointerSeekActive, "track_transition_gesture_fixture_missing");
                     AcceptMain(trackTransition);
-                    Require(!seek.IsEnabled && PendingRequest(seek) == null, "track_transition_did_not_immediately_disable_and_cancel_seek");
+                    Require(!seek.IsEnabled && !seek.PointerSeekActive, "track_transition_did_not_immediately_disable_and_cancel_seek");
                 });
                 foreach (int delay in new[] { 0, 40, 80, 160 })
                 {
@@ -399,11 +459,11 @@ internal static class SeekInputCheck
                     var active = Find<ProgressSeekButton>(mode == "compact" ? "MiniProgressSeek" : "ProgressSeek");
                     oldProgressRegion = MainRegion(active, (FrameworkElement)main!.Content);
                     active.BeginPointer(20, active.ActualWidth / 2, active.ActualWidth, true);
-                    Require(PendingRequest(active) != null, "real_main_pointer_fixture_not_captured");
+                    Require(active.PointerSeekActive, "real_main_pointer_fixture_not_captured");
                     controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false });
                     // Check the synchronous preference notification before layout
                     // can unload controls and independently cancel the gesture.
-                    Require(PendingRequest(active) == null && !active.IsEnabled, "real_main_hidden_gesture_not_canceled_immediately");
+                    Require(!active.PointerSeekActive && !active.IsEnabled, "real_main_hidden_gesture_not_canceled_immediately");
                     Pass("real_main_hide_immediately_removes_seek_passthrough_" + mode, () =>
                     {
                         var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
@@ -417,7 +477,7 @@ internal static class SeekInputCheck
                     ArrangeMain(width, height);
                     Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed, "real_main_progress_group_not_collapsed");
                     foreach (var seek in new[] { Find<ProgressSeekButton>("ProgressSeek"), Find<ProgressSeekButton>("MiniProgressSeek") })
-                        Require(!seek.IsEnabled && PendingRequest(seek) == null, "real_main_hidden_seek_still_available");
+                        Require(!seek.IsEnabled && !seek.PointerSeekActive, "real_main_hidden_seek_still_available");
                     var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
                     // Transport can move into the old progress strip. It must not
                     // preserve a full-width hole that covered the old seek target.
@@ -617,7 +677,7 @@ internal static class SeekInputCheck
             Require(progressHeight > 0 && Math.Abs(activePanel.ActualHeight - progressHeight) <= 1,
                 "track_transition_changed_progress_slot_height");
             foreach (var seek in new[] { Find<ProgressSeekButton>("ProgressSeek"), Find<ProgressSeekButton>("MiniProgressSeek") })
-                Require(seek.IsEnabled == seekEnabled && PendingRequest(seek) == null, "track_transition_seek_enablement_or_gesture_wrong");
+                Require(seek.IsEnabled == seekEnabled && !seek.PointerSeekActive, "track_transition_seek_enablement_or_gesture_wrong");
             VerifyMainPosition(percent, position);
             Require(Find<PlayerText>("DurationText").Text == duration && Find<PlayerText>("MiniDuration").Text == duration,
                 "track_transition_duration_retained_previous_song");
@@ -702,9 +762,6 @@ internal static class SeekInputCheck
             return new(x, y, (int)Math.Ceiling(bounds.Right * scale) - x, (int)Math.Ceiling(bounds.Bottom * scale) - y);
         }
     }
-    private static object? PendingRequest(ProgressSeekButton target)
-        => (typeof(ProgressSeekButton).GetField("pointerRequest", BindingFlags.Instance | BindingFlags.NonPublic)
-            ?? throw new CheckFailure("pending_pointer_fixture_field_missing")).GetValue(target);
     private static FrameworkElement ProgressTemplateRoot(ProgressBar progressBar)
         => Descendants(progressBar).OfType<Grid>().FirstOrDefault(element => element.Name == "LayoutRoot")
             ?? throw new CheckFailure("native_progress_template_root_missing");

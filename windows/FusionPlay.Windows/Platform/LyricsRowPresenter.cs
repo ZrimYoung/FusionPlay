@@ -67,7 +67,7 @@ public sealed class LyricsRowPresenter : Button
         internal ulong OriginalBreaks, TranslationBreaks;
         internal LyricsGlyphReflow.LayoutSection[] Layouts = [];
     }
-    private sealed record Typography(string Family, ushort Weight, ushort TranslationWeight, double Size, double Scale, bool Enhanced, bool Contrast, bool Compact, string Language);
+    private sealed record Typography(string Family, ushort Weight, ushort TranslationWeight, double Size, double LyricsScale, double Scale, bool Enhanced, bool Contrast, bool Compact, string Language);
     internal LyricsRowItem? Item => item;
     internal bool UsesCompositionSurface => (glyphReflow != null || sprite?.IsVisible == true) && measurement.Opacity == 0;
     internal long GlyphRasterizations => glyphRasterizations;
@@ -127,13 +127,15 @@ public sealed class LyricsRowPresenter : Button
         SetOpacity(LyricsViewport.LineOpacity(owner.Timed, current.Index, owner.ActiveIndex, owner.HighContrast), owner.MotionEnabled && owner.PresentationLoaded);
         if (style)
         {
-            var next = new Typography(owner.LyricFont.Source, owner.BodyWeight.Weight, owner.TranslationWeight.Weight, owner.BodySize, owner.TextScale, owner.EnhancedText, owner.HighContrast, owner.Compact, L.Language);
+            var next = new Typography(owner.LyricFont.Source, owner.BodyWeight.Weight, owner.TranslationWeight.Weight, owner.BodySize,
+                owner.LyricsFontScale, owner.TextScale, owner.EnhancedText, owner.HighContrast, owner.Compact, L.Language);
             if (next != typography)
             {
                 bool widthOnly = typography != null && next.Size != typography.Size && next == (typography with { Size = next.Size });
                 typography = next;
                 bool interval = current.Line.Text.Length == 0;
-                original.FontSize = interval ? Math.Clamp(next.Size * .65, 14, 20) : next.Size; translation.FontSize = owner.Compact ? Math.Max(12, next.Size * .56) : next.Size * .6;
+                original.FontSize = (interval ? Math.Clamp(next.Size * .65, 14, 20) : next.Size) * next.LyricsScale;
+                translation.FontSize = (owner.Compact ? Math.Max(12, next.Size * .56) : next.Size * .6) * next.LyricsScale;
                 original.FontFamily = translation.FontFamily = owner.LyricFont; original.FontWeight = interval ? Microsoft.UI.Text.FontWeights.Normal : owner.BodyWeight; translation.FontWeight = owner.TranslationWeight;
                 original.Language = translation.Language = L.Language == "en" ? "en-US" : "zh-CN";
                 content.Padding = new Thickness(owner.Bleed + 3, owner.Compact ? 3 : 5, owner.Bleed + 3, owner.Compact ? 3 : 5);

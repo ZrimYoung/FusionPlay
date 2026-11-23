@@ -10,18 +10,20 @@ using Windows.System;
 
 namespace FusionPlay.Windows.Platform;
 
-/// <summary>A native click target over a read-only progress visual; it never changes local playback position.</summary>
+/// <summary>Previews a captured timeline position and requests a source seek on release.</summary>
 public sealed class ProgressSeekButton : Button
 {
-    private SeekRequest? pointerRequest;
-    private uint? pointerId;
-    private long pointerVersion;
+    private readonly record struct PointerSeek(uint Id, ReceiverSnapshot Source, SeekRequest Request);
+    private PointerSeek? pointerSeek;
+    private Pointer? capturedPointer;
     public Func<ReceiverSnapshot>? Snapshot { get; set; }
     public event Action<SeekRequest>? SeekRequested;
+    internal event Action? PointerPreviewChanged;
+    internal ulong? PointerPreviewPositionMs => pointerSeek?.Request.PositionMs;
+    internal bool PointerSeekActive => pointerSeek != null;
+
     public ProgressSeekButton()
     {
-        ClickMode = ClickMode.Release;
-        Click += (_, _) => CommitPointerClick();
         IsEnabledChanged += (_, _) => { if (!IsEnabled) CancelPointer(); };
         Unloaded += (_, _) => CancelPointer();
     }
@@ -29,26 +31,45 @@ public sealed class ProgressSeekButton : Button
     {
         var point = args.GetCurrentPoint(this);
         bool allowed = AllowsPointer(args.Pointer.PointerDeviceType, point.Properties.IsLeftButtonPressed, point.Properties.IsRightButtonPressed, point.Properties.IsMiddleButtonPressed);
-        BeginPointer(args.Pointer.PointerId, point.Position.X, ActualWidth, allowed);
-        base.OnPointerPressed(args);
+        if (!allowed && !PointerSeekActive) { base.OnPointerPressed(args); return; }
+        args.Handled = true;
+        if (BeginPointer(args.Pointer.PointerId, point.Position.X, ActualWidth, allowed, args.Pointer))
+            Focus(FocusState.Pointer);
+    }
+    protected override void OnPointerMoved(PointerRoutedEventArgs args)
+    {
+        if (pointerSeek?.Id != args.Pointer.PointerId) { base.OnPointerMoved(args); return; }
+        args.Handled = true;
+        var point = args.GetCurrentPoint(this);
+        if (args.Pointer.PointerDeviceType == PointerDeviceType.Mouse && (point.Properties.IsRightButtonPressed || point.Properties.IsMiddleButtonPressed))
+            CancelPointer();
+        else
+            MovePointer(args.Pointer.PointerId, point.Position.X, ActualWidth);
     }
     protected override void OnPointerReleased(PointerRoutedEventArgs args)
     {
-        // ButtonBase raises Click from its normal release processing. Only a
-        // pointer press that started here can have prepared a request for it.
-        base.OnPointerReleased(args);
-        if (pointerId == args.Pointer.PointerId) QueuePointerCancellation();
+        if (pointerSeek?.Id != args.Pointer.PointerId) { base.OnPointerReleased(args); return; }
+        args.Handled = true;
+        ReleasePointer(args.Pointer.PointerId, args.GetCurrentPoint(this).Position.X, ActualWidth);
     }
-    protected override void OnPointerCanceled(PointerRoutedEventArgs args) { CancelPointer(); base.OnPointerCanceled(args); }
+    protected override void OnPointerCanceled(PointerRoutedEventArgs args)
+    {
+        if (pointerSeek?.Id == args.Pointer.PointerId) CancelPointer();
+        base.OnPointerCanceled(args);
+    }
     protected override void OnPointerCaptureLost(PointerRoutedEventArgs args)
     {
+        if (pointerSeek?.Id == args.Pointer.PointerId) CancelPointer();
         base.OnPointerCaptureLost(args);
-        // ButtonBase can release its capture immediately before raising Click.
-        // Keep this request for the rest of that event route, then discard it.
-        QueuePointerCancellation();
     }
     protected override void OnKeyDown(KeyRoutedEventArgs args)
     {
+        if (args.Key == VirtualKey.Escape && PointerSeekActive)
+        {
+            CancelPointer();
+            args.Handled = true;
+            return;
+        }
         if (args.Key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Home or VirtualKey.End)
         { _ = SeekFromKey(args.Key); args.Handled = true; return; }
         // Space/Enter must not reuse the last pointer's location. Direction keys
@@ -63,37 +84,78 @@ public sealed class ProgressSeekButton : Button
     }
     internal static bool AllowsPointer(PointerDeviceType device, bool left, bool right, bool middle) =>
         device == PointerDeviceType.Touch || device == PointerDeviceType.Mouse && left && !right && !middle;
-    internal void BeginPointer(uint id, double x, double width, bool allowed)
+
+    internal bool BeginPointer(uint id, double x, double width, bool allowed, Pointer? pointer = null)
     {
-        if (pointerId != null) { CancelPointer(); return; }
-        ++pointerVersion;
-        pointerId = id;
+        if (PointerSeekActive) { CancelPointer(); return false; }
+        if (!allowed || !IsEnabled) return false;
         var state = Snapshot?.Invoke();
-        pointerRequest = allowed && IsEnabled && state != null ? Seeking.AtPoint(state, x, width) : null;
+        if (state == null || Seeking.AtPoint(state, x, width) is not { } request ||
+            pointer != null && !CapturePointer(pointer)) return false;
+        capturedPointer = pointer;
+        pointerSeek = new(id, state, request);
+        PointerPreviewChanged?.Invoke();
+        return true;
     }
-    internal bool CommitPointerClick()
+
+    internal bool MovePointer(uint id, double x, double width)
     {
-        var request = pointerRequest;
-        CancelPointer();
-        return request != null && Dispatch(request);
+        if (pointerSeek is not { } seek || seek.Id != id) return false;
+        if (!IsEnabled || !MatchesCurrent(Snapshot?.Invoke(), seek.Request, seek.Source.DurationMs) ||
+            Seeking.AtPoint(seek.Source, x, width) is not { } request)
+        {
+            CancelPointer();
+            return false;
+        }
+        if (request.PositionMs != seek.Request.PositionMs)
+        {
+            pointerSeek = seek with { Request = request };
+            PointerPreviewChanged?.Invoke();
+        }
+        return true;
     }
-    internal void CancelPointer() { ++pointerVersion; pointerRequest = null; pointerId = null; }
-    internal bool PointerSeekActive => pointerRequest != null;
-    private void QueuePointerCancellation()
+
+    internal bool ReleasePointer(uint id, double x, double width)
+        => MovePointer(id, x, width) && CommitPointer();
+
+    private bool CommitPointer()
     {
-        long request = pointerVersion;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { if (request == pointerVersion) CancelPointer(); });
+        if (pointerSeek is not { } seek) return false;
+        ClearPointer();
+        // The controller can start its pending seek feedback before the view
+        // returns from this release to the regular playback timeline.
+        try { return Dispatch(seek.Request, seek.Source.DurationMs); }
+        finally { PointerPreviewChanged?.Invoke(); }
     }
+
+    internal void CancelPointer()
+    {
+        if (!PointerSeekActive) return;
+        ClearPointer();
+        PointerPreviewChanged?.Invoke();
+    }
+
+    private void ClearPointer()
+    {
+        var pointer = capturedPointer;
+        capturedPointer = null;
+        pointerSeek = null;
+        if (pointer != null) ReleasePointerCapture(pointer);
+    }
+
     public void RefreshState()
     {
         var state = Snapshot?.Invoke();
-        if (pointerRequest != null && (!IsEnabled || state == null || !Seeking.MatchesCurrent(state, pointerRequest))) CancelPointer();
+        if (pointerSeek is { } seek && (!IsEnabled || !MatchesCurrent(state, seek.Request, seek.Source.DurationMs))) CancelPointer();
         if (FrameworkElementAutomationPeer.FromElement(this) is ProgressSeekPeer peer) peer.Refresh();
     }
-    private bool Dispatch(SeekRequest request)
+
+    private static bool MatchesCurrent(ReceiverSnapshot? state, SeekRequest request, ulong? duration)
+        => state != null && (duration == null || state.DurationMs == duration) && Seeking.MatchesCurrent(state, request);
+
+    private bool Dispatch(SeekRequest request, ulong? duration = null)
     {
-        var state = Snapshot?.Invoke();
-        if (!IsEnabled || state == null || !Seeking.MatchesCurrent(state, request)) return false;
+        if (!IsEnabled || !MatchesCurrent(Snapshot?.Invoke(), request, duration)) return false;
         SeekRequested?.Invoke(request); return true;
     }
     internal bool SeekFromKey(VirtualKey key)

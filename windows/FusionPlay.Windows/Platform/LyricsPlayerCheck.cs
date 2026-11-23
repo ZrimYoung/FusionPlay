@@ -12,6 +12,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
@@ -365,8 +366,21 @@ internal static class LyricsPlayerCheck
                 transitioning = active, content_running = transition.IsRunning, retained_scene = transition.RetainedScene?.Name,
                 transition.AnimationFailures, seek_enabled = Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled,
                 backdrop_cache_references_checked = cacheChecks, scene_backing_visible = backing.Visibility == Visibility.Visible,
+                mini_reading_row = ReadingRowFrame("MiniLyricsHost", miniVisible),
+                expanded_reading_row = ReadingRowFrame("ExpandedLyricsHost", expandedVisible),
                 visible_presentation_verified = false
             });
+        }
+        object? ReadingRowFrame(string hostName, bool sceneVisible)
+        {
+            var host = Find<Grid>(hostName);
+            if (!sceneVisible || host.Children.OfType<LyricsView>().SingleOrDefault() is not { ActiveIndex: >= 0 } view)
+                return null;
+            var list = Descendants(view).OfType<ListView>().SingleOrDefault();
+            if (list?.ContainerFromIndex(view.ActiveIndex) is not FrameworkElement row || row.ActualHeight <= 0) return null;
+            double top = row.TransformToVisual(view).TransformPoint(new Point()).Y;
+            return new { index = view.ActiveIndex, top, row_height = row.ActualHeight, viewport_height = view.ActualHeight,
+                host_base_opacity = ElementCompositionPreview.GetElementVisual(host).Opacity };
         }
         async Task TraceResponsiveTransition(string label, int milliseconds, List<bool> activeFrames, bool requireInteractive = false)
         {
@@ -896,6 +910,8 @@ internal static class LyricsPlayerCheck
                     .Select(index => $"[00:{index:00}.000]A repeating synthetic line changes its height as the narrow lyric column wraps its words {index}")));
                 const int active = 7;
                 double anchorTop = 0;
+                double maximumLiveDrift = 0;
+                int liveSamples = 0;
                 LyricsRowItem? anchorItem = null;
                 ListView FollowList() => Descendants(component!).OfType<ListView>().Single(view => view.Name == "LyricsLines");
                 FrameworkElement FollowContainer(int index)
@@ -903,6 +919,23 @@ internal static class LyricsPlayerCheck
                     return FollowList().ContainerFromIndex(index) as FrameworkElement ?? throw new CheckFailure("native_reading_anchor_not_realized");
                 }
                 double FollowTop(int index) => FollowContainer(index).TransformToVisual(component).TransformPoint(new Point()).Y;
+                void CaptureReadingRow(string phase)
+                {
+                    var current = FollowList().ContainerFromIndex(active) as FrameworkElement;
+                    double? top = current is { ActualHeight: > 0 }
+                        ? current.TransformToVisual(component).TransformPoint(new Point()).Y
+                        : null;
+                    if (top is { } placed)
+                    {
+                        maximumLiveDrift = Math.Max(maximumLiveDrift, Math.Abs(placed - anchorTop));
+                        liveSamples++;
+                    }
+                    animationSamples.Add(new
+                    {
+                        stage = "reading_anchor_live_" + phase,
+                        width = component!.ActualWidth, before = anchorTop, top
+                    });
+                }
                 void SizeComponent(double width)
                 {
                     var content = (Grid)componentWindow!.Content;
@@ -939,8 +972,19 @@ internal static class LyricsPlayerCheck
                     anchorTop = FollowTop(active);
                     anchorItem = ((LyricsRowItem[])Field(component!, "items")!)[active];
                     component!.BeginViewportResize();
-                    SizeComponent(280);
+                    SizeComponent(599);
+                    CaptureReadingRow("599_immediate");
                 });
+                foreach (double width in new[] { 601d, 599d, 280d, 420d, 280d })
+                {
+                    await Task.Delay(16);
+                    await OnUi(queue!, () =>
+                    {
+                        CaptureReadingRow("before_" + width);
+                        SizeComponent(width);
+                        CaptureReadingRow("after_" + width);
+                    });
+                }
                 await Task.Delay(120);
                 await OnUi(queue!, () =>
                 {
@@ -954,7 +998,8 @@ internal static class LyricsPlayerCheck
                 await OnUi(queue!, () => Pass("native_reading_anchor_pins_same_row_during_and_after_width_reflow", () =>
                 {
                     double settled = FollowTop(active);
-                    animationSamples.Add(new { stage = "reading_anchor_wide_released", before = anchorTop, settled });
+                    animationSamples.Add(new { stage = "reading_anchor_wide_released", before = anchorTop, settled, maximumLiveDrift, liveSamples });
+                    Require(liveSamples == 11 && maximumLiveDrift <= 2, "reading_anchor_jumped_in_live_layout_turn");
                     Require(Math.Abs(settled - anchorTop) <= 2 && ReferenceEquals(anchorItem, ((LyricsRowItem[])Field(component!, "items")!)[active]),
                         "reading_anchor_jumped_on_release_or_replaced_items");
                     component!.Update(followFixture, (active + 1) * 1_000, true);
@@ -1137,25 +1182,36 @@ internal static class LyricsPlayerCheck
             {
                 const long start = 10_000_000;
                 long At(double milliseconds) => start + (long)(milliseconds * Stopwatch.Frequency / 1_000);
-                var forward = new LyricsFollowMotion(start, 50, 120, 420, 140, null);
+                const double viewport = 320;
+                var forward = new LyricsFollowMotion(start, 50, 120, 420, 140);
                 Require(LyricsViewport.AnchorOffset(140, 210, 90, 1_000) == 260
                     && LyricsViewport.AnchorOffset(10, 5, 30, 500) == 0
                     && LyricsViewport.AnchorOffset(490, 100, 20, 500) == 500, "reading_anchor_offset_outside_scroll_extent");
                 Require(forward.ScrollOffset(start) == 50 && forward.ScrollOffset(At(421)) == 120
                     && !forward.IsComplete(At(559)) && forward.IsComplete(At(561)), "follow_scroll_does_not_settle_within_configured_timing");
-                Require(forward.RowOffset(At(250), 0) == 0 && forward.RowOffset(At(250), 32) > 0
-                    && forward.RowOffset(At(561), 32) == 0, "follow_lag_does_not_respect_row_rank");
                 long reverseAt = At(250);
-                var reverse = new LyricsFollowMotion(reverseAt, forward.ScrollOffset(reverseAt), 50, 420, 1_000, forward);
+                float bottom = forward.RowOffset(reverseAt, 32, viewport, viewport);
+                Require(forward.RowOffset(reverseAt, 0, 0, viewport) == 0 && bottom > 0
+                    && forward.RowOffset(At(561), 32, viewport, viewport) == 0, "follow_lag_does_not_respect_row_rank");
+                Require(forward.RowOffset(reverseAt, 32, 0, viewport) == bottom
+                    && forward.RowOffset(reverseAt, 0, viewport, viewport) == 0, "follow_lag_changed_rank_as_rows_scrolled");
+                var reverse = new LyricsFollowMotion(reverseAt, forward.ScrollOffset(reverseAt), 50, 420, 1_000);
                 for (int rank = 0; rank <= 32; rank++)
                 {
-                    Require(Math.Abs(reverse.RowOffset(reverseAt, rank) - forward.RowOffset(reverseAt, rank)) < .001,
+                    double before = rank * 10, after = viewport - before;
+                    float shown = forward.RowOffset(reverseAt, rank, before, viewport);
+                    reverse.CaptureRank(rank, after, viewport, shown);
+                    Require(reverse.RowOffset(reverseAt, rank, before, viewport) == shown,
                         "follow_lag_is_discontinuous_at_reverse");
                     for (int t = 250; t <= 1_700; t += 25)
-                        Require(Math.Abs(reverse.RowOffset(At(t), rank)) <= 36.001, "follow_lag_exceeded_bound");
+                        Require(Math.Abs(reverse.RowOffset(At(t), rank, after, viewport)) <= 36.001, "follow_lag_exceeded_bound");
                 }
-                Require(reverse.IsComplete(At(1_671)) && reverse.RowOffset(At(1_671), 32) == 0,
+                Require(reverse.IsComplete(At(1_671)) && reverse.RowOffset(At(1_671), 32, 0, viewport) == 0,
                     "follow_lag_did_not_finish");
+                for (int index = 33; index < LyricsFollowMotion.MaximumTrackedRows; index++)
+                    forward.CaptureRank(index, viewport, viewport, 0);
+                Require(forward.RowOffset(reverseAt, LyricsFollowMotion.MaximumTrackedRows, viewport, viewport) == 0
+                    && forward.RowOffset(reverseAt, 32, 0, viewport) == bottom, "follow_lag_did_not_bound_its_virtualized_rows");
             }));
             step = "fullscreen_policy_without_presenter_attachment";
             await OnUi(queue!, () => Pass(step, () =>

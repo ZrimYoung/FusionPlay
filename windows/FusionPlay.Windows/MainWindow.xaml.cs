@@ -43,7 +43,8 @@ public sealed partial class MainWindow : Window
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer hideTimer, coverTimer;
     private BitmapImage? lastArtwork;
     private string? progressColorKey;
-    private (double Width, double Height, bool Lyrics, bool Progress, bool Transport, double ProgressHeight, double TransportHeight, bool Idle, bool Paged)? appliedLayout;
+    private (double Width, double Height, bool Lyrics, bool Progress, bool Transport, double ProgressHeight, double TransportHeight,
+        double MetadataHeight, bool WrapMetadata, bool FullScreen, bool Idle, bool Paged)? appliedLayout;
     private bool? configuredLyricsLayout, configuredMiniLyricsLayout;
     private bool presenterTransitionPending, geometryCommitQueued;
     private long geometryQueuedVersion;
@@ -92,6 +93,7 @@ public sealed partial class MainWindow : Window
             // duration and command validation always retain source metadata.
             seek.Snapshot = () => model.State with { PositionMs = model.State.HasMedia ? model.DisplayPositionMs : null };
             seek.SeekRequested += SeekRequested;
+            seek.PointerPreviewChanged += UpdateScrubPreview;
             seek.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, _) =>
             {
                 miniLyrics.CancelFollowAnimation();
@@ -151,7 +153,11 @@ public sealed partial class MainWindow : Window
         appearance.AdvancedEffectsEnabledChanged += ContrastChanged;
         hideTimer = DispatcherQueue.CreateTimer(); hideTimer.IsRepeating = false;
         hideTimer.Interval = TimeSpan.FromMilliseconds(400);
-        hideTimer.Tick += (_, _) => { if (compact && !pointerInside && !focusInside) { ShowControls(false); ShowCaption(false); } };
+        hideTimer.Tick += (_, _) =>
+        {
+            if (compact && !pointerInside && !focusInside && !MiniProgressSeek.PointerSeekActive)
+            { ShowControls(false); ShowCaption(false); }
+        };
         coverTimer = DispatcherQueue.CreateTimer(); coverTimer.IsRepeating = false;
         coverTimer.Interval = TimeSpan.FromMilliseconds(400);
         coverTimer.Tick += (_, _) => { MiniPreviousCover.Source = null; PreviousCoverImage.Source = null; };
@@ -193,6 +199,7 @@ public sealed partial class MainWindow : Window
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
             AppWindow.Changed -= WindowFrameChanged;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
+            ProgressSeek.PointerPreviewChanged -= UpdateScrubPreview; MiniProgressSeek.PointerPreviewChanged -= UpdateScrubPreview;
             hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); progressTransition.Dispose(); expandedProgressTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose(); lyricsBackdrop.Dispose(); expandedLyricsBackdrop.Dispose(); sceneBackdrop.Dispose();
         };
         Render(); ScheduleHide();
@@ -360,14 +367,13 @@ public sealed partial class MainWindow : Window
         {
             seek.IsEnabled = progress && timelineAvailable && model.CanSeek && !lyricsLayoutTransitioning;
             if (!seek.IsEnabled) seek.CancelPointer();
-            Label(seek, L.Text("播放进度，点击跳转"));
-            AutomationProperties.SetHelpText(seek, L.Text("点击跳转；方向键前后 10 秒，Home 到开头，End 到结尾。"));
+            Label(seek, L.Text("播放进度，拖动可预览", "Playback progress, drag to preview"));
+            AutomationProperties.SetHelpText(seek, L.Text("点击跳转或拖动预览，松手跳转。方向键前后 10 秒，Home 到开头，End 到结尾。",
+                "Click to seek, or drag to preview and release to seek. Use arrows to move ten seconds, Home for the start, and End for the end."));
             seek.RefreshState();
         }
         ApplyProgressColor(preferences);
-        MiniProgress.Value = Progress.Value = timelineAvailable ? Math.Clamp(100.0 * position!.Value / duration!.Value, 0, 100) : 0;
-        MiniPosition.Text = PositionText.Text = position is { } current ? FormatTime(current) : "--:--";
-        MiniDuration.Text = DurationText.Text = duration is { } total ? FormatTime(total) : "--:--";
+        RenderProgressPresentation();
         progressTransition.SetVisible(progress, sectionAnimations && compact && !idle);
         expandedProgressTransition.SetVisible(progress, sectionAnimations && !compact && !idle);
         MigrationButton.Content = ExpandedMigrationButton.Content = L.Text("为此电脑建立独立身份");
@@ -393,6 +399,29 @@ public sealed partial class MainWindow : Window
         // callbacks still coalesce the later geometry updates during animations.
         UpdateBlurCoverage(); UpdateInputRegions(); rendering = false;
     }
+    private void UpdateScrubPreview()
+    {
+        if (closed) return;
+        RenderProgressPresentation();
+        if (!MiniProgressSeek.PointerSeekActive) ScheduleHide();
+    }
+
+    private void RenderProgressPresentation()
+    {
+        var state = model.State;
+        ulong? position = state.HasMedia ? model.DisplayPositionMs : null;
+        ulong? duration = state.HasMedia && state.DurationMs is > 0 ? state.DurationMs : null;
+        SetProgressPresentation(MiniProgress, MiniPosition, MiniProgressSeek.PointerPreviewPositionMs ?? position, duration);
+        SetProgressPresentation(Progress, PositionText, ProgressSeek.PointerPreviewPositionMs ?? position, duration);
+        MiniDuration.Text = DurationText.Text = duration is { } total ? FormatTime(total) : "--:--";
+    }
+
+    private static void SetProgressPresentation(PlayerProgressBar progress, PlayerText time, ulong? position, ulong? duration)
+    {
+        progress.Value = position is { } value && duration is { } total ? Math.Clamp(100.0 * value / total, 0, 100) : 0;
+        time.Text = position is { } current ? FormatTime(current) : "--:--";
+    }
+
     private void MiniPageChanged()
     {
         ApplyMiniPageInput();
@@ -614,11 +643,18 @@ public sealed partial class MainWindow : Window
             ProgressPanel.Visibility == Visibility.Visible ? ProgressPanel.ActualHeight : 0);
         double transportHeight = Math.Max(preferences.ShowTransport ? 44 : 0,
             TransportPanel.Visibility == Visibility.Visible ? TransportPanel.ActualHeight : 0);
+        bool fullScreen = IsFullScreen;
         bool nextCompact = !holdExpandedLayout && WindowSizing.IsCompactContent(width, height, lyricsVisible);
-        bool paged = nextCompact && lyricsVisible && !idle && !StackedLyrics(true, width, IsFullScreen);
-        var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight, idle, paged);
+        bool paged = nextCompact && lyricsVisible && !idle && !StackedLyrics(true, width, fullScreen);
+        double metadataHeight = !nextCompact && lyricsVisible ? ExpandedMetadata.ActualHeight : 0;
+        var layout = (width, height, lyricsVisible, preferences.ShowProgress, preferences.ShowTransport, progressHeight, transportHeight,
+            metadataHeight, preferences.WrapTrackMetadata, fullScreen, idle, paged);
         if (appliedLayout is { } previousLayout && previousLayout == layout) return;
         appliedLayout = layout;
+        TextWrapping metadataWrapping = preferences.WrapTrackMetadata ? TextWrapping.Wrap : TextWrapping.NoWrap;
+        int metadataLines = preferences.WrapTrackMetadata ? 2 : 1;
+        TitleText.TextWrapping = ArtistText.TextWrapping = MiniTitle.TextWrapping = MiniArtist.TextWrapping = metadataWrapping;
+        TitleText.MaxLines = ArtistText.MaxLines = MiniTitle.MaxLines = MiniArtist.MaxLines = metadataLines;
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
         compact = nextCompact;
         ExpandedRoot.Visibility = !compact || ReferenceEquals(layoutTransition?.RetainedScene, ExpandedRoot) ? Visibility.Visible : Visibility.Collapsed;
@@ -638,7 +674,6 @@ public sealed partial class MainWindow : Window
         double lyricInset = width < 320 ? 16 : 22;
         MiniLyricsHost.Padding = new Thickness(lyricInset, paged ? CompactLyricsPager.HeaderHeight : 0, lyricInset, 12);
         MiniTitle.FontSize = width < 320 ? 17 : 20; MiniArtist.FontSize = 14;
-        MiniTitle.MaxLines = lyricsVisible ? 1 : 2;
         }
         // Leave the outgoing page intact while the wide layout overlaps it.
         if (compact || !ReferenceEquals(layoutTransition?.RetainedScene, MiniRoot))
@@ -652,13 +687,13 @@ public sealed partial class MainWindow : Window
         double side;
         if (lyricsVisible)
         {
-            double inset = Math.Max(24, width * .065), vertical = Math.Clamp(height * .055, 20, 64);
-            double gap = width * .045;
-            double column = Math.Max(1, (width - inset * 2 - gap) * .42);
-            double reserved = 76 + progressHeight + transportHeight;
-            side = Math.Max(60, Math.Min(column, height - vertical * 2 - reserved));
-            ExpandedContent.Padding = new Thickness(inset, vertical, inset, vertical);
-            PlayerLayout.ColumnDefinitions[0].Width = new GridLength(column);
+            double reserved = Math.Max(76, metadataHeight + 30) + progressHeight + transportHeight;
+            var reading = ExpandedLyricsLayout.ForWindow(width, height, fullScreen, reserved);
+            side = reading.ArtworkSide;
+            ExpandedContent.Padding = new Thickness(reading.HorizontalInset, reading.VerticalInset, reading.HorizontalInset, reading.VerticalInset);
+            PlayerLayout.Width = fullScreen ? reading.ContentWidth : double.NaN;
+            PlayerLayout.HorizontalAlignment = fullScreen ? HorizontalAlignment.Center : HorizontalAlignment.Stretch;
+            PlayerLayout.ColumnDefinitions[0].Width = new GridLength(reading.ArtworkColumn);
             if (configure)
             {
                 ExpandedContent.RowSpacing = 0; ExpandedContent.RowDefinitions[0].Height = new GridLength(0);
@@ -677,16 +712,18 @@ public sealed partial class MainWindow : Window
                 ExpandedDetails.RowSpacing = 0; ExpandedDetails.VerticalAlignment = VerticalAlignment.Top;
                 ExpandedDetails.Margin = new Thickness(0, 14, 0, 0); ExpandedMetadata.Margin = new Thickness(0, 0, 0, 10);
                 ExpandedDetails.RowDefinitions[0].Height = GridLength.Auto;
-                ExpandedMetadata.Spacing = 5; TitleText.FontSize = 20; TitleText.MaxLines = 1; ArtistText.FontSize = 14; ArtistText.MaxLines = 1;
+                ExpandedMetadata.Spacing = 5; TitleText.FontSize = 20; ArtistText.FontSize = 14;
                 VolumeRow.Visibility = Visibility.Collapsed;
                 PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 36;
                 PlayButton.Width = PlayButton.Height = 44;
             }
-            PlayerLayout.ColumnSpacing = gap;
+            PlayerLayout.ColumnSpacing = reading.ColumnGap;
         }
         else
         {
             side = Math.Clamp(Math.Min(height - 126, width * .36), 130, 360);
+            PlayerLayout.Width = double.NaN;
+            PlayerLayout.HorizontalAlignment = HorizontalAlignment.Stretch;
             if (configure)
             {
                 ExpandedContent.Padding = new Thickness(28, 14, 28, 22); ExpandedContent.RowSpacing = 12;
@@ -699,7 +736,7 @@ public sealed partial class MainWindow : Window
                 ExpandedDetails.RowSpacing = 12; ExpandedDetails.VerticalAlignment = VerticalAlignment.Stretch;
                 ExpandedDetails.Margin = ExpandedMetadata.Margin = new Thickness(0);
                 ExpandedDetails.RowDefinitions[0].Height = new GridLength(1, GridUnitType.Star);
-                ExpandedMetadata.Spacing = 7; TitleText.FontSize = 20; TitleText.MaxLines = 2; ArtistText.FontSize = 14; ArtistText.MaxLines = 2;
+                ExpandedMetadata.Spacing = 7; TitleText.FontSize = 20; ArtistText.FontSize = 14;
                 VolumeRow.Visibility = Visibility.Visible;
                 PreviousButton.Width = PreviousButton.Height = NextButton.Width = NextButton.Height = 40;
                 PlayButton.Width = PlayButton.Height = 52;
@@ -823,7 +860,8 @@ public sealed partial class MainWindow : Window
     private void ShowControls(bool visible)
     {
         if (!compact || MiniControls == null) return;
-        visible |= model.Preferences.Value.AlwaysShowControls || WindowSizing.ScreenReaderActive || focusInside || model.Error.Length > 0 || preferenceError.Length > 0 || model.MigrationRequired;
+        visible |= MiniProgressSeek.PointerSeekActive || model.Preferences.Value.AlwaysShowControls || WindowSizing.ScreenReaderActive
+            || focusInside || model.Error.Length > 0 || preferenceError.Length > 0 || model.MigrationRequired;
         if (visible == controlsShown) return;
         controlsShown = visible;
         if (!visible) MiniProgressSeek.CancelPointer();

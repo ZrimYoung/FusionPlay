@@ -319,6 +319,44 @@ internal static class PlayerRefinementCheck
                     "paging_preference_did_not_restore_stacked_layout");
                 Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
             }));
+            step = "independent_lyrics_scale_and_wrapped_track";
+            double titleHeight = 0, titleFontSize = 0, originalSize = 0, translationSize = 0;
+            LyricsRowPresenter TranslatedRow() => Descendants(Find<Grid>("ExpandedLyricsHost")).OfType<LyricsRowPresenter>()
+                .First(row => row.Item != null && Visible((TextBlock)Field(row, "translation")!));
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with { WrapTrackMetadata = false, LyricsTextScalePercent = 100 });
+                WindowSizing.ResizeContent(main!, 700, 600);
+                Accept(song with
+                {
+                    TrackId = "refinement-lyrics-typography",
+                    Title = "A long synthetic title that must wrap naturally in the narrow artwork column",
+                    LyricsText = "[00:08]A lyric fixture\n[00:08]一行测试译文"
+                });
+            });
+            await Parsed();
+            await OnUi(queue!, () =>
+            {
+                var title = Find<PlayerText>("TitleText");
+                Require(title.MaxLines == 1 && title.TextWrapping == TextWrapping.NoWrap, "single_line_track_preference_ignored");
+                titleHeight = title.ActualHeight; titleFontSize = title.FontSize;
+                var row = TranslatedRow();
+                originalSize = ((TextBlock)Field(row, "original")!).FontSize;
+                translationSize = ((TextBlock)Field(row, "translation")!).FontSize;
+                model!.Preferences.Update(model.Preferences.Value with { WrapTrackMetadata = true, LyricsTextScalePercent = 150 });
+            });
+            await Settle();
+            await OnUi(queue!, () => Pass(step, () =>
+            {
+                var title = Find<PlayerText>("TitleText");
+                Require(title.MaxLines == 2 && title.TextWrapping == TextWrapping.Wrap && title.ActualHeight > titleHeight
+                    && title.FontSize == titleFontSize, "track_title_did_not_wrap_at_the_same_font_size");
+                var row = TranslatedRow();
+                Require(Math.Abs(((TextBlock)Field(row, "original")!).FontSize - originalSize * 1.5) < .1
+                    && Math.Abs(((TextBlock)Field(row, "translation")!).FontSize - translationSize * 1.5) < .1,
+                    "lyric_scale_did_not_scale_both_languages");
+                Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
+            }));
             status = "passed"; step = "complete";
         }
         catch (Exception error) { failure = error is CheckFailure ? error.Message : error.GetType().Name; detail = error.ToString(); }

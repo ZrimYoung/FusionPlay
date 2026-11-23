@@ -91,7 +91,9 @@ public sealed partial class LyricsView
     private void ReadingLayoutUpdated(object? sender, object args)
     {
         ResumeRealizedFollow();
-        if (viewportReflow) QueueReadingAnchorRestore();
+        // The row has its new arranged height now. Correct its offset in
+        // this layout turn before the deferred resize fallback can run.
+        if (viewportReflow) RestoreReadingAnchor();
         else if (!nativeViewportResize) RememberReadingAnchor();
     }
 
@@ -206,9 +208,27 @@ public sealed partial class LyricsView
     private void StartFollowMotion(double startOffset, double targetOffset)
     {
         double span = preferences.LyricsStaggerEnabled ? preferences.LyricsStaggerMilliseconds : 0;
-        followMotion = new LyricsFollowMotion(Stopwatch.GetTimestamp(), startOffset, targetOffset,
-            preferences.LyricsFollowDurationMilliseconds, span, followMotion);
+        var motion = new LyricsFollowMotion(Stopwatch.GetTimestamp(), startOffset, targetOffset,
+            preferences.LyricsFollowDurationMilliseconds, span);
+        foreach (var row in realized)
+        {
+            if (!TryVisibleRow(row, out int index, out double middle)) continue;
+            // A new wave begins from the translation actually applied to this row.
+            float presented = laggingRows.Contains(row) ? row.Translation.Y : 0;
+            motion.CaptureRank(index, middle, ViewportHeight, presented);
+        }
+        followMotion = motion;
         if (!followMotionTimer.IsRunning) followMotionTimer.Start();
+    }
+
+    private bool TryVisibleRow(LyricsRowPresenter row, out int index, out double middle)
+    {
+        index = 0; middle = 0;
+        if (row.Item is not { } item || !TryReadingBounds(item, out double top, out double height)
+            || !LyricsViewport.IntersectsViewport(top, height, ViewportHeight, bleed: 0)) return false;
+        index = item.Index;
+        middle = top + height * .5;
+        return true;
     }
 
     private void FollowMotionTick(DispatcherQueueTimer sender, object args)
@@ -238,14 +258,12 @@ public sealed partial class LyricsView
 
             foreach (var row in realized)
             {
-                if (row.Item is not { } item || !TryReadingBounds(item, out double top, out double height)
-                    || !LyricsViewport.IntersectsViewport(top, height, ViewportHeight, bleed: 0))
+                if (!TryVisibleRow(row, out int index, out double middle))
                 {
                     ResetRowMotion(row);
                     continue;
                 }
-                int rank = LyricsFollowMotion.Rank(top + height * .5, ViewportHeight);
-                float offset = motion.RowOffset(now, rank);
+                float offset = motion.RowOffset(now, index, middle, ViewportHeight);
                 if (offset == 0) ResetRowMotion(row);
                 else
                 {
