@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace FusionPlay.Core;
 
@@ -7,13 +8,26 @@ public sealed record UiPreferences
     public string Language { get; init; } = "zh-Hans";
     public bool ShowTransport { get; init; } = true;
     public bool ShowProgress { get; init; } = true;
+    public bool? CoverShowTransport { get; init; }
+    public bool? CoverShowProgress { get; init; }
+    public bool? AlbumShowTransport { get; init; }
+    public bool? AlbumShowProgress { get; init; }
+    [JsonIgnore]
+    public bool ShowPlayerTransport => (NarrowPlayerLayout == "album" ? AlbumShowTransport : CoverShowTransport) ?? ShowTransport;
+    [JsonIgnore]
+    public bool ShowPlayerProgress => (NarrowPlayerLayout == "album" ? AlbumShowProgress : CoverShowProgress) ?? ShowProgress;
     public string LyricsDisplayMode { get; init; } = "automatic";
     public string LyricsBackgroundMode { get; init; } = "album";
     public int LyricsTextScalePercent { get; init; } = 100;
     public bool LyricsStaggerEnabled { get; init; } = true;
     public int LyricsStaggerMilliseconds { get; init; } = 140;
     public int LyricsFollowDurationMilliseconds { get; init; } = 420;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool NarrowLyricsPaging { get; init; }
+    public string NarrowPlayerLayout { get; init; } = "cover";
+    public string CoverLyricsPane { get; init; } = "automatic";
+    public bool AlbumLyricsArtwork { get; init; } = true;
+    public bool AlbumLyricsTrackInfo { get; init; } = true;
     public bool CorrectLyricTitles { get; init; }
     public bool WrapTrackMetadata { get; init; } = true;
     public bool AlwaysShowControls { get; init; }
@@ -45,8 +59,15 @@ public sealed class UiPreferencesStore
         if (!File.Exists(path)) return;
         try
         {
-            Value = JsonSerializer.Deserialize<UiPreferences>(File.ReadAllText(path), WireJson.Options)
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            Value = document.RootElement.Deserialize<UiPreferences>(WireJson.Options)
                 ?? throw new JsonException("UI preferences are empty.");
+            if (Value.NarrowLyricsPaging)
+            {
+                bool hasPanePreference = document.RootElement.EnumerateObject().Any(property =>
+                    string.Equals(property.Name, "cover_lyrics_pane", StringComparison.OrdinalIgnoreCase));
+                Value = Value with { NarrowLyricsPaging = false, CoverLyricsPane = hasPanePreference ? Value.CoverLyricsPane : "collapsed" };
+            }
             Validate(Value);
         }
         catch (Exception error) when (error is JsonException or ArgumentException)
@@ -93,6 +114,10 @@ public sealed class UiPreferencesStore
             throw new ArgumentException("Unsupported player text rendering.", nameof(preferences));
         if (preferences.LyricsDisplayMode is not ("automatic" or "always" or "never"))
             throw new ArgumentException("Unsupported lyrics display mode.", nameof(preferences));
+        if (preferences.NarrowPlayerLayout is not ("cover" or "album"))
+            throw new ArgumentException("Unsupported mini player layout.", nameof(preferences));
+        if (preferences.CoverLyricsPane is not ("automatic" or "expanded" or "collapsed"))
+            throw new ArgumentException("Unsupported cover lyrics pane state.", nameof(preferences));
         if (preferences.LyricsBackgroundMode is not ("album" or "acrylic"))
             throw new ArgumentException("Unsupported lyrics background mode.", nameof(preferences));
         if (preferences.LyricsTextScalePercent is < 75 or > 200)

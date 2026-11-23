@@ -10,13 +10,18 @@ namespace FusionPlay.Windows.Platform;
 internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
-    void SetPlayerLayout(bool lyricsVisible, bool fullScreen, bool compactPaging = false);
+    void SetPlayerLayout(bool lyricsVisible, bool fullScreen, bool compactPaging = false,
+        bool coverBottomResize = false, bool independentAlbum = false);
     void SetLayoutTransition(bool active);
     void RememberLyricsPaneHeight();
     double PreferredLyricsHeight(double width);
     event Action? MoveSizeStarted;
     event Action? ResizeStarted;
     event Action? MoveSizeEnded;
+    event Action? CoverLyricsResizeStarted;
+    event Action? CoverLyricsResizeExpanded;
+    event Action? CoverLyricsResizeCanceled;
+    event Action<bool>? CoverLyricsResizeCompleted;
 }
 
 internal static class WindowSizing
@@ -116,6 +121,14 @@ internal static class WindowSizing
         => new SquareConstraint(window, hoverChanged);
     private sealed class SquareConstraint : ISquareWindow
     {
+        private const int BottomEdge = 6;
+        private const int NarrowWidth = 600;
+        private const int CoverPreviewHeight = 4;
+        private const int CoverCollapseThreshold = 72;
+        private const int CoverMinimumPaneHeight = 136;
+        private record struct CoverBottomDrag(Rect Start, int FrameHeight, int Width, int StartHeight, int MaximumHeight,
+            double Scale, bool WasExpanded, bool Started = false, bool PreviewExpanded = false);
+
         private readonly Window window;
         private readonly nint hwnd;
         private readonly SubclassProc callback;
@@ -124,10 +137,17 @@ internal static class WindowSizing
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
         private bool inResize, regionRefreshDeferred;
         private bool lyricsVisible, compactPaging, fullScreen, expandLyrics, layoutTransition;
+        private bool coverBottomResize, independentAlbum;
+        private CoverBottomDrag? coverDrag;
+        private Rect resizeWorkArea;
         private double? preferredLyricsPaneHeight;
         public event Action? MoveSizeStarted;
         public event Action? ResizeStarted;
         public event Action? MoveSizeEnded;
+        public event Action? CoverLyricsResizeStarted;
+        public event Action? CoverLyricsResizeExpanded;
+        public event Action? CoverLyricsResizeCanceled;
+        public event Action<bool>? CoverLyricsResizeCompleted;
         private RectInt32[] passthrough = [];
         private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
@@ -157,26 +177,39 @@ internal static class WindowSizing
             if (message == 0x0006) SetHover((argument & 0xFFFF) != 0 && CursorIsOverWindow());
             if (message == 0x0018 && argument == 0) SetHover(false);
             if (!fullScreen && message == 0x0112 && (argument & 0xFFF0) == 0xF030) return 0;
-            if (message == 0x0231)
-            {
-                BeginMoveSize();
-                if (GetClientRect(handle, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
-            }
+            if (message == 0x0231) BeginMoveSize();
             if (message == 0x0214 && !fullScreen && GetClientRect(handle, out var client)) // WM_SIZING
             {
-                BeginResize();
                 // The OS applies this one rectangle during manual resize. No second
                 // WINDOWPOS correction, position clamping, or queued resize runs here.
-                var next = Marshal.PtrToStructure<Rect>(pointer); var frame = Frame(handle);
+                var next = Marshal.PtrToStructure<Rect>(pointer);
+                double scale = Scale(handle);
+                BeginResize(argument, client, scale);
+                if (argument == BottomEdge && coverDrag is { } drag)
+                    return SizeCoverBottom(drag, next, pointer);
+                if (independentAlbum) return DefSubclassProc(handle, message, argument, pointer);
+                var frame = Frame(handle);
                 int width = Width(next) - frame.Width, height = Height(next) - frame.Height;
-                if (UsesLyricsGeometry(lyricsVisible, compactPaging, width / Scale(handle)))
+                int startWidth = resizeStartWidth > 0 ? resizeStartWidth : Width(client);
+                int startHeight = resizeStartHeight > 0 ? resizeStartHeight : Height(client);
+                if (coverBottomResize)
                 {
-                    if (width < Math.Ceiling(600 * Scale(handle)))
+                    if (width >= NarrowWidth * scale) return DefSubclassProc(handle, message, argument, pointer);
+                    if (lyricsVisible && !compactPaging)
+                    {
+                        if (startWidth >= NarrowWidth * scale || startHeight <= startWidth)
+                            return DefSubclassProc(handle, message, argument, pointer);
+                        return SizeProportionalCover(next, argument, pointer, frame, width, height, startWidth, startHeight, scale);
+                    }
+                }
+                else if (UsesLyricsGeometry(lyricsVisible, compactPaging, width / scale))
+                {
+                    if (width < Math.Ceiling(NarrowWidth * scale))
                     {
                         var work = WorkArea(next);
-                        int gap = (int)Math.Ceiling(136 * Scale(handle));
+                        int gap = (int)Math.Ceiling(CoverMinimumPaneHeight * scale);
                         int maximumHeight = Math.Max(1, Height(work) - frame.Height);
-                        int maximumWidth = Math.Max((int)Math.Ceiling(260 * Scale(handle)), maximumHeight - gap);
+                        int maximumWidth = Math.Max((int)Math.Ceiling(260 * scale), maximumHeight - gap);
                         width = Math.Min(width, maximumWidth);
                         height = Math.Min(maximumHeight, Math.Max(height, width + gap));
                         if (argument is 1 or 4 or 7) next.Left = next.Right - width - frame.Width; else next.Right = next.Left + width + frame.Width;
@@ -186,8 +219,6 @@ internal static class WindowSizing
                     return DefSubclassProc(handle, message, argument, pointer);
                 }
                 if (!IsCompact(handle, width, height)) return DefSubclassProc(handle, message, argument, pointer);
-                int startWidth = resizeStartWidth > 0 ? resizeStartWidth : Width(client);
-                int startHeight = resizeStartHeight > 0 ? resizeStartHeight : Height(client);
                 // Compare against the gesture's original size. Comparing with the
                 // last constrained square alternates the dominant corner axis and
                 // makes a steadily moving pointer repeatedly grow/shrink the window.
@@ -207,6 +238,8 @@ internal static class WindowSizing
             if (message == 0x02E0) QueueSettlement(force: true);
             if (message == 0x0082) Dispose();
             nint result = DefSubclassProc(handle, message, argument, pointer);
+            if (message == 0x0084 && result == 15 && coverBottomResize && !fullScreen && !independentAlbum)
+                result = CoverBottomHitTest(pointer, result); // HTBOTTOM: the corners still resize diagonally.
             // InputNonClientPointerSource can publish WindowRectChanged before the
             // WinUI window procedure has updated its client bounds. Refresh input
             // rectangles after that procedure returns, once per dispatcher turn.
@@ -214,45 +247,132 @@ internal static class WindowSizing
             if (message is 0x0005 or 0x0047 or 0x02E0) QueueRegionRefresh();
             return result;
         }
+        private nint CoverBottomHitTest(nint point, nint result)
+        {
+            double scale = Scale(hwnd);
+            if (!GetClientRect(hwnd, out var client) || Width(client) >= NarrowWidth * scale || !GetWindowRect(hwnd, out var outer)) return result;
+            int x = unchecked((short)(long)point);
+            int corner = (int)Math.Ceiling(24 * scale);
+            if (x >= outer.Left && x < outer.Left + corner) return 16; // HTBOTTOMLEFT
+            if (x < outer.Right && x >= outer.Right - corner) return 17; // HTBOTTOMRIGHT
+            return result;
+        }
+        private nint SizeCoverBottom(CoverBottomDrag drag, Rect next, nint pointer)
+        {
+            int height = Math.Clamp(next.Bottom - drag.Start.Top - drag.FrameHeight, drag.Width, drag.MaximumHeight);
+            if (!drag.Started && Math.Abs(height - drag.StartHeight) >= CoverPreviewHeight * drag.Scale)
+            {
+                drag.Started = true; coverDrag = drag;
+                try { CoverLyricsResizeStarted?.Invoke(); }
+                catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+            }
+            if (drag.Started && !drag.WasExpanded && !drag.PreviewExpanded && height - drag.Width > CoverPreviewHeight * drag.Scale)
+            {
+                drag.PreviewExpanded = true; coverDrag = drag;
+                try { CoverLyricsResizeExpanded?.Invoke(); }
+                catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+            }
+            next = drag.Start;
+            next.Bottom = next.Top + height + drag.FrameHeight;
+            Marshal.StructureToPtr(next, pointer, false);
+            return 1;
+        }
+        private nint SizeProportionalCover(Rect next, nuint edge, nint pointer, (int Width, int Height) frame,
+            int width, int height, int startWidth, int startHeight, double dpiScale)
+        {
+            var work = Width(resizeWorkArea) > 0 ? resizeWorkArea : WorkArea(next);
+            double widthScale = (double)width / startWidth, heightScale = (double)height / startHeight;
+            double requested = edge is 1 or 2 ? widthScale : edge is 3 or BottomEdge ? heightScale
+                : Math.Abs(widthScale - 1) >= Math.Abs(heightScale - 1) ? widthScale : heightScale;
+            double maximum = Math.Max(1d / Math.Min(startWidth, startHeight),
+                Math.Min((double)(Width(work) - frame.Width) / startWidth, (double)(Height(work) - frame.Height) / startHeight));
+            double minimum = Math.Min(maximum, Math.Ceiling(260 * dpiScale) / Math.Min(startWidth, startHeight));
+            double scale = Math.Clamp(requested, minimum, maximum);
+            int outerWidth = (int)Math.Round(startWidth * scale) + frame.Width;
+            int outerHeight = (int)Math.Round(startHeight * scale) + frame.Height;
+            if (edge is 1 or 4 or 7) next.Left = next.Right - outerWidth; else next.Right = next.Left + outerWidth;
+            if (edge is 3 or 4 or 5) next.Top = next.Bottom - outerHeight; else next.Bottom = next.Top + outerHeight;
+            Marshal.StructureToPtr(next, pointer, false);
+            return 1;
+        }
         private void PointerEntered(InputNonClientPointerSource sender, NonClientPointerEventArgs args) => SetHover(true);
         private void PointerExited(InputNonClientPointerSource sender, NonClientPointerEventArgs args) => SetHover(CursorIsOverWindow());
         private void WindowRectChanged(InputNonClientPointerSource sender, WindowRectChangedEventArgs args)
         {
             if (args.NewWindowRect.Width != args.OldWindowRect.Width || args.NewWindowRect.Height != args.OldWindowRect.Height) QueueRegionRefresh(force: true);
         }
-        private void EnteredMoveSize(InputNonClientPointerSource sender, EnteredMoveSizeEventArgs args)
-        {
-            BeginMoveSize();
-            if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
-        }
+        private void EnteredMoveSize(InputNonClientPointerSource sender, EnteredMoveSizeEventArgs args) => BeginMoveSize();
         private void BeginMoveSize()
         {
             if (inMoveSize) return;
             inMoveSize = true; expandLyrics = false;
             try { MoveSizeStarted?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+            if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
         }
-        private void BeginResize()
+        private void BeginResize(nuint edge, Rect client, double scale)
         {
             if (!inMoveSize || inResize) return;
             inResize = true;
             try { ResizeStarted?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+            int width = Width(client), height = Height(client);
+            if (!coverBottomResize || independentAlbum || width >= NarrowWidth * scale || width <= 0 || !GetWindowRect(hwnd, out var outer)) return;
+            resizeWorkArea = WorkArea(outer);
+            if (edge != BottomEdge) return;
+            int frameHeight = Math.Max(0, Height(outer) - height);
+            int maximumHeight = Math.Max(Math.Max(width, height), resizeWorkArea.Bottom - outer.Top - frameHeight);
+            coverDrag = new(outer, frameHeight, width, height, maximumHeight, scale, lyricsVisible && !compactPaging);
         }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
             => EndMoveSize();
         private void EndMoveSize()
         {
             if (!inMoveSize) return;
+            CompleteCoverBottomResize();
             inMoveSize = inResize = false; resizeStartWidth = resizeStartHeight = 0;
+            resizeWorkArea = default;
             RememberLyricsPaneHeight(); QueueSettlement(); SetHover(CursorIsOverWindow());
             try { MoveSizeEnded?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
             if (regionRefreshDeferred) QueueRegionRefresh(force: true);
         }
+        private void CompleteCoverBottomResize()
+        {
+            var drag = coverDrag;
+            coverDrag = null;
+            if (drag is not { Started: true } resize) return;
+            // Windows can restore the original rectangle on a cancelled
+            // native resize. Discard its temporary preview without persisting it.
+            if (fullScreen || independentAlbum || !coverBottomResize || !GetClientRect(hwnd, out var client)
+                || Math.Abs(Height(client) - resize.StartHeight) <= 1)
+            {
+                CancelCoverBottomResize();
+                return;
+            }
+            int height = Height(client);
+            bool expanded = height - resize.Width >= CoverCollapseThreshold * resize.Scale;
+            int settledHeight = expanded
+                ? Math.Min(resize.MaximumHeight, Math.Max(height, resize.Width + (int)Math.Ceiling(CoverMinimumPaneHeight * resize.Scale)))
+                : resize.Width;
+            if (settledHeight != height && !SetWindowPos(hwnd, 0, resize.Start.Left, resize.Start.Top,
+                    Width(resize.Start), settledHeight + resize.FrameHeight, 0x0014))
+            {
+                CancelCoverBottomResize();
+                return;
+            }
+            if (expanded) preferredLyricsPaneHeight = (settledHeight - resize.Width) / resize.Scale;
+            try { CoverLyricsResizeCompleted?.Invoke(expanded); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+        }
+        private void CancelCoverBottomResize()
+        {
+            try { CoverLyricsResizeCanceled?.Invoke(); }
+            catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
+        }
         public void RememberLyricsPaneHeight()
         {
-            if (disposed || !lyricsVisible || compactPaging || fullScreen || inMoveSize || layoutTransition || settling
+            if (disposed || !lyricsVisible || compactPaging || independentAlbum || fullScreen || inMoveSize || layoutTransition || settling
                 || window.AppWindow.Presenter is not OverlappedPresenter { State: OverlappedPresenterState.Restored }
                 || !GetClientRect(hwnd, out var client)) return;
             double scale = Scale(hwnd), width = Width(client) / scale, height = Height(client) / scale;
@@ -269,15 +389,17 @@ internal static class WindowSizing
             // Stable controls still need new caption and border bounds on resize.
             RefreshRegions(force: changed);
         }
-        public void SetPlayerLayout(bool lyrics, bool fullscreen, bool paging = false)
+        public void SetPlayerLayout(bool lyrics, bool fullscreen, bool paging = false, bool enableCoverBottomResize = false, bool album = false)
         {
-            paging &= lyrics;
-            if (disposed || lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen) return;
+            paging &= lyrics || enableCoverBottomResize || album;
+            if (disposed || lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen
+                && coverBottomResize == enableCoverBottomResize && independentAlbum == album) return;
             bool fullscreenChanged = fullScreen != fullscreen;
-            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging)) RememberLyricsPaneHeight();
-            expandLyrics |= !inMoveSize && (!lyricsVisible || compactPaging) && lyrics && !paging && !fullscreen;
+            if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging || album)) RememberLyricsPaneHeight();
+            expandLyrics |= !inMoveSize && (!lyricsVisible || compactPaging || independentAlbum) && lyrics && !paging && !fullscreen && !album;
             lyricsVisible = lyrics; compactPaging = paging; fullScreen = fullscreen;
-            if (fullscreen || paging || !lyrics) expandLyrics = false;
+            coverBottomResize = enableCoverBottomResize; independentAlbum = album;
+            if (fullscreen || paging || !lyrics || album) expandLyrics = false;
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             {
                 // A full-screen transition must not inherit an old lyric pane
@@ -376,8 +498,9 @@ internal static class WindowSizing
         {
             if (disposed || fullScreen || layoutTransition || settling || settlementQueued || inMoveSize || IsIconic(hwnd)) return;
             if (!force && GetDpiForWindow(hwnd) == dpi && GetClientRect(hwnd, out var client)
-                && !UsesLyricsGeometry(lyricsVisible, compactPaging, Width(client) / Scale(hwnd))
-                && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client))) return;
+                && (independentAlbum || coverBottomResize && Width(client) >= NarrowWidth * Scale(hwnd)
+                    || !UsesLyricsGeometry(lyricsVisible, compactPaging, Width(client) / Scale(hwnd))
+                    && (!IsCompact(hwnd, Width(client), Height(client)) || Width(client) == Height(client)))) return;
             settlementQueued = true;
             if (!window.DispatcherQueue.TryEnqueue(() =>
             {
@@ -395,17 +518,23 @@ internal static class WindowSizing
                     if (presenter.PreferredMinimumWidth != minimumWidth) presenter.PreferredMinimumWidth = minimumWidth;
                     if (presenter.PreferredMinimumHeight != minimumHeight) presenter.PreferredMinimumHeight = minimumHeight;
                 }
-                if (UsesLyricsGeometry(lyricsVisible, compactPaging, Width(client) / Scale(hwnd)))
+                double scale = Scale(hwnd);
+                int currentWidth = Width(client), currentHeight = Height(client);
+                if (independentAlbum || coverBottomResize && currentWidth >= NarrowWidth * scale) { expandLyrics = false; return; }
+                if (UsesLyricsGeometry(lyricsVisible, compactPaging, currentWidth / scale))
                 {
-                    if (Width(client) >= Math.Ceiling(600 * Scale(hwnd))) { expandLyrics = false; return; }
-                    int gap = (int)Math.Ceiling(136 * Scale(hwnd));
+                    if (currentWidth >= Math.Ceiling(NarrowWidth * scale)) { expandLyrics = false; return; }
+                    // A side or corner can scale a real pane below the height
+                    // used when opening from the bottom. Preserve that ratio.
+                    if (coverBottomResize && !expandLyrics && currentHeight > currentWidth) return;
+                    int gap = (int)Math.Ceiling(CoverMinimumPaneHeight * scale);
                     int availableHeight = Math.Max(1, Height(work) - frame.Height);
-                    int lyricWidth = Math.Min(Width(client), Math.Max((int)Math.Ceiling(260 * Scale(hwnd)), availableHeight - gap));
+                    int lyricWidth = Math.Min(currentWidth, Math.Max((int)Math.Ceiling(260 * scale), availableHeight - gap));
                     int minimumHeight = Math.Min(availableHeight, lyricWidth + gap);
-                    int lyricHeight = Math.Min(availableHeight, Math.Max(Height(client), minimumHeight));
-                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(PreferredLyricsHeight(lyricWidth / Scale(hwnd)) * Scale(hwnd))));
+                    int lyricHeight = Math.Min(availableHeight, Math.Max(currentHeight, minimumHeight));
+                    if (expandLyrics) lyricHeight = Math.Min(availableHeight, Math.Max(lyricHeight, (int)Math.Ceiling(PreferredLyricsHeight(lyricWidth / scale) * scale)));
                     expandLyrics = false;
-                    if (lyricWidth == Width(client) && lyricHeight == Height(client)) return;
+                    if (lyricWidth == currentWidth && lyricHeight == currentHeight) return;
                     settling = true;
                     try { SetWindowPos(hwnd, 0, 0, 0, lyricWidth + frame.Width, lyricHeight + frame.Height, 0x0016); }
                     finally { settling = false; }
@@ -428,6 +557,10 @@ internal static class WindowSizing
             MoveSizeStarted = null;
             ResizeStarted = null;
             MoveSizeEnded = null;
+            CoverLyricsResizeStarted = null;
+            CoverLyricsResizeExpanded = null;
+            CoverLyricsResizeCanceled = null;
+            CoverLyricsResizeCompleted = null;
             try
             {
                 input.PointerEntered -= PointerEntered; input.PointerMoved -= PointerEntered; input.PointerExited -= PointerExited;

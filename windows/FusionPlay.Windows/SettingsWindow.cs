@@ -61,14 +61,17 @@ internal sealed class SettingsWindow : Window
         later = new() { Name = "CalibrationLater", Content = "+", Width = 34, Height = 34, Padding = new Thickness(0), FontSize = 22 },
         reset = new() { Name = "CalibrationReset", HorizontalAlignment = HorizontalAlignment.Right };
     private readonly TextBlock calibrationOutput = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
-    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" }, lyricsBackgroundMode = new() { Name = "LyricsBackgroundMode" };
+    private readonly SelectorBar language = new() { Name = "InterfaceLanguage" }, progressColorMode = new() { Name = "ProgressColorMode" }, miniVisibility = new() { Name = "MiniControlsVisibility" }, lyricsDisplayMode = new() { Name = "LyricsDisplayMode" }, lyricsBackgroundMode = new() { Name = "LyricsBackgroundMode" },
+        narrowPlayerLayout = new() { Name = "NarrowPlayerLayout" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
         settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
         correctLyricTitles = new("\uE8D2") { Name = "CorrectLyricTitles", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         wrapTrackMetadata = new("\uE8FD") { Name = "WrapTrackMetadata", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         lyricsStagger = new("\uE8CB") { Name = "LyricsStaggerEnabled", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
-        narrowLyricsPaging = new("\uE8AB") { Name = "NarrowLyricsPaging", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
+        albumLyricsArtwork = new("\uEB9F") { Name = "AlbumLyricsArtwork" }, albumLyricsTrackInfo = new("\uE8FD") { Name = "AlbumLyricsTrackInfo" },
         taskbar = new("\uE737") { Name = "TaskbarEntry" }, tray = new("\uE73A") { Name = "TrayEntry" };
+    private Border coverControlsSurface = null!;
+    private StackPanel albumLyricsHeader = null!;
     private readonly Slider lyricsStaggerTiming = new() { Name = "LyricsStaggerMilliseconds", Minimum = 0, Maximum = 1000, StepFrequency = 10, Width = 180 },
         lyricsFollowTiming = new() { Name = "LyricsFollowDurationMilliseconds", Minimum = 100, Maximum = 1500, StepFrequency = 10, Width = 180 },
         lyricsTextScale = new() { Name = "LyricsTextScalePercent", Minimum = 75, Maximum = 200, StepFrequency = 5, Width = 180 };
@@ -397,8 +400,30 @@ internal sealed class SettingsWindow : Window
     private StackPanel PlayerPage()
     {
         var page = Page("播放器", "Player", "设置即时生效并自动保存。", "Changes apply and save automatically.");
-        ConfigureCard(transport, "播放控制", "Playback controls", (p, value) => p with { ShowTransport = value });
-        ConfigureCard(progress, "进度与时间", "Progress & time", (p, value) => p with { ShowProgress = value });
+        AddSegment(narrowPlayerLayout, "cover", "封面模式", "Cover mode");
+        AddSegment(narrowPlayerLayout, "album", "专辑模式", "Album mode");
+        Label(() => AutomationProperties.SetName(narrowPlayerLayout, L.Text("窄窗布局", "Compact player layout")));
+        narrowPlayerLayout.SelectionChanged += (_, _) =>
+        {
+            if (!renderingPreferences && SegmentKey(narrowPlayerLayout) is string key && key != model.Preferences.Value.NarrowPlayerLayout)
+                UpdatePreferences(p => p with { NarrowPlayerLayout = key, CoverLyricsPane = "automatic", NarrowLyricsPaging = false });
+        };
+        AddSegment(miniVisibility, "hover", "鼠标移入显示", "Show on hover"); AddSegment(miniVisibility, "always", "始终显示", "Always show");
+        Label(() => AutomationProperties.SetName(miniVisibility, L.Text("封面控件显隐", "Cover controls visibility")));
+        miniVisibility.SelectionChanged += (_, _) => { if (!renderingPreferences && SegmentKey(miniVisibility) is string key) UpdatePreferences(p => p with { AlwaysShowControls = key == "always" }); };
+        var miniLabel = new StackPanel { Spacing = 4 }; miniLabel.Children.Add(Text("控件显隐", "Controls visibility")); miniLabel.Children.Add(Text("歌曲信息、进度和已开启的控件", "Track info, progress, and enabled controls", true));
+        coverControlsSurface = Surface(Row(miniLabel, miniVisibility));
+        ConfigureCard(albumLyricsArtwork, "小封面", "Small cover", (p, value) => p with { AlbumLyricsArtwork = value });
+        ConfigureCard(albumLyricsTrackInfo, "歌曲信息", "Track information", (p, value) => p with { AlbumLyricsTrackInfo = value });
+        albumLyricsHeader = Group("专辑模式歌词页", "Album lyrics page", Cards(albumLyricsArtwork, albumLyricsTrackInfo));
+        page.Children.Add(Group("窄窗布局", "Compact player layout", Surface(narrowPlayerLayout), coverControlsSurface,
+            Text("封面模式可拖动底边收展歌词，收起后左右翻页。专辑模式有独立的播放页和歌词页。",
+                "Drag the bottom edge in Cover mode to show or fold the lyrics, then swipe between pages when folded. Album mode has separate player and lyrics pages.", true)));
+        page.Children.Add(albumLyricsHeader);
+        ConfigureCard(transport, "播放控制", "Playback controls", (p, value) => p.NarrowPlayerLayout == "album"
+            ? p with { AlbumShowTransport = value } : p with { CoverShowTransport = value });
+        ConfigureCard(progress, "进度与时间", "Progress & time", (p, value) => p.NarrowPlayerLayout == "album"
+            ? p with { AlbumShowProgress = value } : p with { CoverShowProgress = value });
         ConfigureCard(pinButton, "置顶按钮", "Pin button", (p, value) => p with { ShowPinButton = value });
         AddSegment(lyricsDisplayMode, "automatic", "自动", "Automatic");
         AddSegment(lyricsDisplayMode, "always", "始终开启", "Always on");
@@ -406,12 +431,16 @@ internal sealed class SettingsWindow : Window
         Label(() => AutomationProperties.SetName(lyricsDisplayMode, L.Text("显示歌词", "Show lyrics")));
         lyricsDisplayMode.SelectionChanged += (_, _) =>
         {
-            if (!renderingPreferences && SegmentKey(lyricsDisplayMode) is string key)
-                UpdatePreferences(p => p with { LyricsDisplayMode = key });
+            if (!renderingPreferences && SegmentKey(lyricsDisplayMode) is string key && key != model.Preferences.Value.LyricsDisplayMode)
+                UpdatePreferences(p => p with
+                {
+                    LyricsDisplayMode = key,
+                    CoverLyricsPane = key == "automatic" || p.CoverLyricsPane == "expanded" ? "automatic" : p.CoverLyricsPane
+                });
         };
         var lyricsLabel = new StackPanel { Spacing = 4 };
         lyricsLabel.Children.Add(Text("显示歌词", "Show lyrics"));
-        lyricsLabel.Children.Add(Text("自动模式在收到有效歌词后显示。", "Automatic shows lyrics when they are available.", true));
+        lyricsLabel.Children.Add(Text("控制宽窗歌词和封面模式的下拉歌词。分页时可横滑查看歌词。", "Controls the lyrics in wide windows and the stacked pane in Cover mode. In paged layouts, swipe to view lyrics.", true));
         AddSegment(lyricsBackgroundMode, "album", "专辑模糊", "Album blur");
         AddSegment(lyricsBackgroundMode, "acrylic", "亚克力", "Acrylic");
         Label(() => AutomationProperties.SetName(lyricsBackgroundMode, L.Text("歌词背景", "Lyrics background")));
@@ -465,7 +494,7 @@ internal sealed class SettingsWindow : Window
             if (!progressColorSaveTimer.IsRunning) progressColorSaveTimer.Start();
         };
         var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
-            Text("播放控制与进度设置适用于大小播放器。拖动进度条可预览位置，松手跳转。", "Playback controls and progress settings apply to both layouts. Drag the progress bar to preview and release to seek.", true));
+            Text("封面模式和专辑模式分别保存播放控制和进度设置。拖动进度条可预览位置，松手跳转。", "Cover and Album modes save playback controls and progress settings separately. Drag the progress bar to preview and release to seek.", true));
         page.Children.Add(display);
         ConfigureCard(lyricsStagger, "逐行错峰", "Stagger lyric lines", (p, value) => p with { LyricsStaggerEnabled = value }, activationLabels: true);
         const string staggerTimingLabel = "错峰跨度（毫秒）", followTimingLabel = "跟随时长（毫秒）";
@@ -497,12 +526,6 @@ internal sealed class SettingsWindow : Window
         buttonDescription.Name = "WindowButtonsDescription";
         var windowButtons = Group("窗口按钮", "Window buttons", Cards(settingsButton, fullScreenButton), buttonDescription); windowButtons.Name = "WindowButtons";
         page.Children.Add(windowButtons);
-        AddSegment(miniVisibility, "hover", "鼠标移入显示", "Show on hover"); AddSegment(miniVisibility, "always", "始终显示", "Always show");
-        Label(() => AutomationProperties.SetName(miniVisibility, L.Text("迷你窗口控件显隐", "Mini player controls visibility")));
-        miniVisibility.SelectionChanged += (_, _) => { if (!renderingPreferences && SegmentKey(miniVisibility) is string key) UpdatePreferences(p => p with { AlwaysShowControls = key == "always" }); };
-        var miniLabel = new StackPanel { Spacing = 4 }; miniLabel.Children.Add(Text("控件显隐", "Controls visibility")); miniLabel.Children.Add(Text("歌曲信息、进度和已开启的控件", "Track info, progress, and enabled controls", true));
-        ConfigureCard(narrowLyricsPaging, "播放与歌词左右翻页", "Swipe between player and lyrics", (p, value) => p with { NarrowLyricsPaging = value }, activationLabels: true);
-        page.Children.Add(Group("迷你窗口", "Mini player", Surface(Row(miniLabel, miniVisibility)), narrowLyricsPaging));
         RoutedEventHandler pinChanged = (_, _) =>
         {
             if (renderingPreferences) return;
@@ -628,7 +651,7 @@ internal sealed class SettingsWindow : Window
         {
             preferenceMessage = "";
             var requested = update(model.Preferences.Value);
-            if (!requested.ShowProgress && pendingProgressColor != null)
+            if (!requested.ShowPlayerProgress && pendingProgressColor != null)
             {
                 if (!FlushProgressColor()) return false;
                 requested = update(model.Preferences.Value);
@@ -653,20 +676,25 @@ internal sealed class SettingsWindow : Window
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             SelectSegment(lyricsBackgroundMode, preferences.LyricsBackgroundMode);
+            SelectSegment(narrowPlayerLayout, preferences.NarrowPlayerLayout);
+            bool albumMode = preferences.NarrowPlayerLayout == "album";
+            coverControlsSurface.Visibility = albumMode ? Visibility.Collapsed : Visibility.Visible;
+            albumLyricsHeader.Visibility = albumMode ? Visibility.Visible : Visibility.Collapsed;
+            albumLyricsArtwork.IsChecked = preferences.AlbumLyricsArtwork;
+            albumLyricsTrackInfo.IsChecked = preferences.AlbumLyricsTrackInfo;
             lyricsTextScale.Value = preferences.LyricsTextScalePercent;
             lyricsStagger.IsChecked = preferences.LyricsStaggerEnabled;
             lyricsStaggerTiming.IsEnabled = preferences.LyricsStaggerEnabled;
             lyricsStaggerTiming.Value = preferences.LyricsStaggerMilliseconds;
             lyricsFollowTiming.Value = preferences.LyricsFollowDurationMilliseconds;
-            narrowLyricsPaging.IsChecked = preferences.NarrowLyricsPaging;
-            transport.IsChecked = preferences.ShowTransport; progress.IsChecked = preferences.ShowProgress; pinButton.IsChecked = preferences.ShowPinButton;
+            transport.IsChecked = preferences.ShowPlayerTransport; progress.IsChecked = preferences.ShowPlayerProgress; pinButton.IsChecked = preferences.ShowPinButton;
             settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
             correctLyricTitles.IsChecked = preferences.CorrectLyricTitles;
             wrapTrackMetadata.IsChecked = preferences.WrapTrackMetadata;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");
             taskbar.IsChecked = preferences.ShowTaskbarIcon; tray.IsChecked = preferences.ShowTrayIcon;
-            progressColorSurface.Visibility = preferences.ShowProgress ? Visibility.Visible : Visibility.Collapsed;
-            progressColorMode.IsEnabled = progressColor.IsEnabled = preferences.ShowProgress;
+            progressColorSurface.Visibility = preferences.ShowPlayerProgress ? Visibility.Visible : Visibility.Collapsed;
+            progressColorMode.IsEnabled = progressColor.IsEnabled = preferences.ShowPlayerProgress;
             progressColorEditor.Visibility = preferences.ProgressColorMode == "custom" ? Visibility.Visible : Visibility.Collapsed;
             string hex = pendingProgressColor ?? preferences.ProgressCustomColor;
             progressColor.Color = ParseProgressColor(hex); progressColorPreview.Color = ParseProgressColor(hex); progressColorValue.Text = hex;

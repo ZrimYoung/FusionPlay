@@ -16,7 +16,7 @@ internal sealed class CompactLyricsPager : IDisposable
     private const int TransitionMilliseconds = 240;
     internal const double HeaderHeight = 44;
     private readonly FrameworkElement surface, player, lyrics;
-    private readonly Button button;
+    private readonly Button focusTarget;
     private readonly Func<bool> canInteract, canAnimate;
     private readonly Action pageChanged;
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
@@ -30,10 +30,10 @@ internal sealed class CompactLyricsPager : IDisposable
     internal bool ShowingLyrics { get; private set; }
     internal bool Animating => timer.IsRunning;
 
-    internal CompactLyricsPager(FrameworkElement surface, FrameworkElement player, FrameworkElement lyrics, Button button,
+    internal CompactLyricsPager(FrameworkElement surface, FrameworkElement player, FrameworkElement lyrics, Button focusTarget,
         Func<bool> canInteract, Func<bool> canAnimate, Action pageChanged)
     {
-        this.surface = surface; this.player = player; this.lyrics = lyrics; this.button = button;
+        this.surface = surface; this.player = player; this.lyrics = lyrics; this.focusTarget = focusTarget;
         this.canInteract = canInteract; this.canAnimate = canAnimate; this.pageChanged = pageChanged;
         ElementCompositionPreview.SetIsTranslationEnabled(player, true);
         ElementCompositionPreview.SetIsTranslationEnabled(lyrics, true);
@@ -41,7 +41,6 @@ internal sealed class CompactLyricsPager : IDisposable
         timer.Interval = TimeSpan.FromMilliseconds(TransitionMilliseconds);
         timer.IsRepeating = false;
         timer.Tick += TransitionCompleted;
-        button.Click += ButtonClicked;
         surface.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Pressed), true);
         surface.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Moved), true);
         surface.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released), true);
@@ -56,7 +55,6 @@ internal sealed class CompactLyricsPager : IDisposable
         if (!Active && !active) { width = pageWidth; return; }
         Active = active; width = pageWidth;
         CancelGesture();
-        button.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
         Settle();
     }
 
@@ -71,9 +69,9 @@ internal sealed class CompactLyricsPager : IDisposable
     {
         if (!Active || !canInteract() || ShowingLyrics == showLyrics) return false;
         var outgoing = ShowingLyrics ? lyrics : player;
-        if (surface.XamlRoot is { } root && FocusManager.GetFocusedElement(root) is DependencyObject focused &&
+        if (surface.XamlRoot is { IsHostVisible: true } root && FocusManager.GetFocusedElement(root) is DependencyObject focused &&
             IsWithin(focused, outgoing))
-            button.Focus(FocusState.Programmatic);
+            focusTarget.Focus(FocusState.Programmatic);
         ShowingLyrics = showLyrics;
         if (!canAnimate()) Settle();
         else
@@ -82,7 +80,6 @@ internal sealed class CompactLyricsPager : IDisposable
             Translate(player, PlayerX, animate: true);
             Translate(lyrics, LyricsX, animate: true);
             timer.Stop(); timer.Start();
-            UpdateButton();
             pageChanged();
         }
         return true;
@@ -95,7 +92,6 @@ internal sealed class CompactLyricsPager : IDisposable
         Translate(lyrics, Active ? LyricsX : 0, animate: false);
         player.Visibility = !Active || !ShowingLyrics ? Visibility.Visible : Visibility.Collapsed;
         if (Active) lyrics.Visibility = ShowingLyrics ? Visibility.Visible : Visibility.Collapsed;
-        UpdateButton();
         pageChanged();
     }
 
@@ -105,21 +101,8 @@ internal sealed class CompactLyricsPager : IDisposable
         if (Animating) Settle();
     }
 
-    internal void RefreshLanguage()
-    {
-        if (Active) UpdateButton();
-    }
-
     private float PlayerX => ShowingLyrics ? (float)-width : 0;
     private float LyricsX => ShowingLyrics ? 0 : (float)width;
-
-    private void UpdateButton()
-    {
-        button.Content = ShowingLyrics ? L.Text("播放", "Player") : L.Text("歌词", "Lyrics");
-        string label = ShowingLyrics ? L.Text("返回播放页", "Show player page") : L.Text("显示歌词页", "Show lyrics page");
-        ToolTipService.SetToolTip(button, label);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, label);
-    }
 
     private static void Translate(FrameworkElement element, float x, bool animate)
     {
@@ -140,7 +123,6 @@ internal sealed class CompactLyricsPager : IDisposable
     }
 
     private void TransitionCompleted(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args) => Settle();
-    private void ButtonClicked(object sender, RoutedEventArgs args) => Navigate(!ShowingLyrics);
 
     private void Pressed(object sender, PointerRoutedEventArgs args)
     {
@@ -219,7 +201,7 @@ internal sealed class CompactLyricsPager : IDisposable
     private bool IsPlayerControl(DependencyObject source)
     {
         for (DependencyObject? item = source; item != null && item != surface; item = VisualTreeHelper.GetParent(item))
-            if (item is ButtonBase and not LyricsRowPresenter) return true;
+            if (item is (ButtonBase and not LyricsRowPresenter) or ScrollBar or Thumb or Slider or TextBox) return true;
         return false;
     }
 
@@ -244,6 +226,5 @@ internal sealed class CompactLyricsPager : IDisposable
         CancelGesture();
         timer.Stop();
         timer.Tick -= TransitionCompleted;
-        button.Click -= ButtonClicked;
     }
 }

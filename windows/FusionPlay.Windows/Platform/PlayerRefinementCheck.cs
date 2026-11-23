@@ -315,14 +315,14 @@ internal static class PlayerRefinementCheck
             {
                 Require(CompactLyricsPager.SwipeDirection(-64, 8, 360) == -1 && CompactLyricsPager.SwipeDirection(64, 8, 360) == 1
                     && CompactLyricsPager.SwipeDirection(64, 60, 360) == 0 && CompactLyricsPager.SwipeDirection(20, 0, 360) == 0, "paging_gesture_axis_or_threshold");
-                model!.Preferences.Update(model.Preferences.Value with { NarrowLyricsPaging = true, LyricsBackgroundMode = "album" });
+                model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "collapsed", LyricsBackgroundMode = "album" });
                 WindowSizing.ResizeContent(main!, 360, 360);
                 Accept(song);
             });
             await Parsed();
             await OnUi(queue!, () =>
             {
-                Require(Pager().Active && !Pager().ShowingLyrics && Find<Button>("MiniPageButton").IsEnabled, "compact_paging_not_on_player");
+                Require(Pager().Active && !Pager().ShowingLyrics && Find<Button>("MiniLyricsToggleButton").IsEnabled, "compact_paging_not_on_player");
                 Require(Math.Abs(Size().Width - Size().Height) <= 2 && Visible(Find<Grid>("MiniCoverPanel")), "compact_paging_lost_square_player");
                 compactLyrics = (LyricsView)Find<Grid>("MiniLyricsHost").Children[0];
                 Require(Pager().Navigate(true), "compact_lyrics_page_not_selected");
@@ -346,10 +346,43 @@ internal static class PlayerRefinementCheck
                 Require(Pager().Active && Pager().ShowingLyrics && Visible(Find<Grid>("MiniLyricsHost"))
                     && ReferenceEquals(Find<Grid>("MiniLyricsHost").Children[0], compactLyrics), "resize_replaced_or_lost_lyrics_page");
                 Require(Pager().Navigate(false) && Visible(Find<Grid>("MiniCoverPanel")), "compact_player_page_not_restored");
-                model!.Preferences.Update(model.Preferences.Value with { NarrowLyricsPaging = false });
-                Require(!Pager().Active && Find<Button>("MiniPageButton").Visibility == Visibility.Collapsed && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2,
+                model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "automatic" });
+                Require(!Pager().Active && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2,
                     "paging_preference_did_not_restore_stacked_layout");
                 Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
+            }));
+            step = "independent_album_player";
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "album", LyricsDisplayMode = "never" });
+                WindowSizing.ResizeContent(main!, 400, 275);
+                Accept(song);
+            });
+            await Parsed();
+            await Capture("album-playback-400x275");
+            await OnUi(queue!, () => Pass("album_playback_is_free_sized_and_scrollable_with_the_current_lyric", () =>
+            {
+                var size = Size();
+                var scroll = Find<ScrollViewer>("MiniAlbumScroll");
+                Require(Pager().Active && !Pager().ShowingLyrics && Math.Abs(size.Width - 400) <= 2 && Math.Abs(size.Height - 275) <= 2,
+                    "album_window_was_constrained_or_not_paged");
+                Require(Visible(scroll) && scroll.ScrollableHeight > 0 && Find<TextBlock>("AlbumLyricSummaryText").Text == "One more fixture line",
+                    "album_player_short_window_or_current_line_missing");
+                Require(ReferenceEquals(Find<Grid>("MiniLyricsHost").Children[0], compactLyrics), "album_replaced_existing_lyrics_view");
+                typeof(MainWindow).GetMethod("AlbumLyricSummary_Click", Private)!.Invoke(main, [Find<Button>("AlbumLyricSummary"), null]);
+                Require(Pager().ShowingLyrics && !LyricsVisible(), "album_summary_did_not_open_independent_lyrics");
+            }));
+            await Settle();
+            await Capture("album-lyrics-400x275");
+            await OnUi(queue!, () => Pass("album_lyrics_header_uses_independent_options_and_returns_to_playback", () =>
+            {
+                Require(Visible(Find<Button>("AlbumLyricsHeader")) && Visible(Find<Border>("AlbumLyricsArtworkFrame"))
+                    && Visible(Find<StackPanel>("AlbumLyricsMetadata")), "album_header_presentation_missing");
+                model!.Preferences.Update(model.Preferences.Value with { AlbumLyricsArtwork = false });
+                Require(!Visible(Find<Border>("AlbumLyricsArtworkFrame")) && Visible(Find<StackPanel>("AlbumLyricsMetadata")), "album_artwork_preference_changed_header_text");
+                typeof(MainWindow).GetMethod("AlbumLyricsHeader_Click", Private)!.Invoke(main, [Find<Button>("AlbumLyricsHeader"), null]);
+                Require(!Pager().ShowingLyrics, "album_lyrics_header_did_not_return_to_playback");
+                model.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", LyricsDisplayMode = "always" });
             }));
             step = "independent_lyrics_scale_and_wrapped_track";
             double titleHeight = 0, titleFontSize = 0, originalSize = 0, translationSize = 0;

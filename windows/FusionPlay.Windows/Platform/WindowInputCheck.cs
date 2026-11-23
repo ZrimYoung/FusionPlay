@@ -188,6 +188,119 @@ internal static class WindowInputCheck
                 }
                 finally { square.ResizeStarted -= Started; }
             });
+            step = "native_cover_bottom_lyrics_and_album_sizing";
+            await OnUi(queue!, () =>
+            {
+                RequireBackground();
+                int starts = 0, previews = 0, cancels = 0;
+                var commits = new List<bool>();
+                var ordering = new List<string>();
+                double scale = Math.Max(96, GetDpiForWindow(hwnd)) / 96.0;
+                int Pixels(double value) => (int)Math.Ceiling(value * scale);
+                var work = DisplayArea.GetFromWindowId(window!.AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+                int side = Pixels(360);
+                Require(work.Height >= side + Pixels(136) + 12, "cover_lyrics_work_area_too_small");
+                square!.SetPlayerLayout(false, false, compactPaging: true, coverBottomResize: true);
+                window.AppWindow.MoveAndResize(new(work.X + 8, work.Y + 8, side, side));
+                Require(GetWindowRect(hwnd, out var original), "cover_lyrics_fixture_bounds_unavailable");
+                square.CoverLyricsResizeStarted += Started;
+                square.CoverLyricsResizeExpanded += Expanded;
+                square.CoverLyricsResizeCanceled += Canceled;
+                square.CoverLyricsResizeCompleted += Completed;
+                square.MoveSizeEnded += MoveSizeEnded;
+                try
+                {
+                    Begin();
+                    Apply(6, original, side, side + Pixels(2));
+                    End();
+                    Require(starts == 0 && previews == 0 && commits.Count == 0, "minor_bottom_jitter_started_lyrics");
+                    window.AppWindow.MoveAndResize(new(original.Left, original.Top, side, side));
+
+                    Begin();
+                    var opened = Apply(6, original, side + Pixels(37), side + Pixels(80));
+                    Require(opened.Left == original.Left && opened.Top == original.Top && opened.Right == original.Right,
+                        "cover_lyrics_drag_changed_top_left_or_width");
+                    Require(opened.Bottom - opened.Top == side + Pixels(80), "cover_lyrics_live_rectangle_was_clamped_to_settled_height");
+                    Require(starts == 1 && previews == 1 && commits.Count == 0, "cover_lyrics_preview_order");
+                    End();
+                    Require(GetWindowRect(hwnd, out opened) && opened.Bottom - opened.Top == side + Pixels(136)
+                        && opened.Left == original.Left && opened.Top == original.Top, "cover_lyrics_open_snap_wrong");
+                    Require(commits.SequenceEqual(new[] { true }) && ordering.TakeLast(2).SequenceEqual(new[] { "commit", "ended" }),
+                        "cover_lyrics_open_not_committed_before_resize_end");
+
+                    Begin();
+                    int narrower = Pixels(300);
+                    var scaled = Apply(2, opened, narrower, opened.Bottom - opened.Top);
+                    End();
+                    Require(Math.Abs((scaled.Bottom - scaled.Top) - (opened.Bottom - opened.Top) * (double)narrower / side) <= 1,
+                        "ordinary_cover_side_did_not_scale_proportionally");
+                    Require(starts == 1 && commits.Count == 1, "ordinary_cover_side_committed_lyrics_pane");
+
+                    Begin();
+                    var sliver = Apply(6, scaled, narrower, narrower + Pixels(40));
+                    Require(sliver.Bottom - sliver.Top == narrower + Pixels(40) && commits.Count == 1, "cover_lyrics_closed_before_release");
+                    End();
+                    Require(GetWindowRect(hwnd, out var closed) && closed.Bottom - closed.Top == narrower
+                        && commits.SequenceEqual(new[] { true, false }), "cover_lyrics_collapse_did_not_snap_square");
+                    Require(starts == 2 && previews == 1, "cover_lyrics_collapse_reopened_preview");
+
+                    Begin();
+                    var corner = Apply(8, closed, Pixels(335), Pixels(350));
+                    End();
+                    Require(corner.Bottom - corner.Top == corner.Right - corner.Left && starts == 2 && commits.Count == 2,
+                        "corner_was_routed_to_lyrics_resize");
+
+                    square.SetPlayerLayout(true, false, compactPaging: true, independentAlbum: true);
+                    Begin();
+                    var album = Apply(6, corner, corner.Right - corner.Left, Pixels(450));
+                    End();
+                    Require(GetWindowRect(hwnd, out var actualAlbum) && actualAlbum.Bottom == album.Bottom
+                        && actualAlbum.Right == album.Right && actualAlbum.Bottom - actualAlbum.Top == Pixels(450)
+                        && starts == 2 && commits.Count == 2, "album_sizing_inherited_cover_policy");
+
+                    square.SetPlayerLayout(false, false, compactPaging: true, coverBottomResize: true);
+                    window.AppWindow.MoveAndResize(new(original.Left, original.Top, side, side));
+                    Begin();
+                    Apply(6, original, side, side + Pixels(80));
+                    window.AppWindow.MoveAndResize(new(original.Left, original.Top, side, side));
+                    End();
+                    Require(starts == 3 && previews == 2 && cancels == 1 && commits.Count == 2
+                        && ordering.TakeLast(2).SequenceEqual(new[] { "cancel", "ended" }), "cancelled_cover_resize_committed_preview");
+                    motionSamples.Add(new { name = step, starts, previews, cancels, commits, ordering });
+                }
+                finally
+                {
+                    End();
+                    square.CoverLyricsResizeStarted -= Started;
+                    square.CoverLyricsResizeExpanded -= Expanded;
+                    square.CoverLyricsResizeCanceled -= Canceled;
+                    square.CoverLyricsResizeCompleted -= Completed;
+                    square.MoveSizeEnded -= MoveSizeEnded;
+                    square.SetPlayerLayout(false, false);
+                }
+                void Started() { starts++; ordering.Add("start"); }
+                void Expanded() { previews++; ordering.Add("preview"); square.SetPlayerLayout(true, false, coverBottomResize: true); }
+                void Canceled()
+                {
+                    cancels++; ordering.Add("cancel");
+                    square.SetPlayerLayout(false, false, compactPaging: true, coverBottomResize: true);
+                }
+                void Completed(bool expanded)
+                {
+                    commits.Add(expanded); ordering.Add("commit");
+                    square.SetPlayerLayout(expanded, false, compactPaging: !expanded, coverBottomResize: true);
+                }
+                void MoveSizeEnded() => ordering.Add("ended");
+                void Begin() => _ = SendMessage(hwnd, 0x0231, 0, 0);
+                void End() => _ = SendMessage(hwnd, 0x0232, 0, 0);
+                NativeRect Apply(nuint edge, NativeRect anchor, int width, int height)
+                {
+                    var proposed = new NativeRect { Left = anchor.Left, Top = anchor.Top, Right = anchor.Left + width, Bottom = anchor.Top + height };
+                    _ = SendSizing(hwnd, 0x0214, edge, ref proposed);
+                    window.AppWindow.MoveAndResize(new(proposed.Left, proposed.Top, proposed.Right - proposed.Left, proposed.Bottom - proposed.Top));
+                    return proposed;
+                }
+            });
             step = "controlled_compositor_layout_transition";
             Border? card = null; bool contentComplete = false; int commits = 0, completions = 0;
             long contentStarted = 0; double firstCommitDelay = 0, latestCommitDelay = 0;

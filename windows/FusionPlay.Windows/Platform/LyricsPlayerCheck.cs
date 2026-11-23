@@ -321,7 +321,10 @@ internal static class LyricsPlayerCheck
         }
         void RequireMainInteraction()
         {
-            Require(Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible && Find<Grid>("MiniLyricsHost").IsHitTestVisible
+            var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
+            bool lyricPage = pager.Active && pager.ShowingLyrics;
+            Require(Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible == !lyricPage
+                && Find<Grid>("MiniLyricsHost").IsHitTestVisible == (!pager.Active || lyricPage)
                 && Find<Grid>("ExpandedDetails").IsHitTestVisible && Find<Grid>("ExpandedLyricsHost").IsHitTestVisible
                 && Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled && Find<ProgressSeekButton>("ProgressSeek").IsEnabled,
                 "main_lyrics_transition_left_interaction_disabled");
@@ -527,7 +530,7 @@ internal static class LyricsPlayerCheck
             {
                 model!.Preferences.Update(model.Preferences.Value with
                 {
-                    LyricsDisplayMode = "always", NarrowLyricsPaging = false, PlayerTextRendering = "enhanced", AlwaysShowControls = true
+                    LyricsDisplayMode = "always", CoverLyricsPane = "automatic", PlayerTextRendering = "enhanced", AlwaysShowControls = true
                 });
                 Accept(source with
                 {
@@ -710,13 +713,15 @@ internal static class LyricsPlayerCheck
                 Require(Seeking.AtFraction(seek.Snapshot!(), .5)?.ExpectedTrackId == source.TrackId, "player_seek_guard_lost_track_identity");
             }));
             step = "current_track_lyrics_toggle";
+            await OnUi(queue!, () => WindowSizing.ResizeContent(main!, 840, 640));
+            await Task.Delay(220);
             void ToggleLyrics() => Require(typeof(MainWindow).GetMethod("ToggleCurrentLyrics", Private)!.Invoke(main, null) is true,
                 "current_track_lyrics_toggle_unavailable");
             var nextSource = source with { TrackId = "lyrics-toggle-next-track" };
             await OnUi(queue!, () => Pass("current_track_lyric_override_keeps_preferences_and_survives_caption_updates", () =>
             {
                 var saved = File.ReadAllBytes(preferencesPath);
-                Require(Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Visible && LyricsVisible(), "lyrics_toggle_fixture_not_ready");
+                Require(Find<Button>("LyricsToggleButton").Visibility == Visibility.Visible && LyricsVisible(), "lyrics_toggle_fixture_not_ready");
                 ToggleLyrics();
                 Require(!LyricsVisible(), "lyrics_toggle_did_not_hide_current_track");
                 Accept(source with { Title = "A new caption for the same track" });
@@ -727,10 +732,9 @@ internal static class LyricsPlayerCheck
             await OnUi(queue!, () => Pass("current_track_lyric_override_resets_on_track_mode_change_and_disconnect", () =>
             {
                 Require(LyricsVisible(), "lyrics_override_leaked_into_next_track");
-                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never", NarrowLyricsPaging = true });
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
                 ToggleLyrics();
                 Require(LyricsVisible() && model.Preferences.Value.LyricsDisplayMode == "never", "lyrics_toggle_did_not_temporarily_show_lyrics");
-                Require(Field(main!, "miniPager") is CompactLyricsPager { Active: true }, "lyrics_toggle_did_not_enable_paged_layout");
                 model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
                 model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
                 Require(!LyricsVisible(), "changing_global_mode_kept_lyrics_override");
@@ -739,7 +743,7 @@ internal static class LyricsPlayerCheck
                 Require(!LyricsVisible() && Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Collapsed, "lyrics_shortcut_retained_when_disconnected");
                 Accept(nextSource);
                 Require(!LyricsVisible(), "lyrics_override_survived_disconnect_and_reconnect");
-                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic", NarrowLyricsPaging = false });
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
                 Accept(source);
             }));
             await WaitLyrics();
@@ -1371,6 +1375,58 @@ internal static class LyricsPlayerCheck
             }));
             step = "native_resize_typography";
             await CheckNativeResizeTypography();
+            step = "native_cover_bottom_paging";
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", CoverLyricsPane = "collapsed", LyricsDisplayMode = "never" });
+                Accept(source with { Phase = ReceiverPhase.Paused });
+                WindowSizing.ResizeContent(main!, 360, 360);
+            });
+            await WaitLyrics();
+            await Task.Delay(180);
+            await OnUi(queue!, () => Pass("collapsed_cover_opens_lyrics_page_even_with_global_visibility_off", () =>
+            {
+                Require(Field(main!, "miniPager") is CompactLyricsPager { Active: true } pager && pager.Navigate(true), "collapsed_cover_lyrics_page_unreachable");
+                Require(!LyricsVisible(), "cover_paging_changed_lyric_visibility_preference");
+            }));
+            async Task DragCoverPane(int height, bool expanded)
+            {
+                await OnUi(queue!, () =>
+                {
+                    var size = MainSize();
+                    double scale = GetDpiForWindow(mainHwnd) / 96d;
+                    Require(Math.Abs(size.Width - 360) <= 2 && GetWindowRect(mainHwnd, out _), "native_cover_fixture_not_square_width");
+                    _ = GetWindowRect(mainHwnd, out var bounds);
+                    bounds.Bottom += (int)Math.Round((height - size.Height) * scale);
+                    _ = SendMessage(mainHwnd, 0x0231, 0, 0);
+                    _ = SendSizing(mainHwnd, 0x0214, 6, ref bounds);
+                    WindowSizing.ResizeContent(main!, size.Width, height);
+                });
+                try
+                {
+                    await Task.Delay(130);
+                    await OnUi(queue!, () =>
+                    {
+                        Require(Field(main!, "coverLyricsResizing") is true && Field(main!, "miniPager") is CompactLyricsPager { Active: false }
+                            && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2 && Find<Grid>("MiniLyricsHost").Visibility == Visibility.Visible,
+                            "native_cover_drag_enabled_paging_or_lost_preview");
+                    });
+                }
+                finally { await OnUi(queue!, () => { _ = SendMessage(mainHwnd, 0x0232, 0, 0); }); }
+                await Task.Delay(180);
+                await OnUi(queue!, () => Pass(expanded ? "native_bottom_expands_and_persists_cover_pane" : "native_bottom_collapses_then_restores_horizontal_paging", () =>
+                {
+                    var size = MainSize();
+                    var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
+                    string pane = expanded ? "expanded" : "collapsed";
+                    Require(!pager.ShowingLyrics && pager.Active != expanded && Math.Abs(size.Height - (expanded ? 496 : 360)) <= 2,
+                        "native_cover_settle_height_or_paging_wrong");
+                    Require(model!.Preferences.Value.LyricsDisplayMode == "never" && new UiPreferencesStore(store.Data).Value.CoverLyricsPane == pane,
+                        "native_cover_gesture_lost_pane_or_changed_global_lyrics_mode");
+                }));
+            }
+            await DragCoverPane(440, expanded: true);
+            await DragCoverPane(388, expanded: false);
             step = "fullscreen_policy_without_presenter_attachment";
             await OnUi(queue!, () => Pass(step, () =>
             {

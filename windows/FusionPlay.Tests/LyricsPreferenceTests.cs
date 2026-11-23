@@ -41,17 +41,17 @@ internal static class LyricsPreferenceTests
             Require(recovered.Value.LyricsBackgroundMode == "album" && recovered.LoadError.Length > 0
                 && File.ReadAllBytes(backup).AsSpan().SequenceEqual(corrupt), "invalid stored background did not preserve its original and recover defaults");
         });
-        check("lyrics motion and compact paging: defaults, persistence and invalid settings", () =>
+        check("lyrics motion and text sizing: defaults, persistence and invalid settings", () =>
         {
             using var temporary = new TemporaryDirectory();
             string path = Path.Combine(temporary.Path, "ui-preferences.json");
             File.WriteAllText(path, "{\"show_progress\":false}");
             var store = new UiPreferencesStore(temporary.Path);
             Require(store.Value is { LyricsStaggerEnabled: true, LyricsStaggerMilliseconds: 140,
-                LyricsFollowDurationMilliseconds: 420, NarrowLyricsPaging: false, LyricsTextScalePercent: 100,
+                LyricsFollowDurationMilliseconds: 420, LyricsTextScalePercent: 100,
                 WrapTrackMetadata: true }, "old files did not receive lyrics and track display defaults");
             store.Update(store.Value with { LyricsStaggerEnabled = false, LyricsStaggerMilliseconds = 1000,
-                LyricsFollowDurationMilliseconds = 1500, NarrowLyricsPaging = true, LyricsTextScalePercent = 200,
+                LyricsFollowDurationMilliseconds = 1500, LyricsTextScalePercent = 200,
                 WrapTrackMetadata = false });
             Require(new UiPreferencesStore(temporary.Path).Value == store.Value, "lyrics and track display settings did not persist");
             var before = store.Value;
@@ -64,6 +64,38 @@ internal static class LyricsPreferenceTests
                 catch (ArgumentException) { }
                 Require(store.Value == before && File.ReadAllBytes(path).AsSpan().SequenceEqual(saved), "invalid timing modified preferences");
             }
+        });
+        check("compact player layouts: retain legacy paging, inherit shared controls and persist independent mode options", () =>
+        {
+            using var temporary = new TemporaryDirectory();
+            string path = Path.Combine(temporary.Path, "ui-preferences.json");
+            const string legacy = """{"narrow_lyrics_paging":true,"show_progress":false,"lyrics_display_mode":"always"}""";
+            File.WriteAllText(path, legacy);
+            var store = new UiPreferencesStore(temporary.Path);
+            Require(store.Value is { NarrowPlayerLayout: "cover", CoverLyricsPane: "collapsed", LyricsDisplayMode: "always",
+                ShowPlayerProgress: false, ShowPlayerTransport: true, AlbumLyricsArtwork: true, AlbumLyricsTrackInfo: true },
+                "legacy paging or shared controls did not migrate");
+            Require(File.ReadAllText(path) == legacy, "loading changed the original preferences file");
+
+            var cover = store.Value with { CoverLyricsPane = "expanded", CoverShowTransport = false, CoverShowProgress = true };
+            store.Update(cover);
+            var reopened = new UiPreferencesStore(temporary.Path);
+            Require(reopened.Value == cover && !reopened.Value.ShowPlayerTransport && reopened.Value.ShowPlayerProgress,
+                "cover state or independent controls did not persist");
+            Require(!File.ReadAllText(path).Contains("narrow_lyrics_paging", StringComparison.Ordinal), "the legacy flag was written again");
+            var album = cover with { NarrowPlayerLayout = "album", AlbumShowProgress = true, AlbumLyricsArtwork = false, AlbumLyricsTrackInfo = false };
+            store.Update(album);
+            Require(new UiPreferencesStore(temporary.Path).Value == album && album.ShowPlayerTransport && album.ShowPlayerProgress
+                && (album with { NarrowPlayerLayout = "cover" }).ShowPlayerTransport == false,
+                "album preferences changed the cover controls or failed to inherit defaults");
+
+            try { store.Update(album with { CoverLyricsPane = "unsupported" }); throw new InvalidOperationException("invalid pane state accepted"); }
+            catch (ArgumentException) { }
+            try { store.Update(album with { NarrowPlayerLayout = "unsupported" }); throw new InvalidOperationException("invalid layout accepted"); }
+            catch (ArgumentException) { }
+            Require(store.Value == album && new UiPreferencesStore(temporary.Path).Value == album, "invalid write changed layout preferences");
+            File.WriteAllText(path, """{"narrow_lyrics_paging":true,"COVER_LYRICS_PANE":"automatic"}""");
+            Require(new UiPreferencesStore(temporary.Path).Value.CoverLyricsPane == "automatic", "legacy paging replaced an explicit pane state");
         });
         check("expanded lyrics: fullscreen content stays centered and bounded independently of the cover height", () =>
         {

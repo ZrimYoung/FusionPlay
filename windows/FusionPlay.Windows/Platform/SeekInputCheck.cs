@@ -253,7 +253,12 @@ internal static class SeekInputCheck
                 preferencesCaptured = true;
                 controller = new ReceiverController(queue!); controllerCreated = true;
                 originalPreferences = controller.Preferences.Value;
-                controller.Preferences.Update(originalPreferences with { AlwaysShowControls = true, ShowProgress = true, ShowTransport = true, Pinned = false, ShowPinButton = false, LyricsDisplayMode = "never" });
+                controller.Preferences.Update(originalPreferences with
+                {
+                    AlwaysShowControls = true, ShowProgress = true, ShowTransport = true, Pinned = false, ShowPinButton = false,
+                    LyricsDisplayMode = "never", NarrowPlayerLayout = "cover", CoverLyricsPane = "automatic",
+                    CoverShowProgress = null, CoverShowTransport = null
+                });
                 var initialized = typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized));
                 Require(initialized?.GetSetMethod(nonPublic: true) != null, "initialized_fixture_setter_missing");
                 initialized!.SetValue(controller, true); initializedFlagIsFixture = true;
@@ -463,10 +468,11 @@ internal static class SeekInputCheck
                     controller!.Preferences.Update(controller.Preferences.Value with { ShowProgress = false });
                     // Check the synchronous preference notification before layout
                     // can unload controls and independently cancel the gesture.
-                    Require(!active.PointerSeekActive && !active.IsEnabled, "real_main_hidden_gesture_not_canceled_immediately");
+                    Require(!active.PointerSeekActive && !active.IsEnabled && !active.BeginPointer(20, 1, active.ActualWidth, true),
+                        "real_main_hidden_gesture_not_canceled_immediately");
                     Pass("real_main_hide_immediately_removes_seek_passthrough_" + mode, () =>
                     {
-                        var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                        var holes = MainControlPassthrough();
                         Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_fading_progress_hole_remains");
                     });
                     ArrangeMain(width, height);
@@ -478,7 +484,7 @@ internal static class SeekInputCheck
                     Require(Find<FrameworkElement>("ProgressPanel").Visibility == Visibility.Collapsed && Find<FrameworkElement>("MiniProgressPanel").Visibility == Visibility.Collapsed, "real_main_progress_group_not_collapsed");
                     foreach (var seek in new[] { Find<ProgressSeekButton>("ProgressSeek"), Find<ProgressSeekButton>("MiniProgressSeek") })
                         Require(!seek.IsEnabled && !seek.PointerSeekActive, "real_main_hidden_seek_still_available");
-                    var holes = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                    var holes = MainControlPassthrough();
                     // Transport can move into the old progress strip. It must not
                     // preserve a full-width hole that covered the old seek target.
                     Require(holes.All(rect => !Contains(rect, oldProgressRegion)), "real_main_hidden_progress_hole_remains");
@@ -509,7 +515,7 @@ internal static class SeekInputCheck
                         Require(panel.Clip is RectangleGeometry clip && Math.Abs(clip.Rect.Height - panel.ActualHeight) < .01 && Math.Abs(clip.Rect.Width - panel.ActualWidth) < .01, "real_main_animated_progress_not_clipped");
                         var full = MainRegion(active, (FrameworkElement)main!.Content);
                         var viewport = MainRegion(panel, (FrameworkElement)main.Content);
-                        var holes = InputNonClientPointerSource.GetForWindowId(main.AppWindow.Id).GetRegionRects(NonClientRegionKind.Passthrough);
+                        var holes = MainControlPassthrough();
                         foreach (var hole in holes.Where(rect => Overlaps(rect, full) && rect.Width >= full.Width))
                             Require(Contains(viewport, Intersect(hole, full)), "real_main_expanding_seek_hole_exceeds_viewport");
                         mainSamples.Add(new { mode, phase = "progress_expansion_clip", mid_animation_observed = !double.IsNaN(panel.Height), viewport_region = new[] { viewport.X, viewport.Y, viewport.Width, viewport.Height }, full_target_region = new[] { full.X, full.Y, full.Width, full.Height } });
@@ -752,6 +758,16 @@ internal static class SeekInputCheck
             var content = (FrameworkElement)main!.Content;
             content.Measure(new global::Windows.Foundation.Size(width, height)); content.Arrange(new global::Windows.Foundation.Rect(0, 0, width, height)); content.UpdateLayout();
             main.RefreshAppearance(); content.UpdateLayout(); Background();
+        }
+        RectInt32[] MainControlPassthrough()
+        {
+            var input = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id);
+            var rectangles = input.GetRegionRects(NonClientRegionKind.Passthrough);
+            if (typeof(MainWindow).GetField("miniPager", Private)?.GetValue(main) is not CompactLyricsPager { Active: true }) return rectangles;
+            int top = (int)Math.Ceiling(CompactLyricsPager.HeaderHeight * ((FrameworkElement)main.Content).XamlRoot!.RasterizationScale);
+            int bottom = input.GetRegionRects(NonClientRegionKind.BottomBorder).Single().Y;
+            // Horizontal gestures own the page body even when a control is hidden.
+            return rectangles.Where(rect => rect.Y != top || rect.Y + rect.Height != bottom).ToArray();
         }
         RectInt32 MainRegion(FrameworkElement element, FrameworkElement content)
         {
