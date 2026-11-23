@@ -117,6 +117,7 @@ class FusionPlayRuntime(
     private var coreReceiverError: String? = null
     private var miPlayReceiverError: String? = null
     private var miPlayAudioError: String? = null
+    private var miPlaySourceSwitchError: String? = null
     private var networkPlaybackError: String? = null
     private var bridgeInitializationError: String? = null
     private val networkPlayer = NativeNetworkPlayer(context) { message ->
@@ -926,20 +927,22 @@ class FusionPlayRuntime(
                             }
                             val takeover = runCatching {
                                 viewModel.takeOverWithExternalSource(CORE_SOURCE_XIAOMI, "audio")
-                            }.onFailure { reportError("小米妙播切换播放源失败", it) }
+                            }.onFailure { reportMiPlaySourceSwitchError("小米妙播切换播放源失败", it) }
                             if (takeover.isSuccess) {
                                 val resumed = runCatching { bridge.resumeXiaomiOutput() }
-                                    .onFailure { reportError("小米妙播恢复输出失败", it) }
+                                    .onFailure { reportMiPlaySourceSwitchError("小米妙播恢复输出失败", it) }
                                 if (resumed.isSuccess) {
                                     activatePlaybackSource(
                                         MediaSource.XIAOMI_MIPLAY,
                                         previousAlreadySuspendedByCore = true,
                                     )
+                                    clearMiPlaySourceSwitchError()
                                 }
                             }
                         }
                         null -> Unit
                         else -> {
+                            clearMiPlaySourceSwitchError()
                             xiaomiTakeoverGate.confirmPaused()
                             viewModel.pauseConnectedXiaomiAndExposeIfForegroundIdle()
                             mediaSourceArbiter.deactivate(MediaSource.XIAOMI_MIPLAY)
@@ -947,6 +950,7 @@ class FusionPlayRuntime(
                     }
                 }
                 is XiaomiPlaybackMutation.Deactivate -> {
+                    clearMiPlaySourceSwitchError()
                     xiaomiTakeoverGate.reset()
                     // Pause already releases the arbiter; still remove the cached/UI
                     // session when its media route subsequently ends.
@@ -1164,7 +1168,7 @@ class FusionPlayRuntime(
         diagnostics = diagnostics.copy(
             coverAvailable = FusionPlayMediaChannel.currentArtwork() != null,
             receiverError = listOfNotNull(
-                coreReceiverError, miPlayReceiverError, miPlayAudioError, networkPlaybackError,
+                coreReceiverError, miPlayReceiverError, miPlayAudioError, miPlaySourceSwitchError, networkPlaybackError,
                 bridgeInitializationError,
             ).distinct().joinToString("\n").ifEmpty { null },
         ),
@@ -1232,6 +1236,7 @@ class FusionPlayRuntime(
     }
 
     private fun resetMiPlayDiagnostics() {
+        clearMiPlaySourceSwitchError()
         miPlayAudioDeviceId = null
         diagnostics = NativeReceiverDiagnostics(
             lanInterface = diagnostics.lanInterface,
@@ -1384,11 +1389,26 @@ class FusionPlayRuntime(
         }
     }
 
-    private fun reportError(prefix: String, error: Throwable): String {
-        if (error is CancellationException) throw error
-        val message = "$prefix：${error.message ?: error.javaClass.simpleName}"
+    private fun reportMiPlaySourceSwitchError(prefix: String, error: Throwable) {
+        val message = failureMessage(prefix, error)
+        if (miPlaySourceSwitchError == message) return
+        miPlaySourceSwitchError = message
         viewModel.reportExternalLog(message, isError = true)
-        return message
+    }
+
+    private fun clearMiPlaySourceSwitchError() {
+        val previous = miPlaySourceSwitchError
+        miPlaySourceSwitchError = null
+        viewModel.clearErrorIfMatches(previous)
+    }
+
+    private fun reportError(prefix: String, error: Throwable): String = failureMessage(prefix, error).also {
+        viewModel.reportExternalLog(it, isError = true)
+    }
+
+    private fun failureMessage(prefix: String, error: Throwable): String {
+        if (error is CancellationException) throw error
+        return "$prefix：${error.message ?: error.javaClass.simpleName}"
     }
 
     private fun logCoreConfiguration(

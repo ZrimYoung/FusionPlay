@@ -264,9 +264,14 @@ class CoreProcessService(
                 ?.takeIf(String::isNotEmpty)
                 ?.let { put("media_kind", it) }
         }
-        // Both native protocol runtimes share one playback arbiter, so a
-        // single command is enough to suspend whichever core source is active.
-        writeNdjson(payload.toString(), "auto")
+        val line = payload.toString()
+        lifecycleMutex.withLock {
+            ensureOpen()
+            val peers = CoreProtocol.entries.filter(appliedConfigurations::containsKey).map { it.wireName }
+            // A running peer is enough to reach the shared playback arbiter.
+            // JNI only queues this command, so it never waits for a callback under the lock.
+            sendCoreTakeoverToPeers(peers) { peer -> FusionPlayNative.nativeSendCoreCommand(peer, line) }
+        }
     }
 
     suspend fun shutdown() {
@@ -311,7 +316,7 @@ class CoreProcessService(
     private suspend fun writeNdjson(line: String, target: String = "auto") {
         ensureOpen()
         if (!FusionPlayNative.nativeSendCoreCommand(target, line)) {
-            throw IllegalStateException("The requested receiver service is not running.")
+            throw IllegalStateException(RECEIVER_NOT_RUNNING)
         }
     }
 
@@ -372,6 +377,12 @@ class CoreProcessService(
 
         data class Log(val message: String, val isError: Boolean) : NativeCoreCallback
     }
+}
+
+private const val RECEIVER_NOT_RUNNING = "The requested receiver service is not running."
+
+internal fun sendCoreTakeoverToPeers(peers: Collection<String>, send: (String) -> Boolean) {
+    check(peers.isEmpty() || peers.any(send)) { RECEIVER_NOT_RUNNING }
 }
 
 internal fun buildCoreProcessCommand(
