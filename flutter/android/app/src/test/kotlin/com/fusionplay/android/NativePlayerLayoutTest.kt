@@ -55,16 +55,17 @@ class NativePlayerLayoutTest {
     }
 
     @Test
-    fun `split view and larger text stack the same player content`() {
+    fun `narrow touch displays page lyrics while large text keeps the stacked layout`() {
         val lyrics = NativePlayerPreferences(showLyrics = true)
         val split = NativePlayerLayout.fit(530f, 760f, lyrics, largeText = false)
         val largeText = NativePlayerLayout.fit(1024f, 680f, lyrics, largeText = true)
 
-        for (layout in listOf(split, largeText)) {
-            assertEquals(Mode.STACKED, layout.mode)
-            assertTrue(layout.coverSide in 1f..layout.contentWidth)
-            assertTrue(layout.lyricsHeight in 280f..520f)
-        }
+        assertEquals(Mode.PAGED_LYRICS, split.mode)
+        assertEquals(760f - 2 * split.verticalInset, split.lyricsHeight, 0.01f)
+        assertTrue(split.coverSide in 1f..split.contentWidth)
+        assertEquals(Mode.STACKED, largeText.mode)
+        assertTrue(largeText.coverSide in 1f..largeText.contentWidth)
+        assertTrue(largeText.lyricsHeight in 280f..520f)
     }
 
     @Test

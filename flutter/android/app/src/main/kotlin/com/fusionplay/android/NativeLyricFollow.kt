@@ -1,11 +1,18 @@
 package com.fusionplay.android
 
 import com.airplayreceiver.desktop.backend.LyricsDocument
+import kotlin.math.roundToInt
 
 internal object NativeLyricFollow {
     // MiPlay extrapolates in 500 ms ticks. A delayed sender sample may briefly
     // fall just before a line the receiver has already reached.
     private const val BACKWARD_TOLERANCE_MS = 750L
+
+    /** Keep a followed or selected line at its viewport fraction, and preserve a scrolled row's offset. */
+    fun resizeAnchorTop(top: Float, oldHeight: Int, newHeight: Int, proportional: Boolean): Int {
+        val offset = if (proportional && oldHeight > 0) top * (newHeight.toFloat() / oldHeight) else top
+        return offset.roundToInt().takeIf { it < newHeight } ?: 0
+    }
 
     fun activeIndex(
         document: LyricsDocument?,

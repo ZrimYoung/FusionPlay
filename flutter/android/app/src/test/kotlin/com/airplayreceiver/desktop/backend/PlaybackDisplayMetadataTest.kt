@@ -7,6 +7,55 @@ import org.junit.Test
 
 class PlaybackDisplayMetadataTest {
     @Test
+    fun sdkLabelsPreserveOriginalTextAndQualifiedCreditsSeparately() {
+        val sender = PlaybackDisplayMetadata("  now we are going home  ", "Alpha", "Sender Album")
+        val corrected = PlaybackDisplayMetadata("Night Walk (Live)", "Alpha/Beta", "Sender Album")
+        val playback = PlaybackSnapshot(protocol = XIAOMI_PROTOCOL).receive(
+            id = "one", title = "Night Walk", artist = "Alpha", album = "Header Album",
+            lrc = "[ti:Night Walk][ar:Alpha][al:Header Album]\n[00:05]now we are going home",
+            position = 5_000L, flagged = true, senderMetadata = sender, sdkMetadata = corrected,
+        )
+        assertEquals(sender, playback.displayMetadata(false))
+        assertEquals(corrected, playback.displayMetadata(true))
+        assertEquals("Night Walk", playback.title)
+        assertEquals("one", playback.trackIdentity)
+        assertEquals(
+            "Sender Album",
+            playback.copy(sdkDisplayMetadata = corrected.copy(album = null)).displayMetadata(true).album,
+        )
+
+        val partial = playback.receive(
+            id = "one", replace = false, position = 8_000L,
+            senderMetadata = PlaybackDisplayMetadata(title = "home", artist = "", album = ""),
+            sdkMetadata = PlaybackDisplayMetadata(album = "Updated Album"),
+        )
+        assertEquals(sender.copy(title = "home"), partial.displayMetadata(false))
+        assertEquals(corrected.copy(album = "Updated Album"), partial.displayMetadata(true))
+        assertEquals(8_000L, partial.positionMs)
+    }
+
+    @Test
+    fun explicitEmptyProjectionSurvivesPartialUpdatesAndClearsOnNewTrack() {
+        val previous = PlaybackSnapshot(protocol = XIAOMI_PROTOCOL).receive(
+            id = "one", title = "Previous Song", artist = "Previous Artist",
+            lrc = "[ti:Previous Song][ar:Previous Artist]\n[00:05]Another caption",
+            sdkMetadata = PlaybackDisplayMetadata(title = "Previous Song (Live)", artist = "Previous Artist"),
+        )
+        val next = previous.receive(
+            id = "one", title = "Another caption", flagged = true, trackTransition = "new",
+            senderMetadata = PlaybackDisplayMetadata(title = "Another caption"),
+            sdkMetadata = PlaybackDisplayMetadata(title = ""),
+        )
+        val tick = next.receive(id = "one", replace = false, position = 2_000L)
+        assertEquals(PlaybackDisplayMetadata(title = "Another caption"), tick.displayMetadata(false))
+        assertEquals(PlaybackDisplayMetadata(title = ""), tick.displayMetadata(true))
+        assertNull(tick.lyrics)
+
+        val legacy = tick.receive(id = "two", title = "Next Song")
+        assertEquals(PlaybackDisplayMetadata(title = "Next Song"), legacy.displayMetadata(true))
+    }
+
+    @Test
     fun captionCorrectionUsesLocalHeadersWithoutChangingTransport() {
         val lrc = "[ti:Night-Walk][ar:Example-Artist][al:Record]\n[00:10.00]<00:10.00>Now we are going home"
         val playback = PlaybackSnapshot(protocol = XIAOMI_PROTOCOL).receive(
@@ -117,10 +166,14 @@ class PlaybackDisplayMetadataTest {
         id: String?, title: String? = null, artist: String? = null, album: String? = null,
         position: Long? = null, lrc: String? = null, flagged: Boolean? = null, replace: Boolean = true,
         idSource: String? = null,
+        trackTransition: String? = null,
+        senderMetadata: PlaybackDisplayMetadata? = null,
+        sdkMetadata: PlaybackDisplayMetadata? = null,
     ): PlaybackSnapshot = applyXiaomiMediaInfo(
         trackId = id, title = title, artist = artist, album = album, artworkUrl = null,
         durationMs = 120_000, positionMs = position, replaceTrack = replace,
         lyrics = lrc?.let { LrcParser.parse(it) }, lyricHeaders = lrc?.let(::parseLrcDisplayHeaders), titleIsLyric = flagged,
         trackIdSource = idSource,
+        trackTransition = trackTransition, senderMetadata = senderMetadata, sdkDisplayMetadata = sdkMetadata,
     )
 }

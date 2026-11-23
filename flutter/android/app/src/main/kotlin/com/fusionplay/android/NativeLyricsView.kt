@@ -16,6 +16,7 @@ import android.graphics.drawable.StateListDrawable
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import android.util.SparseArray
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -66,8 +67,13 @@ internal class NativeLyricsView(
     var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)? = null
     private var staggerSpan = 0
     private var followAnimator: ValueAnimator? = null
+    private var documentAlignmentPending = false
+    private var positioningIndex: Int? = null
     private val resumeFollow = Runnable { followCurrent() }
-    private val alignCurrentLine = Runnable { followCurrent() }
+    private val alignCurrentLine = Runnable {
+        documentAlignmentPending = false
+        followCurrent()
+    }
 
     init {
         if (television) {
@@ -185,11 +191,14 @@ internal class NativeLyricsView(
         }
         if (rowsChanged) {
             if (trackChanged && playingIndex == null) list.setSelection(0)
+            documentAlignmentPending = true
             scheduleLineAlignment()
         } else if (playingIndex != previousIndex) {
             followCurrent(previousIndex.takeIf { !requestedJump && playback.isPlaying })
         }
     }
+
+    fun currentLineText(): String? = playingIndex?.let { document?.lines?.getOrNull(it)?.text }
 
     fun expectSeek(positionMs: Long) {
         expectedSeek = ExpectedSeek(positionMs, SystemClock.uptimeMillis() + SEEK_WINDOW_MS)
@@ -210,16 +219,57 @@ internal class NativeLyricsView(
 
     override fun onSizeChanged(width: Int, height: Int, oldWidth: Int, oldHeight: Int) {
         super.onSizeChanged(width, height, oldWidth, oldHeight)
+        val anchor = if (!documentAlignmentPending && width > 0 && height > 0 && oldHeight > 0) {
+            resizeAnchor(oldHeight, height)
+        } else null
         cancelFollowMotion()
         updateScrollInsets()
-        if (width != oldWidth) rows.notifyDataSetChanged()
-        scheduleLineAlignment()
+        if (anchor == null) {
+            scheduleLineAlignment()
+        } else {
+            removeCallbacks(alignCurrentLine)
+            val (index, top) = anchor
+            positionLine(index, top)
+        }
+    }
+
+    private fun resizeAnchor(oldHeight: Int, newHeight: Int): Pair<Int, Int>? {
+        val lineCount = document?.lines?.size ?: return null
+        val selected = list.selectedItemPosition.takeIf { remoteBrowsing && it in 1..lineCount }?.minus(1)
+        val preferred = selected ?: playingIndex.takeUnless { isBrowsing() }
+        val child = preferred?.let { list.getChildAt(it + 1 - list.firstVisiblePosition) } as? LyricRow
+        if (preferred != null && child != null && child.bottom + child.translationY > 0f &&
+            child.top + child.translationY < oldHeight
+        ) {
+            val top = child.top + child.translationY - list.paddingTop
+            return preferred to NativeLyricFollow.resizeAnchorTop(top, oldHeight, newHeight, proportional = true)
+        }
+        if (selected != null) return selected to (newHeight * ANCHOR).roundToInt()
+        if (!isBrowsing()) return null
+
+        var firstVisible = -1
+        for (index in 0 until list.childCount) {
+            val row = list.getChildAt(index) as? LyricRow ?: continue
+            if (row.bottom <= list.paddingTop || row.top >= oldHeight) continue
+            if (firstVisible < 0) firstVisible = index
+            // Keep the next fully visible row when the first is clipped by a long line.
+            if (row.top >= list.paddingTop && row.bottom <= oldHeight) {
+                firstVisible = index
+                break
+            }
+        }
+        val visible = list.getChildAt(firstVisible) ?: return null
+        val position = list.firstVisiblePosition + firstVisible - 1
+        if (position !in 0 until lineCount) return null
+        val top = (visible.top - list.paddingTop).toFloat()
+        return position to NativeLyricFollow.resizeAnchorTop(top, oldHeight, newHeight, proportional = false)
     }
 
     override fun onDetachedFromWindow() {
         stopRemoteBrowse(returnToPane = false)
         removeCallbacks(resumeFollow)
         removeCallbacks(alignCurrentLine)
+        documentAlignmentPending = false
         cancelFollowMotion()
         expectedSeek = null
         super.onDetachedFromWindow()
@@ -230,6 +280,8 @@ internal class NativeLyricsView(
         if (!isVisible) {
             stopRemoteBrowse(returnToPane = false)
             cancelFollowMotion()
+        } else {
+            scheduleLineAlignment()
         }
     }
 
@@ -256,7 +308,7 @@ internal class NativeLyricsView(
         val firstVisibleLine = (list.firstVisiblePosition - 1).coerceIn(0, lineCount - 1)
         val line = playingIndex?.takeIf { it in 0 until lineCount } ?: firstVisibleLine
         val offset = if (playingIndex == line) (list.height * ANCHOR).roundToInt() else dp(12)
-        list.setSelectionFromTop(line + 1, offset)
+        positionLine(line, offset)
         onRemoteLyricsBrowsingChanged?.invoke(true)
     }
 
@@ -298,12 +350,23 @@ internal class NativeLyricsView(
         post(alignCurrentLine)
     }
 
+    private fun isBrowsing(): Boolean = userScrolling || touchBrowsing ||
+        SystemClock.uptimeMillis() < browsingUntil || accessibility?.isTouchExplorationEnabled == true ||
+        list.hasFocus() || remoteBrowsing
+
+    private fun positionLine(index: Int, top: Int) {
+        // ListView otherwise advances past disabled rows when positioning with a remote.
+        positioningIndex = index
+        try {
+            list.setSelectionFromTop(index + 1, top)
+        } finally {
+            positioningIndex = null
+        }
+    }
+
     private fun followCurrent(previousIndex: Int? = null) {
         val index = playingIndex ?: return
-        if (!isShown || height == 0 || userScrolling || touchBrowsing || SystemClock.uptimeMillis() < browsingUntil ||
-            accessibility?.isTouchExplorationEnabled == true || list.hasFocus() || remoteBrowsing
-        ) return
-        cancelFollowMotion()
+        if (!isShown || height == 0 || isBrowsing()) return
         val target = index + 1 // The timed list has a blank header above its first row.
         val offset = (height * ANCHOR).roundToInt()
         val row = list.getChildAt(target - list.firstVisiblePosition)
@@ -311,16 +374,30 @@ internal class NativeLyricsView(
             !list.isLayoutRequested && motionEnabled()
         ) {
             val distance = row.top - offset - list.paddingTop
-            if (distance == 0) return
             if (distance > 0) {
-                animateFollow(distance)
+                val residual = captureResidualOffsets()
+                cancelFollowMotion(clearOffsets = residual == null)
+                animateFollow(distance, residual)
                 return
             }
+            if (distance == 0 && followAnimator == null) return
         }
-        list.setSelectionFromTop(target, offset)
+        cancelFollowMotion()
+        positionLine(index, offset)
     }
 
-    private fun animateFollow(distancePx: Int) {
+    private fun captureResidualOffsets(): SparseArray<Float>? {
+        if (followAnimator == null || staggerSpan == 0) return null
+        val residual = SparseArray<Float>(list.childCount)
+        val density = resources.displayMetrics.density
+        for (index in 0 until list.childCount) {
+            val row = list.getChildAt(index) as? LyricRow ?: continue
+            if (row.translationY != 0f) residual.put(list.firstVisiblePosition + index, row.translationY / density)
+        }
+        return residual.takeIf { it.size() > 0 }
+    }
+
+    private fun animateFollow(distancePx: Int, residual: SparseArray<Float>?) {
         val span = staggerSpan
         val density = resources.displayMetrics.density
         var scrolled = 0
@@ -342,7 +419,8 @@ internal class NativeLyricsView(
                 for (index in 0 until list.childCount) {
                     val row = list.getChildAt(index) as? TextView ?: continue
                     val center = (row.top + row.bottom) * .5f / list.height
-                    row.translationY = density * NativeLyricStagger.offsetDp(elapsed, center, span, direction = 1)
+                    val carry = residual?.get(list.firstVisiblePosition + index, 0f) ?: 0f
+                    row.translationY = density * NativeLyricStagger.offsetDp(elapsed, center, span, direction = 1, residualDp = carry)
                 }
             }
             addListener(object : AnimatorListenerAdapter() {
@@ -357,13 +435,13 @@ internal class NativeLyricsView(
         animator.start()
     }
 
-    private fun cancelFollowMotion() {
+    private fun cancelFollowMotion(clearOffsets: Boolean = true) {
         val animator = followAnimator ?: return
         followAnimator = null
         animator.removeAllUpdateListeners()
         animator.removeAllListeners()
         animator.cancel()
-        resetRowOffsets()
+        if (clearOffsets) resetRowOffsets()
     }
 
     private fun resetRowOffsets() {
@@ -464,7 +542,8 @@ internal class NativeLyricsView(
         override fun getItem(position: Int) = document?.lines?.getOrNull(position)
         override fun getItemId(position: Int): Long = position.toLong()
         override fun areAllItemsEnabled(): Boolean = false
-        override fun isEnabled(position: Int): Boolean = remoteBrowsing || (seeking && getItem(position)?.startMs != null)
+        override fun isEnabled(position: Int): Boolean = position == positioningIndex || remoteBrowsing ||
+            (seeking && getItem(position)?.startMs != null)
 
         override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
             val row = (convertView as? LyricRow) ?: LyricRow(context).apply {
@@ -474,9 +553,6 @@ internal class NativeLyricsView(
                 importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
             }
             row.translationY = 0f
-            val widthDp = width / resources.displayMetrics.density
-            row.textSize = if (television) (widthDp * .065f).coerceIn(21f, 29f)
-            else (widthDp * .076f).coerceIn(24f, 36f)
             row.text = getItem(position)?.text.orEmpty()
             updateHighlight(row, position)
             return row
@@ -493,8 +569,21 @@ internal class NativeLyricsView(
         }
     }
 
-    private class LyricRow(context: Context) : TextView(context) {
+    private inner class LyricRow(context: Context) : TextView(context) {
         var blurLevel = 0
+        private var measuredTextSize = 0f
+
+        override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+            // A width change remeasures attached rows without invalidating the adapter.
+            val widthDp = View.MeasureSpec.getSize(widthMeasureSpec) / resources.displayMetrics.density
+            val size = if (television) (widthDp * .065f).coerceIn(21f, 29f)
+            else (widthDp * .076f).coerceIn(24f, 36f)
+            if (measuredTextSize != size) {
+                measuredTextSize = size
+                textSize = size
+            }
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec)
+        }
     }
 
     @TargetApi(Build.VERSION_CODES.S)

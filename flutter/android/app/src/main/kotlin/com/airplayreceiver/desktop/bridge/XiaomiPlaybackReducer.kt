@@ -6,6 +6,7 @@ import com.airplayreceiver.desktop.backend.PlaybackDisplayMetadata
 import com.airplayreceiver.desktop.backend.containsExactTimedCaption
 import com.airplayreceiver.desktop.backend.parseLrcDisplayHeaders
 import com.airplayreceiver.desktop.backend.sameLabel
+import com.airplayreceiver.desktop.backend.updatedBy
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -310,7 +311,9 @@ class XiaomiPlaybackReducer(
             val merged = mergeMediaInfo(previous, incoming, replaceTrack)
             pendingMediaInfo = PendingMediaInfo(
                 sessionSequence = resolvedSession,
-                mediaInfo = merged,
+                // The UI has not seen the new track yet. Keep this boundary
+                // if a partial metadata or progress packet follows before activation.
+                mediaInfo = if (pending?.mediaInfo?.trackTransition == "new") merged.copy(trackTransition = "new") else merged,
                 trackAnchor = trackAnchor(if (pending == null) currentTrackAnchor else pending.trackAnchor, merged, replaceTrack),
                 replaceTrack = replaceTrack || pending?.replaceTrack == true,
             )
@@ -517,6 +520,8 @@ class XiaomiPlaybackReducer(
             lyricsText = incoming.lyricsText ?: previous.lyricsText,
             titleIsLyric = incoming.titleIsLyric ?: previous.titleIsLyric.takeIf { incoming.title == null },
             trackIdSource = if (keepPreviousTrackId) previous.trackIdSource else incoming.trackIdSource,
+            senderMetadata = previous.senderMetadata.updatedBy(incoming.senderMetadata, retainOnEmpty = true),
+            sdkDisplayMetadata = previous.sdkDisplayMetadata.updatedBy(incoming.sdkDisplayMetadata),
         )
     }
 

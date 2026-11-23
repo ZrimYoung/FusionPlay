@@ -158,6 +158,9 @@ internal fun PlaybackSnapshot.applyXiaomiMediaInfo(
     lyricHeaders: PlaybackDisplayMetadata? = null,
     titleIsLyric: Boolean? = null,
     trackIdSource: String? = null,
+    trackTransition: String? = null,
+    senderMetadata: PlaybackDisplayMetadata? = null,
+    sdkDisplayMetadata: PlaybackDisplayMetadata? = null,
 ): PlaybackSnapshot {
     if (!protocol.equals(XIAOMI_PROTOCOL, ignoreCase = true)) {
         return this
@@ -208,7 +211,9 @@ internal fun PlaybackSnapshot.applyXiaomiMediaInfo(
         (lyrics == this.lyrics && lyricHeaders == this.lyricHeaders)
     val fallbackCaption = replaceTrack && fallbackIdentity && compatibleLyrics &&
         this.lyrics.containsExactTimedCaption(normalizedTitle)
-    val previousPresentation = takeIf { !replaceTrack || sameTrackCaption || fallbackCaption }
+    val previousPresentation = takeIf {
+        !replaceTrack || (trackTransition != "new" && (sameTrackCaption || fallbackCaption))
+    }
     val nextLyrics = lyrics ?: previousPresentation?.lyrics
     val nextHeaders = lyricHeaders ?: previousPresentation?.lyricHeaders
     val nextHint = titleIsLyric ?: previousPresentation?.lyricCaptionHint.takeIf { effectiveTitle == this.title }
@@ -243,6 +248,8 @@ internal fun PlaybackSnapshot.applyXiaomiMediaInfo(
         lyricHeaders = nextHeaders,
         lyricTitleCorrection = correction,
         lyricCaptionHint = nextHint,
+        senderMetadata = this.senderMetadata.takeUnless { replaceTrack }.updatedBy(senderMetadata, retainOnEmpty = true),
+        sdkDisplayMetadata = this.sdkDisplayMetadata.takeUnless { replaceTrack }.updatedBy(sdkDisplayMetadata),
     )
 }
 

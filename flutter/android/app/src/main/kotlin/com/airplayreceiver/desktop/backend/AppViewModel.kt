@@ -638,6 +638,9 @@ class AppViewModel(
         lyricsText: String? = null,
         titleIsLyric: Boolean? = null,
         trackIdSource: String? = null,
+        trackTransition: String? = null,
+        senderMetadata: PlaybackDisplayMetadata? = null,
+        sdkDisplayMetadata: PlaybackDisplayMetadata? = null,
     ) {
         val lyrics = lyricsText?.let { LrcParser.parse(it) }
         val lyricHeaders = lyricsText?.let(::parseLrcDisplayHeaders)
@@ -664,6 +667,9 @@ class AppViewModel(
                     lyricHeaders = lyricHeaders,
                     titleIsLyric = titleIsLyric,
                     trackIdSource = trackIdSource,
+                    trackTransition = trackTransition,
+                    senderMetadata = senderMetadata,
+                    sdkDisplayMetadata = sdkDisplayMetadata,
                 )
             }
         }

@@ -78,6 +78,8 @@ data class PlaybackSnapshot(
     val lyricHeaders: PlaybackDisplayMetadata? = null,
     val lyricTitleCorrection: PlaybackDisplayMetadata? = null,
     val lyricCaptionHint: Boolean? = null,
+    val senderMetadata: PlaybackDisplayMetadata? = null,
+    val sdkDisplayMetadata: PlaybackDisplayMetadata? = null,
 )
 
 data class RemoteControlState(

@@ -1,5 +1,6 @@
 package com.airplayreceiver.desktop.bridge
 
+import com.airplayreceiver.desktop.backend.PlaybackDisplayMetadata
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -10,6 +11,61 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class XiaomiPlaybackReducerContinuityTest {
+    @Test
+    fun sdkProjectionCachesPartialUpdatesAndRejectsStaleArtist() {
+        val reducer = XiaomiPlaybackReducer()
+        reducer.reduce(playbackEvent(session = 1, sequence = 1, active = true, rawState = 2))
+        val initial = mediaEvent(
+            session = 1, sequence = 2, title = "First Song", trackId = "first", artwork = null,
+            trackTransition = "new", artist = "Header Artist", album = "Header Album", positionMs = 43_000,
+            projection = mapOf(
+                "raw_title" to JsonPrimitive(" First Song (Live) "),
+                "raw_artist" to JsonPrimitive("Alpha/Beta"),
+                "raw_album" to JsonPrimitive("Sender Album"),
+                "display_title" to JsonPrimitive("First Song (Live)"),
+                "display_artist" to JsonPrimitive("Alpha/Beta"),
+            ),
+        )
+        val first = reducer.reduce(initial).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals(PlaybackDisplayMetadata(" First Song (Live) ", "Alpha/Beta", "Sender Album"), first.mediaInfo.senderMetadata)
+        assertEquals(PlaybackDisplayMetadata("First Song (Live)", "Alpha/Beta"), first.mediaInfo.sdkDisplayMetadata)
+
+        val partial = reducer.reduce(mediaEvent(
+            session = 1, sequence = 3, title = "First Song", trackId = "first", artwork = null,
+            trackTransition = "same", positionMs = 0,
+            projection = mapOf(
+                "raw_title" to JsonPrimitive(""),
+                "raw_artist" to JsonPrimitive(""),
+                "display_album" to JsonPrimitive("Sender Album"),
+            ),
+        )).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertFalse(partial.replaceTrack)
+        assertNull(partial.mediaInfo.positionMs)
+        assertEquals(first.mediaInfo.senderMetadata, partial.mediaInfo.senderMetadata)
+        assertEquals(PlaybackDisplayMetadata("First Song (Live)", "Alpha/Beta", "Sender Album"), partial.mediaInfo.sdkDisplayMetadata)
+
+        val staleArtist = mapOf("raw_artist" to JsonPrimitive("First Song - Alpha/Beta"), "artist_is_stale" to JsonPrimitive(true))
+        val next = reducer.reduce(mediaEvent(
+            session = 1, sequence = 4, title = "Second Song", trackId = "second", artwork = null,
+            trackTransition = "new", artist = "Alpha/Beta", projection = staleArtist,
+        )).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertTrue(next.replaceTrack)
+        assertNull(next.mediaInfo.artist)
+        assertEquals(PlaybackDisplayMetadata(title = "Second Song"), next.mediaInfo.senderMetadata)
+        assertNull(next.mediaInfo.sdkDisplayMetadata)
+
+        reducer.reduce(mediaEvent(
+            session = 1, sequence = 5, title = "Second Song", trackId = "second", artwork = null,
+            trackTransition = "same", artist = "Second Artist",
+        ))
+        val delayed = reducer.reduce(mediaEvent(
+            session = 1, sequence = 6, title = "Second Song", trackId = "second", artwork = null,
+            trackTransition = "same", artist = "Alpha/Beta", projection = staleArtist,
+        )).mutations.single() as XiaomiPlaybackMutation.ApplyMediaInfo
+        assertEquals("Second Artist", delayed.mediaInfo.artist)
+        assertEquals("Second Artist", delayed.mediaInfo.senderMetadata?.artist)
+    }
+
     @Test
     fun resumedSessionMergesPartialMetadataWithPreviousArtwork() {
         val reducer = XiaomiPlaybackReducer()
@@ -448,6 +504,7 @@ class XiaomiPlaybackReducerContinuityTest {
         artist: String? = null,
         album: String? = null,
         titleIsLyric: Boolean? = null,
+        projection: Map<String, JsonPrimitive> = emptyMap(),
     ): WindowsBridgeXiaomiEvent = WindowsBridgeXiaomiEvent(
         eventName = "media_info",
         payload = buildJsonObject {
@@ -465,6 +522,7 @@ class XiaomiPlaybackReducerContinuityTest {
             artist?.let { put("artist", JsonPrimitive(it)) }
             album?.let { put("album", JsonPrimitive(it)) }
             titleIsLyric?.let { put("title_is_lyric", JsonPrimitive(it)) }
+            projection.forEach { (key, value) -> put(key, value) }
         },
         bridgeSequence = sequence,
         sessionSequence = session,

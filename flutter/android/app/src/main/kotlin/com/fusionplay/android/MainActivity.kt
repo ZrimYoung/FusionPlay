@@ -78,7 +78,8 @@ class MainActivity : Activity() {
             onOpenSettings = ::showSettings,
             onUpdatePreferences = ::updatePreferences,
         )
-        player.onRemoteLyricsBrowsingChanged = ::setLyricBackCallback
+        player.onLyricBackAvailabilityChanged = ::setLyricBackCallback
+        if (savedInstanceState?.getBoolean(STATE_COMPACT_LYRICS) == true) player.restoreCompactLyricsPage()
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.rgb(14, 17, 22))
             addView(player, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -98,6 +99,7 @@ class MainActivity : Activity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean(STATE_SETTINGS_OPEN, settingsDialog?.isShowing == true)
+        outState.putBoolean(STATE_COMPACT_LYRICS, player.isCompactLyricsPageOpen())
         super.onSaveInstanceState(outState)
     }
 
@@ -214,13 +216,13 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 
-    private fun setLyricBackCallback(browsing: Boolean) {
+    private fun setLyricBackCallback(available: Boolean) {
         if (Build.VERSION.SDK_INT < 33) return
-        if (browsing && lyricBackCallback == null) {
-            val callback = OnBackInvokedCallback { player.exitRemoteLyrics() }
+        if (available && lyricBackCallback == null) {
+            val callback = OnBackInvokedCallback { player.navigateBackFromLyrics() }
             onBackInvokedDispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
             lyricBackCallback = callback
-        } else if (!browsing) {
+        } else if (!available) {
             lyricBackCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
             lyricBackCallback = null
         }
@@ -228,7 +230,7 @@ class MainActivity : Activity() {
 
     @Deprecated("Back dispatcher handles API 33 and higher")
     override fun onBackPressed() {
-        if (!player.exitRemoteLyrics()) super.onBackPressed()
+        if (!player.navigateBackFromLyrics()) super.onBackPressed()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -363,6 +365,7 @@ class MainActivity : Activity() {
     companion object {
         private const val RECEIVER_PERMISSION_REQUEST = 1201
         private const val STATE_SETTINGS_OPEN = "settings_open"
+        private const val STATE_COMPACT_LYRICS = "compact_lyrics"
         private const val ACCESSIBILITY_PROMPT_PREFERENCES = "accessibility_keep_alive_prompt"
         private const val ACCESSIBILITY_PROMPT_SHOWN_KEY = "shown_v1"
 

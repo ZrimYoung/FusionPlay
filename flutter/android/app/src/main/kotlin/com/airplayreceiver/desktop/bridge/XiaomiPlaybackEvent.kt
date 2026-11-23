@@ -1,5 +1,6 @@
 package com.airplayreceiver.desktop.bridge
 
+import com.airplayreceiver.desktop.backend.PlaybackDisplayMetadata
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -37,6 +38,8 @@ data class XiaomiMediaInfo(
     val titleIsLyric: Boolean? = null,
     val trackIdSource: String? = null,
     val trackTransition: String? = null,
+    val senderMetadata: PlaybackDisplayMetadata? = null,
+    val sdkDisplayMetadata: PlaybackDisplayMetadata? = null,
 )
 
 fun WindowsBridgeXiaomiEvent.toVolumePercentOrNull(): Int? {
@@ -92,11 +95,25 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
         ?.contentOrNull
         ?.trim()
         ?.takeIf(String::isNotEmpty)
+    // These additive labels retain explicit empty strings and the sender's exact text.
+    fun packetLabel(name: String): String? = (objectPayload[name] as? JsonPrimitive)
+        ?.takeIf(JsonPrimitive::isString)
+        ?.contentOrNull
+    fun labels(title: String?, artist: String?, album: String?): PlaybackDisplayMetadata? =
+        if (title != null || artist != null || album != null) PlaybackDisplayMetadata(title, artist, album) else null
+
+    val isMediaInfo = normalizedEvent == "media_info"
+    val artistIsStale = isMediaInfo && (objectPayload["artist_is_stale"] as? JsonPrimitive)
+        ?.takeUnless(JsonPrimitive::isString)
+        ?.booleanOrNull == true
+    val title = string("title")
+    val artist = if (artistIsStale) null else string("artist")
+    val album = string("album")
 
     return XiaomiMediaInfo(
-        title = string("title"),
-        artist = string("artist"),
-        album = string("album"),
+        title = title,
+        artist = artist,
+        album = album,
         artworkUrl = string("artwork_url") ?: string("artwork"),
         durationMs = objectPayload["duration_ms"]
             ?.jsonPrimitive
@@ -155,6 +172,14 @@ fun WindowsBridgeXiaomiEvent.toMediaInfoOrNull(): XiaomiMediaInfo? {
             ?.takeIf { normalizedEvent == "media_info" && it.isString }
             ?.contentOrNull
             ?.takeIf { it == "same" || it == "new" },
+        senderMetadata = if (isMediaInfo) labels(
+            packetLabel("raw_title") ?: title,
+            if (artistIsStale) null else packetLabel("raw_artist") ?: artist,
+            packetLabel("raw_album") ?: album,
+        ) else null,
+        sdkDisplayMetadata = if (isMediaInfo) labels(
+            packetLabel("display_title"), packetLabel("display_artist"), packetLabel("display_album"),
+        ) else null,
     )
 }
 

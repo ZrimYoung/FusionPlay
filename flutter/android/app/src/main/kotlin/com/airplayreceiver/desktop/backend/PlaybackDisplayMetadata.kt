@@ -6,8 +6,28 @@ import java.util.Locale
 data class PlaybackDisplayMetadata(val title: String? = null, val artist: String? = null, val album: String? = null)
 
 internal fun PlaybackSnapshot.displayMetadata(correctLyricTitles: Boolean): PlaybackDisplayMetadata {
-    val corrected = lyricTitleCorrection.takeIf { correctLyricTitles }
-    return PlaybackDisplayMetadata(corrected?.title ?: title, corrected?.artist ?: artist, corrected?.album ?: album)
+    val corrected = (sdkDisplayMetadata ?: lyricTitleCorrection).takeIf { correctLyricTitles }
+    return PlaybackDisplayMetadata(
+        corrected?.title ?: senderMetadata?.title ?: title,
+        corrected?.artist ?: senderMetadata?.artist ?: artist,
+        corrected?.album ?: senderMetadata?.album ?: album,
+    )
+}
+
+internal fun PlaybackDisplayMetadata?.updatedBy(
+    incoming: PlaybackDisplayMetadata?,
+    retainOnEmpty: Boolean = false,
+): PlaybackDisplayMetadata? {
+    if (this == null) return incoming
+    if (incoming == null || incoming == this) return this
+    fun label(previous: String?, next: String?): String? =
+        if (retainOnEmpty && next == "" && previous != null) previous else next ?: previous
+
+    return PlaybackDisplayMetadata(
+        label(title, incoming.title),
+        label(artist, incoming.artist),
+        label(album, incoming.album),
+    )
 }
 
 private const val MAX_LABEL_LENGTH = 512

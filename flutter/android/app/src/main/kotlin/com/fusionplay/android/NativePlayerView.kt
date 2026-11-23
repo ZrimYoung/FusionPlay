@@ -61,6 +61,11 @@ internal class NativePlayerView(
     private var volumePercent = 100
     private var layout: NativePlayerLayout? = null
     private var inputIsDirectional = false
+    private var compactLyricsOpen = false
+    private var restoreCompactLyrics = false
+    private var remoteLyricsBrowsing = false
+    private var lyricBackAvailable = false
+    var onLyricBackAvailabilityChanged: ((Boolean) -> Unit)? = null
     private val television = context.getSystemService(UiModeManager::class.java)
         ?.currentModeType == Configuration.UI_MODE_TYPE_TELEVISION ||
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_LEANBACK)
@@ -99,9 +104,7 @@ internal class NativePlayerView(
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
     }
-    private val lyricsButton = action(NativePlayerIcon.LYRICS, "显示歌词", 18f, 18) {
-        onUpdatePreferences(preferences.copy(showLyrics = !preferences.showLyrics))
-    }
+    private val lyricsButton = action(NativePlayerIcon.LYRICS, "显示歌词", 18f, 18, ::toggleLyrics)
     private val volumeButton = action(NativePlayerIcon.VOLUME, "接收音量", 18f, 18, ::showVolume)
     private val settingsButton = action(NativePlayerIcon.SETTINGS, "接收设置", 18f, 18, onOpenSettings)
     private val hideToolbar = Runnable { if (toolbarCanHide()) setToolbarVisible(false) }
@@ -130,6 +133,13 @@ internal class NativePlayerView(
     private val metadata = vertical()
     private val title = label(if (television) 24f else 27f, NativePlayerColors.text, semibold = true)
     private val subtitle = label(if (television) 14f else 16f, NativePlayerColors.secondaryText)
+    private val lyricShortcut = label(15f, NativePlayerColors.accent).apply {
+        gravity = Gravity.CENTER_VERTICAL
+        minHeight = dp(44f)
+        maxLines = 2
+        isFocusable = true
+        setOnClickListener { selectLyricsPage(true) }
+    }
     private val detailsError = label(14f, NativePlayerColors.warning)
     private val timeline = vertical()
     private val seek = slider("播放进度", TIMELINE_STEPS).apply {
@@ -161,10 +171,36 @@ internal class NativePlayerView(
     private val next = action(NativePlayerIcon.NEXT, "下一曲", if (television) 18f else 22f) {
         onPlayback(PlaybackCommand.NEXT_TRACK)
     }
-    private val lyrics = NativeLyricsView(context, onSeek, television = television)
-    var onRemoteLyricsBrowsingChanged: ((Boolean) -> Unit)?
-        get() = lyrics.onRemoteLyricsBrowsingChanged
-        set(value) { lyrics.onRemoteLyricsBrowsingChanged = value }
+    private val lyricsPane = vertical()
+    private val lyricsPageArtwork = artworkImage(ImageView.ScaleType.FIT_CENTER).apply {
+        background = card(0xFF20323B.toInt(), 8f)
+        clipToOutline = true
+    }
+    private val lyricsPageTitle = label(17f, NativePlayerColors.text, semibold = true)
+    private val lyricsPageSubtitle = label(13f, NativePlayerColors.secondaryText)
+    private val lyricsPageHeader = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        isFocusable = true
+        setOnClickListener { selectLyricsPage(false) }
+        addView(label(30f, NativePlayerColors.accent).apply {
+            text = "‹"
+            gravity = Gravity.CENTER
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+        }, LinearLayout.LayoutParams(dp(36f), MATCH_PARENT))
+        addView(lyricsPageArtwork, LinearLayout.LayoutParams(dp(44f), dp(44f)))
+        addView(vertical().apply {
+            addView(lyricsPageTitle, detailsRow())
+            addView(lyricsPageSubtitle, detailsRow(2f))
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        }, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = dp(12f) })
+    }
+    private val lyrics = NativeLyricsView(context, onSeek, television = television).apply {
+        onRemoteLyricsBrowsingChanged = { browsing ->
+            remoteLyricsBrowsing = browsing
+            updateLyricBackAvailability()
+        }
+    }
 
     private data class TimelineKey(val source: String?, val epoch: Long?, val track: String?, val duration: Long)
     private data class PendingSeek(val identity: TimelineKey, val target: Long, val until: Long)
@@ -207,7 +243,9 @@ internal class NativePlayerView(
         idle.addView(idleBusy, LinearLayout.LayoutParams(dp(28f), dp(28f)).apply { topMargin = dp(14f) })
 
         content.addView(playback)
-        content.addView(lyrics)
+        content.addView(lyricsPane)
+        lyricsPane.addView(lyricsPageHeader, LinearLayout.LayoutParams(MATCH_PARENT, dp(64f)))
+        lyricsPane.addView(lyrics, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
         coverSlot.addView(cover, LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.CENTER))
         cover.addView(coverFallback, fullFrame())
         cover.addView(oldArtwork, fullFrame())
@@ -217,6 +255,7 @@ internal class NativePlayerView(
         details.addView(metadata, detailsRow())
         metadata.addView(title, detailsRow())
         metadata.addView(subtitle, detailsRow(if (television) 3f else 5f))
+        details.addView(lyricShortcut, detailsRow(6f))
         details.addView(timeline, detailsRow(if (television) 8f else 12f))
         timeline.addView(seek, LinearLayout.LayoutParams(MATCH_PARENT, dp(if (television) 30f else 34f)))
         val timestamps = LinearLayout(context).apply { orientation = LinearLayout.HORIZONTAL }
@@ -286,11 +325,8 @@ internal class NativePlayerView(
         setVisible(volumeButton, hasTrack)
         setVisible(timeline, preferences.showProgress)
         setVisible(transport, preferences.showTransport)
-        setVisible(lyrics, preferences.showLyrics && hasTrack)
         setVisible(idleBusy, state.busy || !state.initialized)
 
-        lyricsButton.isSelected = preferences.showLyrics
-        phrases(lyricsButton, if (preferences.showLyrics) "隐藏歌词" else "显示歌词")
         phrases(playPause, if (current.isPlaying) "暂停" else "播放")
         phrases(volumeButton, "接收音量，${this.volumePercent}%")
         playPause.icon = if (current.isPlaying) NativePlayerIcon.PAUSE else NativePlayerIcon.PLAY
@@ -306,11 +342,16 @@ internal class NativePlayerView(
                 subtitle.maxLines = if (preferences.wrapMetadata) 2 else 1
             }
             val metadata = current.displayMetadata(preferences.correctLyricTitles)
-            updateText(title, metadata.title?.trim().takeIf { it.present() } ?: "等待曲目信息")
+            val titleText = metadata.title?.trim().takeIf { it.present() } ?: "等待曲目信息"
+            updateText(title, titleText)
             val credit = listOfNotNull(metadata.artist?.trim().takeIf { it.present() }, metadata.album?.trim().takeIf { it.present() })
                 .joinToString(" · ").ifEmpty { current.protocol.orEmpty() }
             updateText(subtitle, credit)
             setVisible(subtitle, credit.isNotEmpty())
+            updateText(lyricsPageTitle, titleText)
+            updateText(lyricsPageSubtitle, credit)
+            setVisible(lyricsPageSubtitle, credit.isNotEmpty())
+            phrases(lyricsPageHeader, if (credit.isEmpty()) "返回播放器，$titleText" else "返回播放器，$titleText，$credit")
             status(detailsError, state.lastError)
             if (preferences.showLyrics) lyrics.render(
                 playback = current,
@@ -319,6 +360,17 @@ internal class NativePlayerView(
                 staggerEnabled = preferences.staggerLyricMotion,
                 staggerMilliseconds = preferences.lyricStaggerMilliseconds,
             )
+            if (!television && preferences.showLyrics) {
+                val caption = lyrics.currentLineText()?.lineSequence()?.firstOrNull()?.trim()
+                val shortcutText = when {
+                    current.lyricsLoading -> "正在载入歌词…"
+                    caption == null -> "查看歌词"
+                    caption.isEmpty() -> "•••"
+                    else -> caption
+                }
+                updateText(lyricShortcut, shortcutText)
+                phrases(lyricShortcut, if (caption.isNullOrBlank()) "查看歌词" else "查看歌词，$caption")
+            }
         } else {
             renderIdle()
         }
@@ -339,6 +391,7 @@ internal class NativePlayerView(
             }
             if (oldPreferences.toolbarAlwaysVisible != preferences.toolbarAlwaysVisible) revealToolbar()
         }
+        updateLyricPages()
         if (television && (!hadTrack && hasTrack || !wasPlayable && playPause.isEnabled)) post {
             // Never steal focus from a settings surface or from an existing playback control.
             if (hasWindowFocus() && (findFocus() == null || findFocus() === settingsButton)) focusPrimaryControl()
@@ -352,6 +405,69 @@ internal class NativePlayerView(
     }
 
     fun exitRemoteLyrics(): Boolean = lyrics.exitRemoteLyrics()
+
+    fun navigateBackFromLyrics(): Boolean = exitRemoteLyrics() ||
+        (compactLyricsOpen && selectLyricsPage(false))
+
+    fun isCompactLyricsPageOpen(): Boolean = compactLyricsOpen
+
+    fun restoreCompactLyricsPage() {
+        restoreCompactLyrics = true
+        updateLyricPages()
+    }
+
+    private fun toggleLyrics() {
+        if (selectLyricsPage(!compactLyricsOpen)) return
+        val next = preferences.copy(showLyrics = !preferences.showLyrics)
+        onUpdatePreferences(next)
+        if (next.showLyrics) selectLyricsPage(true)
+    }
+
+    private fun selectLyricsPage(open: Boolean): Boolean {
+        if (!hasTrack || layout?.mode != NativePlayerLayout.Mode.PAGED_LYRICS) return false
+        if (compactLyricsOpen == open || touchTracking) return true
+        compactLyricsOpen = open
+        viewport.scrollTo(0, 0)
+        updateLyricPages()
+        revealToolbar()
+        val page = if (open) lyricsPane else playback
+        if (isLaidOut && animations() && accessibility?.isTouchExplorationEnabled != true) {
+            page.animate().cancel()
+            page.translationX = dp(12f).toFloat() * if (open) 1f else -1f
+            page.animate().translationX(0f).setDuration(220).start()
+        }
+        if (inputIsDirectional) (if (open) lyricsPageHeader else lyricShortcut).requestFocus()
+        return true
+    }
+
+    private fun updateLyricPages() {
+        val paged = layout?.mode == NativePlayerLayout.Mode.PAGED_LYRICS
+        if (restoreCompactLyrics && hasTrack && layout != null) {
+            compactLyricsOpen = paged
+            restoreCompactLyrics = false
+        }
+        if (!paged || !hasTrack) compactLyricsOpen = false
+        setVisible(playback, !compactLyricsOpen)
+        setVisible(lyricsPane, preferences.showLyrics && hasTrack && (!paged || compactLyricsOpen))
+        setVisible(lyricsPageHeader, compactLyricsOpen)
+        setVisible(lyricShortcut, paged && !compactLyricsOpen)
+        val selected = if (paged) compactLyricsOpen else preferences.showLyrics
+        lyricsButton.isSelected = selected
+        phrases(lyricsButton, when {
+            paged && selected -> "返回播放器"
+            paged -> "查看歌词"
+            selected -> "隐藏歌词"
+            else -> "显示歌词"
+        })
+        updateLyricBackAvailability()
+    }
+
+    private fun updateLyricBackAvailability() {
+        val available = compactLyricsOpen || remoteLyricsBrowsing
+        if (lyricBackAvailable == available) return
+        lyricBackAvailable = available
+        onLyricBackAvailabilityChanged?.invoke(available)
+    }
 
     fun focusPrimaryControl() {
         if (!television && !inputIsDirectional) return
@@ -477,13 +593,24 @@ internal class NativePlayerView(
                 else -> 24f
             })
         }
-        lyrics.layoutParams = LinearLayout.LayoutParams(
+        lyricsPane.layoutParams = LinearLayout.LayoutParams(
             if (lyricsBeside) (contentWidth - leading - gap).coerceAtLeast(1) else MATCH_PARENT,
             dp(nextLayout.lyricsHeight).coerceAtLeast(1),
         ).apply {
-            if (lyricsBeside) marginStart = gap else topMargin = dp(30f)
+            if (lyricsBeside) marginStart = gap
+            else if (nextLayout.mode != NativePlayerLayout.Mode.PAGED_LYRICS) topMargin = dp(30f)
         }
         idle.layoutParams = LayoutParams(minOf(contentWidth, dp(440f)), WRAP_CONTENT, Gravity.CENTER)
+        if ((previousMode == NativePlayerLayout.Mode.PAGED_LYRICS) !=
+            (nextLayout.mode == NativePlayerLayout.Mode.PAGED_LYRICS)
+        ) {
+            viewport.scrollTo(0, 0)
+            for (page in listOf(playback, lyricsPane)) {
+                page.animate().cancel()
+                page.translationX = 0f
+            }
+        }
+        updateLyricPages()
         if (previousMode == NativePlayerLayout.Mode.ARTWORK_AND_LYRICS && nextLayout.mode == NativePlayerLayout.Mode.STACKED && preferences.showLyrics && hasTrack) moveToLyrics(true)
     }
 
@@ -503,7 +630,7 @@ internal class NativePlayerView(
         val transition = AutoTransition().apply {
             duration = 120L // AutoTransition runs fade-out, resize and fade-in in sequence.
             interpolator = PathInterpolator(0.22f, 0.61f, 0.36f, 1f)
-            listOf(coverSlot, details, lyrics, timeline, transport).forEach { addTarget(it) }
+            listOf(coverSlot, details, lyricsPane, timeline, transport).forEach { addTarget(it) }
         }
         TransitionManager.beginDelayedTransition(content, transition)
     }
@@ -535,6 +662,7 @@ internal class NativePlayerView(
         presentedArtwork = artwork
         setVisible(coverFallback, artwork == null)
         coverArtwork.setImageBitmap(artwork)
+        lyricsPageArtwork.setImageBitmap(artwork)
         if (artwork != null && outgoing != null && isAttachedToWindow && animations()) {
             oldArtwork.setImageBitmap(outgoing)
             coverArtwork.alpha = 0f

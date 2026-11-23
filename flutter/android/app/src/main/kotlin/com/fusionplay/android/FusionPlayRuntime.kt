@@ -860,6 +860,9 @@ class FusionPlayRuntime(
                         lyricsText = media.lyricsText,
                         titleIsLyric = media.titleIsLyric,
                         trackIdSource = media.trackIdSource,
+                        trackTransition = media.trackTransition,
+                        senderMetadata = media.senderMetadata,
+                        sdkDisplayMetadata = media.sdkDisplayMetadata,
                     )
                 }
             }

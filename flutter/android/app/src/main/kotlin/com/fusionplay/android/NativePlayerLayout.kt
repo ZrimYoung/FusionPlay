@@ -3,7 +3,7 @@ package com.fusionplay.android
 import kotlin.math.max
 import kotlin.math.min
 
-/** Resolves the iPad player's three layouts from the available window size in dp. */
+/** Resolves the player layout from the available window size in dp. */
 internal data class NativePlayerLayout(
     val mode: Mode,
     val gap: Float,
@@ -13,7 +13,7 @@ internal data class NativePlayerLayout(
     val lyricsHeight: Float,
     val verticalInset: Float,
 ) {
-    enum class Mode { STACKED, ARTWORK_AND_CONTROLS, ARTWORK_AND_LYRICS }
+    enum class Mode { STACKED, ARTWORK_AND_CONTROLS, ARTWORK_AND_LYRICS, PAGED_LYRICS }
 
     companion object {
         private const val TV_COVER_MAX_DP = 228f
@@ -32,6 +32,7 @@ internal data class NativePlayerLayout(
             val mode = when {
                 canUseColumns && preferences.showLyrics && height >= 360f -> Mode.ARTWORK_AND_LYRICS
                 canUseColumns && !preferences.showLyrics && width >= height * 1.12f -> Mode.ARTWORK_AND_CONTROLS
+                !television && !largeText && width < 660f && preferences.showLyrics -> Mode.PAGED_LYRICS
                 else -> Mode.STACKED
             }
             val availableWidth = width - horizontalInset(width) * 2
@@ -39,25 +40,28 @@ internal data class NativePlayerLayout(
             val verticalInset = (12f + (height - 360f) * 0.1f).coerceIn(12f, 24f)
             val availableHeight = max(0f, height - verticalInset * 2)
             val estimatedPlaybackHeight = 120f + (if (preferences.showProgress) 58f else 0f) +
-                (if (preferences.showTransport) 72f else 0f)
+                (if (preferences.showTransport) 72f else 0f) + (if (mode == Mode.PAGED_LYRICS) 44f else 0f)
             val maxContentWidth = when (mode) {
-                Mode.STACKED -> 470f
+                Mode.STACKED, Mode.PAGED_LYRICS -> 470f
                 Mode.ARTWORK_AND_CONTROLS -> 920f
                 Mode.ARTWORK_AND_LYRICS -> if (television) min(width * 0.84f, 1_080f) else 1_180f
             }
             val contentWidth = min(availableWidth, maxContentWidth)
             val leadingWidth = when (mode) {
-                Mode.STACKED -> contentWidth
+                Mode.STACKED, Mode.PAGED_LYRICS -> contentWidth
                 Mode.ARTWORK_AND_CONTROLS -> min(440f, (contentWidth - gap) / 2)
                 Mode.ARTWORK_AND_LYRICS -> min(400f, (contentWidth - gap) * 0.43f)
             }
             val coverSide = when (mode) {
-                Mode.STACKED -> min(min(contentWidth, 420f), max(148f, availableHeight - (playbackHeight ?: estimatedPlaybackHeight)))
+                Mode.STACKED, Mode.PAGED_LYRICS ->
+                    min(min(contentWidth, 420f), max(148f, availableHeight - (playbackHeight ?: estimatedPlaybackHeight)))
                 Mode.ARTWORK_AND_CONTROLS -> min(leadingWidth, availableHeight)
                 Mode.ARTWORK_AND_LYRICS -> min(leadingWidth, max(144f, availableHeight - (playbackHeight ?: estimatedPlaybackHeight - 25f)))
             }
-            val lyricsHeight = if (mode == Mode.ARTWORK_AND_LYRICS) availableHeight
-                else (height * 0.64f).coerceIn(280f, 520f)
+            val lyricsHeight = when (mode) {
+                Mode.ARTWORK_AND_LYRICS, Mode.PAGED_LYRICS -> availableHeight
+                else -> (height * 0.64f).coerceIn(280f, 520f)
+            }
             if (!television) {
                 return NativePlayerLayout(mode, gap, coverSide, leadingWidth, contentWidth, lyricsHeight, verticalInset)
             }

@@ -7,6 +7,18 @@ import org.junit.Test
 
 class NativeLyricStaggerTest {
     @Test
+    fun `an interrupted wave starts from its old translation and remains bounded`() {
+        val span = NativeLyricStagger.MAX_SPAN_MS
+        val interrupted = NativeLyricStagger.offsetDp(180, 1f, span, 1)
+        assertEquals(interrupted, NativeLyricStagger.offsetDp(0, 1f, span, 1, residualDp = interrupted), .001f)
+        val carried = NativeLyricStagger.offsetDp(180, 1f, span, 1, residualDp = interrupted)
+        assertTrue(carried > interrupted)
+        assertTrue(carried <= 36f)
+        val end = (NativeLyricStagger.FOLLOW_DURATION_MS + span).toLong()
+        assertEquals(0f, NativeLyricStagger.offsetDp(end, 1f, span, 1, residualDp = carried), .001f)
+    }
+
+    @Test
     fun `only nearby line changes start a directional wave`() {
         assertNull(NativeLyricStagger.direction(null, 4))
         assertNull(NativeLyricStagger.direction(4, 4))

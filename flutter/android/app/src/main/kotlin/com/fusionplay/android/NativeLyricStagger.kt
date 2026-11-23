@@ -21,11 +21,13 @@ internal object NativeLyricStagger {
         }
     }
 
-    fun offsetDp(elapsedMs: Long, rowPosition: Float, spanMs: Int, direction: Int): Float {
+    fun offsetDp(elapsedMs: Long, rowPosition: Float, spanMs: Int, direction: Int, residualDp: Float = 0f): Float {
         if (!rowPosition.isFinite()) return 0f
         val rank = (rowPosition.coerceIn(0f, 1f) * RANK_STEPS).roundToInt() / RANK_STEPS
         val delay = clampSpan(spanMs) * rank
-        return direction * MAX_OFFSET_DP * (scrollFraction(elapsedMs) - ease(elapsedMs - delay))
+        val progress = scrollFraction(elapsedMs)
+        val wave = direction * MAX_OFFSET_DP * (progress - ease(elapsedMs - delay))
+        return (wave + residualDp * (1f - progress)).coerceIn(-MAX_OFFSET_DP, MAX_OFFSET_DP)
     }
 
     fun scrollFraction(elapsedMs: Long): Float = ease(elapsedMs.toFloat())
