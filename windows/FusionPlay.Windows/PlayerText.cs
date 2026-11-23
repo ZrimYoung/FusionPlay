@@ -2,10 +2,12 @@ using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Text;
 using Microsoft.Graphics.Canvas.UI.Xaml;
 using Microsoft.UI;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI.ViewManagement;
 using FusionPlay.Windows.Platform;
@@ -13,7 +15,7 @@ using FusionPlay.Windows.Platform;
 namespace FusionPlay.Windows;
 
 /// <summary>Native XAML measurement/accessibility with a DPI-matched DirectWrite
-/// surface. A native TextBlock also supports live resize, high contrast and device loss.</summary>
+/// surface. A native TextBlock remains the fallback for high contrast or device loss.</summary>
 public sealed class PlayerText : UserControl
 {
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(nameof(Text), typeof(string), typeof(PlayerText), new PropertyMetadata("", Changed));
@@ -26,14 +28,16 @@ public sealed class PlayerText : UserControl
     public TextTrimming TextTrimming { get => (TextTrimming)GetValue(TextTrimmingProperty); set => SetValue(TextTrimmingProperty, value); }
     private readonly TextBlock measurement = new() { IsHitTestVisible = false };
     private readonly Image image = new() { IsHitTestVisible = false, Stretch = Stretch.Fill, Visibility = Visibility.Collapsed };
+    private readonly Canvas overlay = new() { IsHitTestVisible = false };
     private readonly UISettings ui = new();
     private readonly AccessibilitySettings accessibility = new();
     private CanvasImageSource? surface;
     private CanvasRenderTarget? glyphs;
     private XamlRoot? subscribedRoot;
+    private InsetClip? resizeClip;
     private double surfaceWidth, surfaceHeight, surfaceDpi;
     private double rootScale;
-    private bool enhanced = true, queued, renderFaulted, attached, interactiveResize;
+    private bool enhanced = true, queued, appearanceDrawPending, renderFaulted, attached, interactiveResize;
     internal bool Enhanced { get => enhanced; set { if (enhanced == value) return; enhanced = value; Refresh(); } }
     internal bool UsesEnhancedSurface => image.Visibility == Visibility.Visible;
 
@@ -42,7 +46,7 @@ public sealed class PlayerText : UserControl
         IsTabStop = false; UseLayoutRounding = true;
         AutomationProperties.SetAccessibilityView(measurement, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
         AutomationProperties.SetAccessibilityView(image, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
-        var overlay = new Canvas { IsHitTestVisible = false }; overlay.Children.Add(image);
+        overlay.Children.Add(image);
         var grid = new Grid(); grid.Children.Add(measurement); grid.Children.Add(overlay); Content = grid;
         foreach (var property in new[] { FontFamilyProperty, FontWeightProperty, FontSizeProperty, FontStyleProperty, ForegroundProperty, CharacterSpacingProperty })
             RegisterPropertyChangedCallback(property, (_, _) => Refresh());
@@ -53,6 +57,7 @@ public sealed class PlayerText : UserControl
             rootScale = subscribedRoot?.RasterizationScale ?? 1;
             if (subscribedRoot != null) subscribedRoot.Changed += RootChanged;
             ui.TextScaleFactorChanged += TextScaleChanged; ui.ColorValuesChanged += ContrastChanged;
+            UpdateResizeClip();
             Refresh();
         };
         Unloaded += (_, _) =>
@@ -61,10 +66,15 @@ public sealed class PlayerText : UserControl
             if (subscribedRoot != null) subscribedRoot.Changed -= RootChanged;
             subscribedRoot = null;
             ui.TextScaleFactorChanged -= TextScaleChanged; ui.ColorValuesChanged -= ContrastChanged;
+            if (resizeClip != null)
+            {
+                ElementCompositionPreview.GetElementVisual(overlay).Clip = null;
+                resizeClip.Dispose(); resizeClip = null;
+            }
             surface = null; glyphs?.Dispose(); glyphs = null; image.Source = null; NativeFallback();
         };
         ActualThemeChanged += (_, _) => Refresh();
-        SizeChanged += (_, _) => QueueDraw();
+        SizeChanged += (_, _) => QueueDraw(geometryOnly: true);
         SyncMeasurement();
     }
     private static void Changed(DependencyObject sender, DependencyPropertyChangedEventArgs args) => ((PlayerText)sender).Refresh();
@@ -95,19 +105,37 @@ public sealed class PlayerText : UserControl
     {
         if (interactiveResize == active) return;
         interactiveResize = active;
-        if (active) NativeFallback();
-        else QueueDraw();
+        if (active) UpdateResizeClip();
+        QueueDraw(geometryOnly: true);
     }
-    private void QueueDraw()
+    private void UpdateResizeClip()
     {
-        if (!attached || queued || interactiveResize) return;
-        queued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => { queued = false; if (attached) Draw(); });
+        if (!attached || !interactiveResize && resizeClip == null) return;
+        var visual = ElementCompositionPreview.GetElementVisual(overlay);
+        if (interactiveResize) resizeClip ??= visual.Compositor.CreateInsetClip();
+        visual.Clip = interactiveResize ? resizeClip : null;
+        if (!interactiveResize) { resizeClip?.Dispose(); resizeClip = null; }
+    }
+    private bool NeedsDraw(bool appearanceChanged) => appearanceChanged || !interactiveResize
+        || !UsesEnhancedSurface && enhanced && !renderFaulted && Text.Length > 0 && !accessibility.HighContrast;
+    private void QueueDraw(bool geometryOnly = false)
+    {
+        if (!attached) return;
+        appearanceDrawPending |= !geometryOnly;
+        if (queued || !NeedsDraw(appearanceDrawPending)) return;
+        queued = DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            queued = false;
+            bool redraw = NeedsDraw(appearanceDrawPending);
+            appearanceDrawPending = false;
+            if (attached && redraw) { Draw(); UpdateResizeClip(); }
+        });
+        if (queued && interactiveResize && NeedsDraw(appearanceChanged: false)) measurement.Opacity = 0;
     }
     private void NativeFallback() { measurement.Opacity = 1; image.Visibility = Visibility.Collapsed; }
     internal bool RenderForCheck() { Draw(allowUnloaded: true); return UsesEnhancedSurface; }
     private void Draw(bool allowUnloaded = false)
     {
-        if (interactiveResize) return;
         if ((!attached && !allowUnloaded) || !enhanced || accessibility.HighContrast || renderFaulted || Text.Length == 0)
         { NativeFallback(); return; }
         double width = ActualWidth, height = ActualHeight, dpi = 96 * (XamlRoot?.RasterizationScale ?? 1);

@@ -31,12 +31,15 @@ public sealed partial class LyricsView
     {
         if (disposed || InteractiveResize == active) return;
         InteractiveResize = active;
+        CancelGlyphQueue();
+        glyphTimer.Interval = TimeSpan.FromMilliseconds(active ? 48 : 16);
         if (active)
         {
-            // Keep XAML wrapping live while holding typography and deferring glyph uploads.
+            // Keep XAML measurement live. Published glyphs stay at their native
+            // size, and the resize timer handles effects and newly visible rows.
             heldResizeBodySize = PresentationLoaded ? ResponsiveBodySize : null;
-            CancelGlyphQueue();
-            foreach (var row in realized.ToArray()) row.ShowNativeTextForResize();
+            foreach (var row in realized.ToArray()) row.BeginInteractiveResize();
+            QueueEdges();
         }
         else
         {

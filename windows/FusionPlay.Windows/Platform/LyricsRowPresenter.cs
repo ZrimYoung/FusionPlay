@@ -33,6 +33,7 @@ public sealed class LyricsRowPresenter : Button
     private LyricsRowItem? item;
     private GlyphPlane? plane, sparePlane, outgoingPlane;
     private ContainerVisual? planesVisual;
+    private InsetClip? resizeClip;
     private LyricsGlyphReflow? glyphReflow;
     private DispatcherQueueTimer? wrapTimer;
     private long wrapDeadline, wrapTransitionsStarted, glyphReflowTransitionsStarted;
@@ -52,7 +53,6 @@ public sealed class LyricsRowPresenter : Button
     private long glyphRasterizations, surfaceCreations, edgeUpdates;
     private long resizeUploadDeadline;
     private bool urgentGlyphs = true;
-    private bool showingNativeForResize;
     private sealed class GlyphPlane
     {
         internal CanvasRenderTarget? Glyphs;
@@ -98,7 +98,7 @@ public sealed class LyricsRowPresenter : Button
         {
             if (args.NewSize.Width != args.PreviousSize.Width || args.NewSize.Height != args.PreviousSize.Height)
                 InvalidateGlyphs(widthResize: args.NewSize.Width != args.PreviousSize.Width || resizeUploadDeadline != 0 && !urgentGlyphs);
-            UpdateEdge();
+            if (item?.Owner.InteractiveResize != true) UpdateEdge();
         };
         Click += (_, _) => { if (item is { } current) current.Owner.RequestSeek(current); };
     }
@@ -178,7 +178,7 @@ public sealed class LyricsRowPresenter : Button
     private void InvalidateGlyphs(bool widthResize)
     {
         glyphsDirty = true; faulted = false;
-        if (widthResize && surface != null && !urgentGlyphs && !showingNativeForResize && item?.Owner.InteractiveResize != true)
+        if (widthResize && surface != null && !urgentGlyphs)
         {
             // Set once per pending upload: further width samples replace the
             // requested geometry without postponing this bounded deadline.
@@ -191,9 +191,11 @@ public sealed class LyricsRowPresenter : Button
     {
         if (!attached || item is not { } current || !current.Owner.PresentationLoaded) { actuallyVisible = false; FinishWrap(queueDraw: false); return; }
         var owner = current.Owner;
-        if (owner.InteractiveResize) { ShowNativeTextForResize(); return; }
         try
         {
+            // Keep the same renderer for rows that appear while resizing. An
+            // uncached row is published by the bounded glyph queue once visible.
+            if (owner.InteractiveResize && surface == null && !owner.HighContrast && !faulted) measurement.Opacity = 0;
             double y = TransformToVisual(owner).TransformPoint(new Point()).Y;
             actuallyVisible = LyricsViewport.IntersectsViewport(y, ActualHeight, owner.ViewportHeight, owner.Bleed);
             if (!actuallyVisible) { FinishWrap(queueDraw: false); if (sprite != null) sprite.IsVisible = false; return; }
@@ -207,7 +209,11 @@ public sealed class LyricsRowPresenter : Button
             if (owner.HighContrast || faulted) { NativeFallback(); return; }
             if (surface != null && changed) UpdateEffectProperties();
             if (glyphsDirty || surface == null) QueueDraw();
-            if (surface != null && (!showingNativeForResize || !glyphsDirty)) ShowSurface();
+            if (surface != null)
+            {
+                if (!glyphsDirty) SetResizeClip(owner.InteractiveResize);
+                ShowSurface();
+            }
         }
         catch (Exception error) when (error is COMException or ArgumentException or ObjectDisposedException) { faulted = true; NativeFallback(); }
     }
@@ -225,14 +231,15 @@ public sealed class LyricsRowPresenter : Button
     }
     private void QueueDraw()
     {
-        if (!attached || queued || drawing || faulted || !actuallyVisible || item?.Owner.PresentationLoaded != true || item.Owner.InteractiveResize || item.Owner.HighContrast) return;
+        if (!attached || queued || drawing || faulted || !actuallyVisible || item?.Owner.PresentationLoaded != true
+            || item.Owner.HighContrast || item.Owner.InteractiveResize && surface != null) return;
         queued = true; item.Owner.QueueGlyphDraw(this);
     }
     internal void CancelQueuedDraw() => queued = false;
     internal void RenderPendingGlyphs()
     {
         queued = false;
-        if (!attached || item?.Owner.PresentationLoaded != true || item.Owner.InteractiveResize) return;
+        if (!attached || item?.Owner.PresentationLoaded != true || item.Owner.InteractiveResize && surface != null) return;
         drawing = true;
         try
         {
@@ -241,12 +248,27 @@ public sealed class LyricsRowPresenter : Button
         }
         finally { drawing = false; }
     }
-    internal void ShowNativeTextForResize()
+    internal void BeginInteractiveResize()
     {
-        if (showingNativeForResize) return;
-        actuallyVisible = false;
-        showingNativeForResize = true;
-        NativeFallback();
+        FinishWrap(queueDraw: false);
+        try { SetResizeClip(true); }
+        catch (Exception error) when (error is COMException or ObjectDisposedException) { faulted = true; NativeFallback(); }
+    }
+    private void SetResizeClip(bool active)
+    {
+        if (planesVisual == null || (resizeClip != null) == active) return;
+        if (active)
+        {
+            // The old line breaks can outgrow the newly measured row. Clip the
+            // cached pixels to the row without scaling the glyphs.
+            resizeClip = planesVisual.Compositor.CreateInsetClip();
+            planesVisual.Clip = resizeClip;
+        }
+        else
+        {
+            planesVisual.Clip = null;
+            resizeClip?.Dispose(); resizeClip = null;
+        }
     }
     private void NativeFallback()
     {
@@ -257,7 +279,6 @@ public sealed class LyricsRowPresenter : Button
     private void ShowSurface()
     {
         if (sprite == null || !actuallyVisible) return;
-        showingNativeForResize = false;
         measurement.Opacity = 0; sprite.IsVisible = glyphReflow == null;
     }
     private bool CanShowClusterMotion(LyricsView owner, double sourceHeight)
@@ -293,7 +314,8 @@ public sealed class LyricsRowPresenter : Button
             // A stable glyph plane remains on screen until the replacement upload
             // is complete. Only real line-break/height changes crossfade; small
             // width samples retain the existing 40 ms coalescing deadline.
-            bool animateWrap = !urgentGlyphs && plane != null && plane.Dpi == dpi && owner.MotionEnabled && !WindowSizing.ScreenReaderActive
+            bool animateWrap = !owner.InteractiveResize && resizeClip == null && !urgentGlyphs
+                && plane != null && plane.Dpi == dpi && owner.MotionEnabled && !WindowSizing.ScreenReaderActive
                 && (glyphReflow != null || plane.OriginalBreaks != firstBreaks || plane.TranslationBreaks != secondBreaks || Math.Abs(plane.ContentHeight - height) > .5);
             var continuation = animateWrap ? glyphReflow?.Sample() : null;
             FinishWrap(queueDraw: false);
@@ -357,7 +379,8 @@ public sealed class LyricsRowPresenter : Button
                 }
             }
             replacedPlane = null;
-            glyphRasterizations++; glyphsDirty = false; urgentGlyphs = false; resizeUploadDeadline = 0; UpdateEffectProperties(); ShowSurface();
+            glyphRasterizations++; glyphsDirty = false; urgentGlyphs = false; resizeUploadDeadline = 0;
+            SetResizeClip(owner.InteractiveResize); UpdateEffectProperties(); ShowSurface();
         }
         catch (Exception error) when (error is COMException or ArgumentException or NotSupportedException or ObjectDisposedException)
         {
@@ -405,6 +428,7 @@ public sealed class LyricsRowPresenter : Button
         if (planesVisual == null)
         {
             planesVisual = plane.Sprite.Compositor.CreateContainerVisual();
+            planesVisual.RelativeSizeAdjustment = Vector2.One;
             ElementCompositionPreview.SetElementChildVisual(overlay, planesVisual);
         }
         planesVisual.Children.RemoveAll();
@@ -523,17 +547,17 @@ public sealed class LyricsRowPresenter : Button
     {
         if (wrapTimer is { } timer) { timer.Stop(); timer.Tick -= WrapExpired; wrapTimer = null; }
         wrapDeadline = 0;
-        var oldPlane = plane; var oldSpare = sparePlane; var oldOutgoing = outgoingPlane; var oldVisual = planesVisual;
+        var oldPlane = plane; var oldSpare = sparePlane; var oldOutgoing = outgoingPlane; var oldVisual = planesVisual; var oldResizeClip = resizeClip;
         var oldMotion = glyphReflow; glyphReflow = null;
         // Native close callbacks can reenter layout. Publish the fallback state
         // before releasing any shared brush graph or drawing resource.
-        plane = sparePlane = outgoingPlane = null; planesVisual = null;
-        glyphsDirty = true; urgentGlyphs = true; showingNativeForResize = false; resizeUploadDeadline = 0;
+        plane = sparePlane = outgoingPlane = null; planesVisual = null; resizeClip = null;
+        glyphsDirty = true; urgentGlyphs = true; resizeUploadDeadline = 0;
         appliedEdgeRadius = appliedSurfaceTop = appliedViewportHeight = double.NaN; NativeFallback();
         try { ElementCompositionPreview.SetElementChildVisual(overlay, null); oldVisual?.Children.RemoveAll(); }
         catch (Exception error) when (error is COMException or ObjectDisposedException) { }
         oldMotion?.Dispose();
-        ClosePlane(oldPlane); ClosePlane(oldSpare); ClosePlane(oldOutgoing); LyricsGraphicsResources.Close(oldVisual);
+        ClosePlane(oldPlane); ClosePlane(oldSpare); ClosePlane(oldOutgoing); LyricsGraphicsResources.Close(oldVisual); LyricsGraphicsResources.Close(oldResizeClip);
     }
     private static void ClosePlane(GlyphPlane? target)
     {

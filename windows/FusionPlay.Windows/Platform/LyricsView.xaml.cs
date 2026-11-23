@@ -42,6 +42,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private readonly HashSet<LyricsRowPresenter> realized = [];
     private readonly Queue<LyricsRowPresenter> glyphQueue = new();
     private readonly HashSet<LyricsRowPresenter> pendingGlyphs = [];
+    private bool resizeEdgesPending;
     private LyricsGraphicsResources? graphicsResources;
     private bool graphicsUnavailable;
     private bool rowsNeedStyle, graphicsRecoveryQueued;
@@ -381,7 +382,14 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void QueueEdges()
     {
-        if (!PresentationLoaded || InteractiveResize || edgeQueued) return;
+        if (!PresentationLoaded) return;
+        if (InteractiveResize)
+        {
+            resizeEdgesPending = true;
+            if (!glyphTimer.IsRunning) glyphTimer.Start();
+            return;
+        }
+        if (edgeQueued) return;
         edgeQueued = DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
         {
             edgeQueued = false; if (!PresentationLoaded || InteractiveResize) return;
@@ -444,12 +452,17 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     internal void QueueGlyphDraw(LyricsRowPresenter row)
     {
-        if (!PresentationLoaded || InteractiveResize || !pendingGlyphs.Add(row)) return;
+        if (!PresentationLoaded || !pendingGlyphs.Add(row)) return;
         glyphQueue.Enqueue(row); if (!glyphTimer.IsRunning) glyphTimer.Start();
     }
     private void DrawQueuedGlyphs(DispatcherQueueTimer sender, object args)
     {
-        if (!PresentationLoaded || InteractiveResize) { CancelGlyphQueue(); return; }
+        if (!PresentationLoaded) { CancelGlyphQueue(); return; }
+        if (resizeEdgesPending)
+        {
+            resizeEdgesPending = false;
+            foreach (var row in realized.ToArray()) row.UpdateEdge();
+        }
         // Resize can invalidate several rows together. Bound their CPU uploads,
         // while scroll blur and fading continue immediately on the compositor.
         long started = Stopwatch.GetTimestamp(); int drawn = 0, remaining = glyphQueue.Count;
@@ -459,13 +472,14 @@ public sealed partial class LyricsView : UserControl, IDisposable
             if (!row.GlyphUploadReady) { glyphQueue.Enqueue(row); continue; }
             pendingGlyphs.Remove(row);
             row.RenderPendingGlyphs(); drawn++;
-            if (drawn >= 3 || Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 4) break;
+            if (drawn >= (InteractiveResize ? 1 : 3) || Stopwatch.GetElapsedTime(started).TotalMilliseconds >= 4) break;
         }
-        if (glyphQueue.Count > 0) glyphTimer.Start();
+        if (glyphQueue.Count > 0 || resizeEdgesPending) glyphTimer.Start();
     }
     private void CancelGlyphQueue()
     {
-        glyphTimer.Stop(); foreach (var row in pendingGlyphs) row.CancelQueuedDraw(); pendingGlyphs.Clear(); glyphQueue.Clear();
+        glyphTimer.Stop(); resizeEdgesPending = false;
+        foreach (var row in pendingGlyphs) row.CancelQueuedDraw(); pendingGlyphs.Clear(); glyphQueue.Clear();
     }
     public void Dispose()
     {
