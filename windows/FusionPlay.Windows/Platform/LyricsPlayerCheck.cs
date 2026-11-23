@@ -587,6 +587,40 @@ internal static class LyricsPlayerCheck
                 var seek = Find<ProgressSeekButton>("MiniProgressSeek");
                 Require(Seeking.AtFraction(seek.Snapshot!(), .5)?.ExpectedTrackId == source.TrackId, "player_seek_guard_lost_track_identity");
             }));
+            step = "current_track_lyrics_toggle";
+            void ToggleLyrics() => Require(typeof(MainWindow).GetMethod("ToggleCurrentLyrics", Private)!.Invoke(main, null) is true,
+                "current_track_lyrics_toggle_unavailable");
+            var nextSource = source with { TrackId = "lyrics-toggle-next-track" };
+            await OnUi(queue!, () => Pass("current_track_lyric_override_keeps_preferences_and_survives_caption_updates", () =>
+            {
+                var saved = File.ReadAllBytes(preferencesPath);
+                Require(Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Visible && LyricsVisible(), "lyrics_toggle_fixture_not_ready");
+                ToggleLyrics();
+                Require(!LyricsVisible(), "lyrics_toggle_did_not_hide_current_track");
+                Accept(source with { Title = "A new caption for the same track" });
+                Require(!LyricsVisible() && File.ReadAllBytes(preferencesPath).AsSpan().SequenceEqual(saved), "lyrics_toggle_changed_global_mode_or_was_reset_by_caption");
+                Accept(nextSource);
+            }));
+            await WaitLyrics();
+            await OnUi(queue!, () => Pass("current_track_lyric_override_resets_on_track_mode_change_and_disconnect", () =>
+            {
+                Require(LyricsVisible(), "lyrics_override_leaked_into_next_track");
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never", NarrowLyricsPaging = true });
+                ToggleLyrics();
+                Require(LyricsVisible() && model.Preferences.Value.LyricsDisplayMode == "never", "lyrics_toggle_did_not_temporarily_show_lyrics");
+                Require(Field(main!, "miniPager") is CompactLyricsPager { Active: true }, "lyrics_toggle_did_not_enable_paged_layout");
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
+                Require(!LyricsVisible(), "changing_global_mode_kept_lyrics_override");
+                ToggleLyrics();
+                Accept(new ReceiverSnapshot { Phase = ReceiverPhase.Ready });
+                Require(!LyricsVisible() && Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Collapsed, "lyrics_shortcut_retained_when_disconnected");
+                Accept(nextSource);
+                Require(!LyricsVisible(), "lyrics_override_survived_disconnect_and_reconnect");
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic", NarrowLyricsPaging = false });
+                Accept(source);
+            }));
+            await WaitLyrics();
             await Task.Delay(400);
             step = "real_player_layouts";
             var playerSizes = new List<(int Width, int Height)> { (320, 456), (420, 640), (840, 600), (840, 340), (840, 760) };

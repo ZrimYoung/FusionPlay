@@ -5,6 +5,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
+using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Hosting;
@@ -29,6 +30,8 @@ internal sealed class TrayWindow : Window
     private readonly PlayerText artist = new() { Name = "TrackArtist", FontSize = 13, Opacity = 0.9, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis };
     private readonly Button play = new(), previous = new(), next = new();
     private readonly Button artworkButton = new(), trackButton = new(), settingsButton = new(), quitButton = new();
+    private readonly PlayerProgressBar progress = new() { Height = 3, IsHitTestVisible = false };
+    private readonly ProgressSeekButton progressSeek = new() { Name = "TrayProgressSeek", Visibility = Visibility.Collapsed };
     private readonly MenuVolumeSlider volumeControl = new();
     private Slider volume => volumeControl.Slider;
     private readonly FontIcon speaker = new() { Glyph = "\uE767", FontSize = 14 };
@@ -91,6 +94,12 @@ internal sealed class TrayWindow : Window
         }
         controls.Children.Add(previous); controls.Children.Add(play); controls.Children.Add(next); trackColumn.Children.Add(controls);
         top.Children.Add(trackColumn); root.Children.Add(top);
+        AutomationProperties.SetAccessibilityView(progress, AccessibilityView.Raw);
+        progressSeek.Content = progress;
+        progressSeek.Snapshot = () => model.State;
+        progressSeek.SeekRequested += request => _ = model.SeekAsync(request);
+        progressSeek.PointerPreviewChanged += RenderProgress;
+        root.Children.Add(progressSeek);
         volume.Name = "VolumeSlider"; volume.IsTabStop = false;
         volumeControl.Visibility = Visibility.Collapsed;
         volumeViewport.Clip = volumeClip; volumeViewport.Children.Add(volumeControl);
@@ -137,10 +146,11 @@ internal sealed class TrayWindow : Window
         };
         root.Loaded += (_, _) => { UiTypography.Apply(root, model.Preferences.Value, force: true); QueueFit(); };
         root.SizeChanged += (_, _) => QueueFit(); trackColumn.SizeChanged += (_, _) => QueueFit();
-        model.Changed += Render;
         Closed += (_, _) =>
         {
-            closed = true; volumeAnimation?.Stop(); model.Changed -= Render;
+            closed = true; volumeAnimation?.Stop();
+            if (visible) model.Changed -= Render;
+            progressSeek.CancelPointer();
             artVisual.Clip = null; artworkClip.Dispose(); artworkGeometry.Dispose();
         };
         Render();
@@ -163,6 +173,7 @@ internal sealed class TrayWindow : Window
         rendering = true; var state = model.State; Title = "FusionPlay · " + L.Text("接收面板");
         cover.Source = model.Artwork;
         string oldTitle = title.Text, oldArtist = artist.Text;
+        var oldProgressVisibility = progressSeek.Visibility;
         var display = model.DisplayMetadata;
         title.Text = display.Title.Length > 0 ? display.Title : L.Text("等待音乐");
         artist.Text = string.Join(" · ", new[] { display.Artist, display.Album }.Where(x => x.Length > 0));
@@ -172,9 +183,24 @@ internal sealed class TrayWindow : Window
         foreach (var b in new[] { artworkButton, trackButton }) Label(b, "迷你播放器");
         Label(previous, "上一曲"); Label(play, state.Phase == ReceiverPhase.Playing ? "暂停" : "播放"); Label(next, "下一曲");
         Label(settingsButton, "设置"); Label(quitButton, "退出"); Label(volume, "接收音量"); Label(volumeButton, volumeExpanded ? "收起音量" : "展开音量");
+        bool hasTimeline = state.HasMedia && state.DurationMs is > 0 && model.DisplayPositionMs != null;
+        progressSeek.IsEnabled = hasTimeline && model.CanSeek;
+        progressSeek.Visibility = hasTimeline ? Visibility.Visible : Visibility.Collapsed;
+        Label(progressSeek, "播放进度");
+        AutomationProperties.SetHelpText(progressSeek, L.Text("点击或拖动跳转。方向键可前后跳转 10 秒。", "Click or drag to seek, or use the arrow keys to seek by ten seconds."));
+        progressSeek.RefreshState();
+        RenderProgress();
         speaker.Glyph = model.Volume == 0 ? "\uE74F" : "\uE767";
         volume.IsEnabled = model.Initialized; volume.Value = model.Volume; rendering = false;
-        if (oldTitle != title.Text || oldArtist != artist.Text || contentHeight == 0) QueueFit();
+        if (oldTitle != title.Text || oldArtist != artist.Text || oldProgressVisibility != progressSeek.Visibility || contentHeight == 0) QueueFit();
+    }
+    private void RenderProgress()
+    {
+        if (closed) return;
+        var position = progressSeek.PointerPreviewPositionMs ?? model.DisplayPositionMs;
+        var duration = model.State.DurationMs;
+        progress.Value = duration is > 0 && position is { } current
+            ? Math.Clamp(100.0 * current / duration.Value, 0, 100) : 0;
     }
     private void QueueFit()
     {
@@ -250,8 +276,10 @@ internal sealed class TrayWindow : Window
     {
         if (visible) { HidePanel(); return; }
         if (Environment.TickCount64 - closedByTrayClick < 600) { closedByTrayClick = long.MinValue / 2; return; }
+        Render();
         FitToContent(); PositionAtTray();
-        visible = true; AppWindow.Show(); TrayIcon.Native.SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)); Activate();
+        visible = true; model.Changed += Render;
+        AppWindow.Show(); TrayIcon.Native.SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)); Activate();
         QueueFit();
     }
     private void PositionAtTray()
@@ -265,5 +293,14 @@ internal sealed class TrayWindow : Window
         y = Math.Clamp(y, work.Y, Math.Max(work.Y, work.Y + work.Height - AppWindow.Size.Height));
         AppWindow.Move(new PointInt32(x, y));
     }
-    public void HidePanel() { visible = false; SetVolumeExpanded(false, false); if (!closed) AppWindow.Hide(); }
+    public void HidePanel()
+    {
+        if (closed) return;
+        if (visible) model.Changed -= Render;
+        visible = false;
+        progressSeek.IsEnabled = false;
+        progressSeek.CancelPointer();
+        SetVolumeExpanded(false, false);
+        AppWindow.Hide();
+    }
 }

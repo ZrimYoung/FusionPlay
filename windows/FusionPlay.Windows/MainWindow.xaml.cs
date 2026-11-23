@@ -49,6 +49,9 @@ public sealed partial class MainWindow : Window
     private bool presenterTransitionPending, geometryCommitQueued;
     private long geometryQueuedVersion;
     private bool? requestedLyricsLayout;
+    private (ReceiverSnapshot Track, string Mode, bool Visible)? currentLyricsOverride;
+    private (ReceiverSnapshot Track, string Mode)? lyricsPageToReveal;
+    private (bool Available, bool Visible, string Language)? lyricsTogglePresentation;
     private bool lyricsLayoutTransitioning, contentTransitionDone, nativeTransitionDone, holdExpandedLayout;
     private bool? windowActionsShown;
     private long layoutTransitionVersion;
@@ -168,6 +171,9 @@ public sealed partial class MainWindow : Window
         RootGrid.KeyboardAccelerators.Add(shortcut);
         foreach (var key in new[] { new KeyboardAccelerator { Key = VirtualKey.F11 }, new KeyboardAccelerator { Key = VirtualKey.F, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift } })
         { key.Invoked += (_, args) => { ToggleFullScreen(); args.Handled = true; }; RootGrid.KeyboardAccelerators.Add(key); }
+        var lyricsKey = new KeyboardAccelerator { Key = VirtualKey.L, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
+        lyricsKey.Invoked += (_, args) => args.Handled = ToggleCurrentLyrics();
+        RootGrid.KeyboardAccelerators.Add(lyricsKey);
         var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
         escape.Invoked += (_, args) => { if (IsFullScreen) { ToggleFullScreen(); args.Handled = true; } };
         RootGrid.KeyboardAccelerators.Add(escape);
@@ -252,7 +258,11 @@ public sealed partial class MainWindow : Window
         bool nextIdle = !model.HasCurrentTrack && !model.MigrationRequired && error.Length == 0;
         if (idle != nextIdle) { idle = nextIdle; appliedLayout = null; if (idle) miniPager.ResetToPlayer(); }
         ulong? displayPosition = model.DisplayPositionMs;
-        RequestLyricsLayout(!idle && LyricsDisplayModes.IsVisible(preferences.LyricsDisplayMode, model.LyricsAvailable));
+        bool canToggleLyrics = CanToggleCurrentLyrics(state);
+        if (currentLyricsOverride is { } choice && (!canToggleLyrics || choice.Mode != preferences.LyricsDisplayMode || !Seeking.SameTrack(choice.Track, state)))
+            currentLyricsOverride = null;
+        bool showLyrics = !idle && (currentLyricsOverride?.Visible ?? LyricsDisplayModes.IsVisible(preferences.LyricsDisplayMode, model.LyricsAvailable));
+        RequestLyricsLayout(showLyrics);
         ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
         SetNativePlayerLayout(lyricsVisible, IsFullScreen);
         miniPager.RefreshLanguage();
@@ -318,7 +328,7 @@ public sealed partial class MainWindow : Window
         MiniRoot.RequestedTheme = highContrast ? ElementTheme.Default : ElementTheme.Dark;
         MiniLyricsGlobalShade.Background = miniLyricEffects ? lyricArtShade : lyricEmptyShade;
         MiniLyricsGlobalShade.Visibility = !idle && miniLyricsMode && !highContrast && !pagedAcrylic ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var button in new[] { CloseButton, PinButton, MiniFullScreenButton })
+        foreach (var button in new[] { CloseButton, PinButton, MiniFullScreenButton, MiniLyricsToggleButton })
             button.Background = effects || idleAcrylic ? captionBackdrop : solid;
         MiniShade.Visibility = effects ? Visibility.Visible : Visibility.Collapsed;
         if (idle) ExpandedRoot.Background = MiniRoot.Background = idleBackground;
@@ -347,6 +357,7 @@ public sealed partial class MainWindow : Window
         Label(PinButton, L.Text(preferences.Pinned ? "取消置顶" : "窗口置顶"));
         PinIcon.Opacity = preferences.Pinned ? 1 : 0.6;
         PinButton.Visibility = !idle && preferences.ShowPinButton ? Visibility.Visible : Visibility.Collapsed;
+        UpdateLyricsToggle(canToggleLyrics, showLyrics);
         if (AppWindow.Presenter is OverlappedPresenter presenter) presenter.IsAlwaysOnTop = preferences.Pinned && !IsFullScreen;
         bool sectionAnimations = Backdrop.AnimationsEnabled;
         transportTransition.SetVisible(!idle && preferences.ShowTransport && !model.MigrationRequired, sectionAnimations && compact && !idle);
@@ -397,6 +408,12 @@ public sealed partial class MainWindow : Window
         }
         ShowWindowActions(pointerInside);
         ExpandedDetails.IsHitTestVisible = ExpandedLyricsHost.IsHitTestVisible = !lyricsLayoutTransitioning;
+        if (!lyricsLayoutTransitioning && lyricsPageToReveal is { } page)
+        {
+            lyricsPageToReveal = null;
+            if (AppWindow.IsVisible && showLyrics && page.Mode == preferences.LyricsDisplayMode && Seeking.SameTrack(page.Track, state))
+                miniPager.Navigate(true);
+        }
         ApplyMiniPageInput();
         // Requested visibility disables native input holes synchronously; layout
         // callbacks still coalesce the later geometry updates during animations.
@@ -474,6 +491,34 @@ public sealed partial class MainWindow : Window
     }
     private static void Label(Button button, string label)
     { ToolTipService.SetToolTip(button, label); AutomationProperties.SetName(button, label); }
+    private bool CanToggleCurrentLyrics(ReceiverSnapshot state) => state.HasMedia && model.HasCurrentTrack
+        && (!string.IsNullOrWhiteSpace(state.TrackId) || !string.IsNullOrWhiteSpace(state.Title));
+    private void UpdateLyricsToggle(bool available, bool visible)
+    {
+        var presentation = (Available: available, Visible: available && visible, Language: L.Language);
+        if (lyricsTogglePresentation == presentation) return;
+        lyricsTogglePresentation = presentation;
+        LyricsToggleButton.Visibility = MiniLyricsToggleButton.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        if (!available) return;
+        string label = visible ? L.Text("隐藏歌词（当前歌曲）", "Hide lyrics for this track")
+            : L.Text("显示歌词（当前歌曲）", "Show lyrics for this track");
+        Label(MiniLyricsToggleButton, label);
+        Label(LyricsToggleButton, label);
+        MiniLyricsToggleIcon.Opacity = LyricsToggleIcon.Opacity = visible ? 1 : .65;
+    }
+    private bool ToggleCurrentLyrics()
+    {
+        var state = model.State;
+        if (closed || presenterTransitionPending || !CanToggleCurrentLyrics(state)) return false;
+        var preferences = model.Preferences.Value;
+        string mode = preferences.LyricsDisplayMode;
+        bool defaultVisibility = LyricsDisplayModes.IsVisible(mode, model.LyricsAvailable);
+        bool visible = !(requestedLyricsLayout ?? defaultVisibility);
+        currentLyricsOverride = visible == defaultVisibility ? null : (state, mode, visible);
+        lyricsPageToReveal = visible && compact && preferences.NarrowLyricsPaging && !IsFullScreen ? (state, mode) : null;
+        Render();
+        return true;
+    }
     private void UpdateCover()
     {
         if (ReferenceEquals(lastArtwork, model.Artwork)) return;
@@ -833,7 +878,7 @@ public sealed partial class MainWindow : Window
         }
         if (!compact)
         {
-            Add(SettingsButton); Add(ExpandedFullScreenButton); Add(ExpandedCloseButton);
+            Add(LyricsToggleButton); Add(SettingsButton); Add(ExpandedFullScreenButton); Add(ExpandedCloseButton);
             if (!lyricsLayoutTransitioning && !idle)
             {
                 Add(ExpandedMigrationButton);
@@ -845,7 +890,7 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            if (captionShown) { Add(CloseButton); Add(PinButton); Add(MiniFullScreenButton); }
+            if (captionShown) { Add(CloseButton); Add(PinButton); Add(MiniFullScreenButton); Add(MiniLyricsToggleButton); }
             if (miniPager.Active && !lyricsLayoutTransitioning && !idle)
             {
                 Add(MiniPageButton);
@@ -929,7 +974,7 @@ public sealed partial class MainWindow : Window
         if (CloseButton == null || windowActionsShown == visible) return;
         bool animate = windowActionsShown != null && RootGrid.IsLoaded && AppWindow.IsVisible;
         windowActionsShown = visible;
-        foreach (var button in new[] { SettingsButton, ExpandedFullScreenButton, ExpandedCloseButton, MiniFullScreenButton, CloseButton })
+        foreach (var button in new[] { LyricsToggleButton, SettingsButton, ExpandedFullScreenButton, ExpandedCloseButton, MiniLyricsToggleButton, MiniFullScreenButton, CloseButton })
         {
             if (animate) AnimateVisibility(button, visible, visible ? .25 : .20, 0);
             else Fade(button, 0, visible ? 1 : 0, 0);
@@ -969,6 +1014,7 @@ public sealed partial class MainWindow : Window
     private static string FormatTime(ulong milliseconds)
     { ulong seconds = milliseconds / 1000; return seconds >= 3600 ? $"{seconds / 3600}:{seconds / 60 % 60:00}:{seconds % 60:00}" : $"{seconds / 60}:{seconds % 60:00}"; }
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    private void LyricsToggle_Click(object sender, RoutedEventArgs e) => ToggleCurrentLyrics();
     private void Settings_Click(object sender, RoutedEventArgs e) => settings();
     private void Volume_Changed(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e) { if (!rendering) model.EditVolume(e.NewValue); }
     private void Pin_Click(object sender, RoutedEventArgs e)

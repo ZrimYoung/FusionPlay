@@ -170,6 +170,8 @@ internal static class PlayerRefinementCheck
                 Require(model!.DisplayMetadata is { Title: "A Synthetic Question", Artist: "Example Artist", WasCorrected: true }, "verified_title_not_corrected");
                 Require(Find<PlayerText>("TitleText").Text == "A Synthetic Question" && Find<PlayerText>("MiniTitle").Text == "A Synthetic Question", "player_displays_disagree");
                 var trayTitle = Descendants((DependencyObject)tray!.Content).OfType<PlayerText>().First(item => item.Name == "TrackTitle");
+                Require(trayTitle.Text != "A Synthetic Question", "hidden_tray_rendered_playback_change");
+                typeof(TrayWindow).GetMethod("Render", Private)!.Invoke(tray, null); // Same refresh that precedes showing the panel.
                 Require(trayTitle.Text == "A Synthetic Question", "tray_title_not_corrected");
                 var display = SystemMedia.DisplaySnapshot(model.State, model.DisplayMetadata);
                 Require(display.Title == "A Synthetic Question" && display.Artist == "Example Artist" && display.TrackId == song.TrackId && display.PositionMs == song.PositionMs, "system_metadata_selection_wrong");
@@ -183,6 +185,36 @@ internal static class PlayerRefinementCheck
                 Require(Find<PlayerText>("TitleText").Text == "A Synthetic Question", "paused_preference_did_not_refresh_title");
             }));
             await Capture("corrected-title-840x600");
+            await OnUi(queue!, () => Pass("system_media_position_targets_source_track", () =>
+            {
+                var source = model!.State;
+                Require(model.CanSeek && source.Phase == ReceiverPhase.Paused, "system_seek_fixture_not_ready");
+                ulong duration = source.DurationMs!.Value;
+                ulong position = source.PositionMs!.Value;
+                var seekable = SystemMedia.CreateTimeline(duration, position, true);
+                var readOnly = SystemMedia.CreateTimeline(duration, position, false);
+                Require(seekable.MinSeekTime == TimeSpan.Zero && seekable.MaxSeekTime == seekable.EndTime
+                    && readOnly.MinSeekTime == readOnly.MaxSeekTime && readOnly.Position == seekable.Position,
+                    "system_seek_range_or_read_only_position_wrong");
+
+                var positionRequest = SystemMedia.SeekForPosition(source, TimeSpan.FromTicks(15_000));
+                Require(positionRequest is { PositionMs: 2 } && positionRequest.ExpectedTrackId == song.TrackId
+                    && positionRequest.ExpectedTitle == song.Title, "system_seek_rounded_or_corrected_source_wrong");
+                Require(SystemMedia.SeekForPosition(source, TimeSpan.MaxValue)?.PositionMs == duration
+                    && SystemMedia.SeekForPosition(source, TimeSpan.Zero)?.PositionMs == 0
+                    && SystemMedia.SeekForPosition(source, TimeSpan.FromTicks(-1)) == null
+                    && SystemMedia.SeekForPosition(source with { PositionMs = null }, TimeSpan.Zero) == null,
+                    "system_seek_invalid_or_unbounded_position");
+                Require(Seeking.MatchesCurrent(source with { Title = "Next lyric line" }, positionRequest!)
+                    && !Seeking.MatchesCurrent(source with { TrackId = "replacement-track" }, positionRequest!)
+                    && !Seeking.MatchesCurrent(source with { ControlsAvailable = false }, positionRequest!),
+                    "system_seek_could_target_replaced_or_disconnected_track");
+                var titleOnly = source with { TrackId = "" };
+                var titleRequest = SystemMedia.SeekForPosition(titleOnly, TimeSpan.Zero);
+                Require(titleRequest is { ExpectedTrackId.Length: 0 } && titleRequest.ExpectedTitle == source.Title
+                    && !Seeking.MatchesCurrent(titleOnly with { Title = "Other song" }, titleRequest),
+                    "system_seek_lost_title_identity_fallback");
+            }));
             await OnUi(queue!, () => Pass("transient_source_gaps_keep_controls", () =>
             {
                 Accept(song with { Phase = ReceiverPhase.Connected, DurationMs = null, PositionMs = null }); Arrange();

@@ -10,6 +10,7 @@ internal sealed class SystemMedia : IDisposable
 {
     private readonly SystemMediaTransportControls controls;
     private readonly Action<PlaybackCommand> dispatch;
+    private readonly Func<SeekRequest, bool> dispatchSeek;
     private readonly Action<string>? diagnostic;
     private readonly CancellationTokenSource lifetime = new();
     private readonly List<ThumbnailPublication> retiredThumbnails = [];
@@ -20,18 +21,21 @@ internal sealed class SystemMedia : IDisposable
     private ulong? timelineDuration, timelinePosition;
     private string timelineTrack = "";
     private bool timelinePublished;
+    private bool timelineSeekable;
+    private ReceiverSnapshot? seekTarget;
+    private bool positionRequestsEnabled;
     private int reservation;
     private bool enabled;
     private bool active;
     private string metadata = "";
     private bool disposed;
-    public SystemMedia(nint ownerWindow, Action<PlaybackCommand> send, Action<string>? report = null)
+    public SystemMedia(nint ownerWindow, Action<PlaybackCommand> send, Func<SeekRequest, bool> seek, Action<string>? report = null)
     {
-        dispatch = send; diagnostic = report;
+        dispatch = send; dispatchSeek = seek; diagnostic = report;
         controls = GetForWindow(ownerWindow);
-        controls.ButtonPressed += ButtonPressed;
         controls.IsEnabled = false;
         controls.IsFastForwardEnabled = controls.IsRewindEnabled = controls.IsStopEnabled = false;
+        controls.ButtonPressed += ButtonPressed;
     }
     private static unsafe SystemMediaTransportControls GetForWindow(nint window)
     {
@@ -76,6 +80,22 @@ internal sealed class SystemMedia : IDisposable
         if (command == null) { Interlocked.Exchange(ref reservation, 0); return; }
         dispatch(command.Value);
     }
+    private void PositionChangeRequested(SystemMediaTransportControls sender, PlaybackPositionChangeRequestedEventArgs args)
+    {
+        // The Shell's callback can run outside the UI thread. Capture the published
+        // track before dispatch so a queued request cannot seek a replacement song.
+        var target = Volatile.Read(ref seekTarget);
+        if (target == null || SeekForPosition(target, args.RequestedPlaybackPosition) is not { } request
+            || Interlocked.CompareExchange(ref reservation, 1, 0) != 0) return;
+        if (!dispatchSeek(request)) Interlocked.Exchange(ref reservation, 0);
+    }
+    internal static SeekRequest? SeekForPosition(ReceiverSnapshot target, TimeSpan position)
+    {
+        if (position < TimeSpan.Zero || !Seeking.CanSeek(target)) return null;
+        ulong milliseconds = (ulong)Math.DivRem(position.Ticks, TimeSpan.TicksPerMillisecond, out long remainder);
+        if (remainder >= TimeSpan.TicksPerMillisecond / 2) milliseconds++;
+        return new SeekRequest(Math.Min(milliseconds, target.DurationMs!.Value), target.TrackId, target.Title);
+    }
     public void Update(ReceiverController model)
     {
         if (disposed) return;
@@ -84,6 +104,10 @@ internal sealed class SystemMedia : IDisposable
         // a new system music session. Keep an existing paused/connected session.
         bool shouldPublish = !model.Busy && !model.Suspended && (state.Phase == ReceiverPhase.Playing || state.ControlsAvailable && state.Phase == ReceiverPhase.Paused || active && state.HasMedia);
         if (!shouldPublish) { Clear(); return; }
+        bool canSeek = model.CanSeek;
+        var previousSeekTarget = Volatile.Read(ref seekTarget);
+        if (!canSeek || previousSeekTarget != null && (!Seeking.SameTrack(previousSeekTarget, state) || previousSeekTarget.DurationMs != state.DurationMs))
+            Volatile.Write(ref seekTarget, null);
         enabled = model.CanControl;
         if (!model.ControlBusy) Interlocked.Exchange(ref reservation, 0);
         controls.IsEnabled = true;
@@ -108,7 +132,7 @@ internal sealed class SystemMedia : IDisposable
                 _ = PublishThumbnailAsync(presentation, currentArtwork, generation, thumbnailRequest.Token);
             }
         }
-        UpdateTimeline(state);
+        UpdateTimeline(state, canSeek);
         active = true;
     }
 
@@ -217,36 +241,59 @@ internal sealed class SystemMedia : IDisposable
         catch (OperationCanceledException) { }
         finally { retiredThumbnails.Remove(outgoing); outgoing.Dispose(); }
     }
-    private void UpdateTimeline(ReceiverSnapshot state)
+    private void UpdateTimeline(ReceiverSnapshot state, bool canSeek)
     {
         try
         {
+            if (!canSeek) SetPositionRequestsEnabled(false);
             if (state.DurationMs is > 0 && state.PositionMs.HasValue)
             {
                 ulong position = Math.Min(state.PositionMs.Value, state.DurationMs.Value);
-                if (timelinePublished && timelineDuration == state.DurationMs && timelinePosition == position && timelineTrack == state.TrackId) return;
-                // No MinSeekTime/MaxSeekTime and no position-change handler: the
-                // sender owns seeking. Publish only its actual reported timeline.
-                controls.UpdateTimelineProperties(new SystemMediaTransportControlsTimelineProperties
+                if (!timelinePublished || timelineDuration != state.DurationMs || timelinePosition != position
+                    || timelineTrack != state.TrackId || timelineSeekable != canSeek)
                 {
-                    StartTime = TimeSpan.Zero, EndTime = TimelineTime(state.DurationMs.Value), Position = TimelineTime(position)
-                });
-                timelinePublished = true; timelineDuration = state.DurationMs; timelinePosition = position; timelineTrack = state.TrackId;
+                    controls.UpdateTimelineProperties(CreateTimeline(state.DurationMs.Value, position, canSeek));
+                    timelinePublished = true; timelineDuration = state.DurationMs; timelinePosition = position;
+                    timelineTrack = state.TrackId; timelineSeekable = canSeek;
+                }
+                Volatile.Write(ref seekTarget, canSeek ? state : null);
+                if (canSeek) SetPositionRequestsEnabled(true);
             }
             else ClearTimeline();
         }
         catch (Exception error) { Report("timeline", error); }
+    }
+    private void SetPositionRequestsEnabled(bool enabled)
+    {
+        if (positionRequestsEnabled == enabled) return;
+        // Windows advertises position control while a handler is registered,
+        // even if the published seek range is empty.
+        if (enabled) controls.PlaybackPositionChangeRequested += PositionChangeRequested;
+        else controls.PlaybackPositionChangeRequested -= PositionChangeRequested;
+        positionRequestsEnabled = enabled;
+    }
+    internal static SystemMediaTransportControlsTimelineProperties CreateTimeline(ulong duration, ulong position, bool canSeek)
+    {
+        var timeline = new SystemMediaTransportControlsTimelineProperties
+        {
+            StartTime = TimeSpan.Zero, EndTime = TimelineTime(duration), Position = TimelineTime(position)
+        };
+        // The Shell raises position requests only for an advertised seek range.
+        if (canSeek) { timeline.MinSeekTime = TimeSpan.Zero; timeline.MaxSeekTime = timeline.EndTime; }
+        return timeline;
     }
     private static TimeSpan TimelineTime(ulong millis) => TimeSpan.FromTicks((long)Math.Min(millis, (ulong)(TimeSpan.MaxValue.Ticks / TimeSpan.TicksPerMillisecond)) * TimeSpan.TicksPerMillisecond);
     private void ClearTimeline()
     {
         if (!timelinePublished) return;
         controls.UpdateTimelineProperties(new SystemMediaTransportControlsTimelineProperties { StartTime = TimeSpan.Zero, EndTime = TimeSpan.Zero, Position = TimeSpan.Zero });
-        timelinePublished = false; timelineDuration = timelinePosition = null; timelineTrack = "";
+        timelinePublished = timelineSeekable = false; timelineDuration = timelinePosition = null; timelineTrack = "";
     }
     private void Report(string stage, Exception error) => diagnostic?.Invoke("system_media_" + stage + ":" + error.GetType().Name + ":" + error.HResult.ToString("X8"));
     public void Clear()
     {
+        Volatile.Write(ref seekTarget, null);
+        SetPositionRequestsEnabled(false);
         CancelThumbnailRequest(); ++thumbnailGeneration;
         enabled = false; Interlocked.Exchange(ref reservation, 0);
         controls.IsPlayEnabled = controls.IsPauseEnabled = controls.IsPreviousEnabled = controls.IsNextEnabled = false;

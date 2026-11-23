@@ -1,6 +1,8 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using FusionPlay.Core;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -24,7 +26,7 @@ internal static class TrayLayoutCheck
         public double Bottom => Y + Height;
     }
     private sealed record Sample(string Language, int FontSize, bool TwoLines, bool VolumeExpanded,
-        Box Cover, Box Image, Box TrackColumn, Box Title, Box Artist, Box Controls, Box PreviousIcon,
+        Box Cover, Box Image, Box TrackColumn, Box Title, Box Artist, Box Controls, Box PreviousIcon, Box Progress,
         Box VolumeViewport, Box VolumeSlider, Box Footer, Box SettingsButton, Box VolumeButton, Box QuitButton,
         double RootWidth, double RootHeight, double ClientWidth, double ClientHeight);
     private const double Tolerance = 1;
@@ -77,6 +79,50 @@ internal static class TrayLayoutCheck
                 Background();
             });
             await Settle(queue!);
+            step = "check_tray_seek";
+            await OnUi(queue!, () =>
+            {
+                Background();
+                var seek = Find<ProgressSeekButton>("TrayProgressSeek");
+                Require(seek.Visibility == Visibility.Collapsed && !seek.IsEnabled, "idle_tray_seek_is_available");
+                var source = new ReceiverSnapshot { Phase = ReceiverPhase.Playing, ControlsAvailable = true,
+                    TrackId = "tray-fixture", Title = "Tray fixture", DurationMs = 200_000, PositionMs = 50_000 };
+                var timeline = (PlaybackTimeline)typeof(ReceiverController).GetField("timeline", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(controller)!;
+                var initialized = typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized))!;
+                var render = typeof(TrayWindow).GetMethod("Render", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var bar = (PlayerProgressBar)seek.Content;
+                ulong revision = 0;
+                void ApplySource(ReceiverSnapshot snapshot, bool ready)
+                {
+                    Require(timeline.Apply(new(++revision, snapshot)), "could_not_set_tray_timeline");
+                    initialized.SetValue(controller, ready);
+                    render.Invoke(panel, null);
+                }
+                try
+                {
+                    ApplySource(source, true); Arrange();
+                    Require(seek.IsEnabled && seek.Visibility == Visibility.Visible && bar.Value == 25, "tray_timeline_unavailable");
+                    double width = seek.ActualWidth;
+                    Require(seek.BeginPointer(1, width / 2, width, true) && bar.Value == 50, "tray_seek_click_preview_missing");
+                    Require(seek.MovePointer(1, width * 0.75, width) && bar.Value == 75, "tray_seek_drag_preview_missing");
+                    initialized.SetValue(controller, false); // Record the routed request without contacting a receiver.
+                    SeekRequest? requested = null;
+                    seek.SeekRequested += Record;
+                    try { Require(seek.ReleasePointer(1, width * 0.75, width) && requested == new SeekRequest(150_000, source.TrackId, source.Title), "tray_seek_release_request_mismatch"); }
+                    finally { seek.SeekRequested -= Record; }
+                    void Record(SeekRequest request) => requested = request;
+                    Require(bar.Value == 25 && timeline.Source.PositionMs == 50_000, "tray_preview_changed_source_position");
+                    ApplySource(source, true);
+                    Require(seek.BeginPointer(2, width / 2, width, true), "tray_seek_second_press_failed");
+                    ApplySource(source with { TrackId = "changed-track", PositionMs = 20_000 }, true);
+                    Require(!seek.PointerSeekActive && bar.Value == 10 && !seek.ReleasePointer(2, width / 2, width), "tray_seek_survived_track_change");
+                    Require(seek.BeginPointer(3, width / 2, width, true), "tray_seek_third_press_failed");
+                    panel!.HidePanel();
+                    Require(!seek.PointerSeekActive && !seek.IsEnabled, "tray_seek_survived_panel_close");
+                }
+                finally { ApplySource(source, false); }
+                Background();
+            });
             foreach (string language in new[] { "zh-Hans", "en" })
             foreach (int font in new[] { 0, 16 })
             foreach (bool twoLines in new[] { false, true })
@@ -184,13 +230,14 @@ internal static class TrayLayoutCheck
             var artwork = Find<Button>("ArtworkButton"); var image = Find<Image>("AlbumCover");
             var column = Find<FrameworkElement>("TrackColumn"); var title = Find<PlayerText>("TrackTitle"); var artist = Find<PlayerText>("TrackArtist");
             var controls = Find<FrameworkElement>("TransportControls"); var previous = Find<Button>("PreviousButton");
+            var progress = Find<ProgressSeekButton>("TrayProgressSeek");
             var viewport = Find<FrameworkElement>("VolumeViewport"); var slider = Find<Slider>("VolumeSlider");
             var footer = Find<Grid>("TrayFooter"); var settings = Find<Button>("SettingsButton"); var volume = Find<FrameworkElement>("VolumeButton"); var quit = Find<Button>("QuitButton");
             var icon = previous.Content as FrameworkElement;
             Require(icon != null, "previous_icon_missing");
             var a = Bounds(artwork); var i = Bounds(image); var c = Bounds(column); var t = Bounds(title); var ar = Bounds(artist); var tr = Bounds(controls); var pi = Bounds(icon!); var v = Bounds(viewport); var s = Bounds(slider);
-            var f = Bounds(footer); var st = Bounds(settings); var vb = Bounds(volume); var q = Bounds(quit);
-            var geometry = new { cover = a, image = i, column = c, title = t, artist = ar, controls = tr, previous_icon = pi, volume_viewport = v, volume_slider = s, footer = f, settings_button = st, volume_button = vb, quit_button = q };
+            var p = Bounds(progress); var f = Bounds(footer); var st = Bounds(settings); var vb = Bounds(volume); var q = Bounds(quit);
+            var geometry = new { cover = a, image = i, column = c, title = t, artist = ar, controls = tr, previous_icon = pi, progress = p, volume_viewport = v, volume_slider = s, footer = f, settings_button = st, volume_button = vb, quit_button = q };
             Require(a.Width > 0 && Math.Abs(a.Width - a.Height) <= Tolerance, "cover_not_square", geometry);
             Require(Math.Abs(i.Width - i.Height) <= Tolerance && Math.Abs(i.Width - a.Width) <= Tolerance && Math.Abs(i.Height - a.Height) <= Tolerance, "cover_image_not_filling_square", geometry);
             Require(Math.Abs(a.Height - c.Height) <= Tolerance && Math.Abs(a.Y - c.Y) <= Tolerance && Math.Abs(a.Bottom - c.Bottom) <= Tolerance, "cover_column_height_or_edges_mismatch", geometry);
@@ -199,7 +246,8 @@ internal static class TrayLayoutCheck
             Require(Math.Abs(a.X - ExpectedInset) <= Tolerance && Math.Abs(a.Y - ExpectedInset) <= Tolerance && Math.Abs(content!.ActualWidth - c.Right - ExpectedInset) <= Tolerance, "panel_insets_not_twelve_dips", geometry);
             Require(Math.Abs(c.X - a.Right - 12) <= Tolerance, "cover_track_gap_changed", geometry);
             Require(Math.Abs(f.X - a.X) <= Tolerance && Math.Abs(f.Right - c.Right) <= Tolerance && Math.Abs(st.X - a.X) <= Tolerance && Math.Abs(q.Right - c.Right) <= Tolerance, "footer_not_aligned_with_header", geometry);
-            Require(Math.Abs(content!.ActualHeight - f.Bottom - ExpectedInset) <= Tolerance && Math.Abs(f.Y - a.Bottom - 10) <= Tolerance, "footer_vertical_spacing_changed", geometry);
+            Require(Math.Abs(p.X - a.X) <= Tolerance && Math.Abs(p.Right - c.Right) <= Tolerance && Math.Abs(p.Height - 24) <= Tolerance, "seek_target_dimensions_mismatch", geometry);
+            Require(Math.Abs(content!.ActualHeight - f.Bottom - ExpectedInset) <= Tolerance && Math.Abs(p.Y - a.Bottom - 10) <= Tolerance && Math.Abs(f.Y - p.Bottom - 10) <= Tolerance, "footer_vertical_spacing_changed", geometry);
             Require(Math.Abs(st.Y - vb.Y) <= Tolerance && Math.Abs(st.Y - q.Y) <= Tolerance && Math.Abs(st.Bottom - q.Bottom) <= Tolerance, "footer_controls_not_aligned", geometry);
             Require(viewport.IsHitTestVisible == expanded, "volume_hit_testing_mismatch", geometry);
             if (expanded)
@@ -221,7 +269,7 @@ internal static class TrayLayoutCheck
             double clientWidth = (client.Right - client.Left) / scale, clientHeight = (client.Bottom - client.Top) / scale;
             Require(content.ActualWidth <= clientWidth + Tolerance && content.ActualHeight <= clientHeight + Tolerance, "content_overflows_window_client", new { content = new[] { content.ActualWidth, content.ActualHeight }, client = new[] { clientWidth, clientHeight } });
             Background();
-            return new(language, font, twoLines, expanded, a, i, c, t, ar, tr, pi, v, s, f, st, vb, q, content.ActualWidth, content.ActualHeight, clientWidth, clientHeight);
+            return new(language, font, twoLines, expanded, a, i, c, t, ar, tr, pi, p, v, s, f, st, vb, q, content.ActualWidth, content.ActualHeight, clientWidth, clientHeight);
         }
     }
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)

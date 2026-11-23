@@ -177,7 +177,13 @@ public partial class App : Application
             TogglePanel = TogglePanel, Suspend = () => { panel?.HidePanel(); media?.Clear(); controller.Suspend(); },
             Resume = () => controller.Resume(), AppearanceChanged = () => player.RefreshAppearance()
         };
-        try { media = new SystemMedia(hwnd, command => controller.DispatchControl(command), controller.Store.EventDiagnostic); }
+        try
+        {
+            var ui = player.DispatcherQueue;
+            media = new SystemMedia(hwnd, controller.DispatchControl,
+                request => ui.TryEnqueue(() => { if (!quitting) _ = controller.SeekAsync(request); }),
+                controller.Store.EventDiagnostic);
+        }
         catch (Exception) { controller.Store.EventDiagnostic("system_media_initialization_failed"); }
         controller.Changed += () =>
         {
