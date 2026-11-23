@@ -10,12 +10,15 @@ namespace FusionPlay.Windows.Platform;
 
 public sealed partial class LyricsView
 {
+    private const int ResizeQuietMilliseconds = 180;
+    private const int AnchorRequestMilliseconds = 64;
     private readonly DispatcherQueueTimer resizeQuietTimer, followMotionTimer;
     private readonly HashSet<LyricsRowPresenter> laggingRows = [];
     private ReadingAnchor? readingAnchor, resizeAnchor;
     private (int Revision, LyricsRowItem Item, bool ExplicitRequest)? pendingFollowRealization;
     private bool nativeViewportResize, viewportReflow, followAfterReflow, restoreQueued, realizeAnchorRequested;
-    private (double Current, double Target)? requestedAnchorOffset;
+    private (double Target, long Started)? requestedAnchorOffset;
+    private bool correctingAnchor, retryFinalAnchor, resizePaddingHeld;
     private bool allowFollowMotion;
     private LyricsFollowMotion? followMotion;
     private double? heldResizeBodySize;
@@ -57,11 +60,13 @@ public sealed partial class LyricsView
 
     internal void BeginViewportResize()
     {
-        if (disposed || nativeViewportResize || !PresentationLoaded) return;
-        if (!viewportReflow)
+        if (disposed || nativeViewportResize) return;
+        if (!viewportReflow && PresentationLoaded)
             resizeAnchor = WindowSizing.ScreenReaderActive ? null : CaptureReadingAnchor();
         nativeViewportResize = true;
+        resizePaddingHeld = PresentationLoaded;
         resizeQuietTimer.Stop();
+        UpdateRowTransitions();
         ++followRevision;
         StopFollowMotion();
     }
@@ -69,8 +74,13 @@ public sealed partial class LyricsView
     internal void EndViewportResize()
     {
         if (!nativeViewportResize) return;
-        nativeViewportResize = false;
-        if (viewportReflow) RestartResizeQuietTimer();
+        if (PresentationLoaded && UpdateViewportPadding()) BeginReflow();
+        nativeViewportResize = resizePaddingHeld = false;
+        if (viewportReflow)
+        {
+            RestartResizeQuietTimer();
+            QueueReadingAnchorRestore();
+        }
         else FinishViewportReflow();
     }
 
@@ -83,6 +93,7 @@ public sealed partial class LyricsView
             viewportReflow = true;
             // Old viewports may not have realized an anchor yet.
             followAfterReflow |= resizeAnchor == null;
+            UpdateRowTransitions();
             ++followRevision;
             StopFollowMotion();
         }
@@ -91,7 +102,9 @@ public sealed partial class LyricsView
 
     private void RestartResizeQuietTimer()
     {
+        retryFinalAnchor = false;
         resizeQuietTimer.Stop();
+        resizeQuietTimer.Interval = TimeSpan.FromMilliseconds(ResizeQuietMilliseconds);
         resizeQuietTimer.Start();
     }
 
@@ -99,6 +112,15 @@ public sealed partial class LyricsView
     {
         if (nativeViewportResize || !viewportReflow) return;
         RestoreReadingAnchor();
+        if (!retryFinalAnchor && (requestedAnchorOffset != null || realizeAnchorRequested))
+        {
+            // The last native offset or realization can finish a dispatcher turn
+            // after geometry has stopped changing. Bound the extra wait.
+            retryFinalAnchor = true;
+            resizeQuietTimer.Interval = TimeSpan.FromMilliseconds(32);
+            resizeQuietTimer.Start();
+            return;
+        }
         FinishViewportReflow();
     }
 
@@ -106,6 +128,7 @@ public sealed partial class LyricsView
     {
         bool follow = followAfterReflow;
         viewportReflow = followAfterReflow = false;
+        UpdateRowTransitions();
         ClearReadingAnchor();
         RememberReadingAnchor();
         if (follow) ScheduleFollow(animated: true);
@@ -114,6 +137,10 @@ public sealed partial class LyricsView
     private void ReadingLayoutUpdated(object? sender, object args)
     {
         ResumeRealizedFollow();
+        // The narrow and wide views can trade places during the same drag. Pin
+        // the newly visible view once its own containers have been arranged.
+        if (nativeViewportResize && resizeAnchor == null && !WindowSizing.ScreenReaderActive)
+            resizeAnchor = CaptureReadingAnchor();
         // The row has its new arranged height now. Correct its offset in
         // this layout turn before the deferred resize fallback can run.
         if (viewportReflow) RestoreReadingAnchor();
@@ -187,7 +214,16 @@ public sealed partial class LyricsView
 
     private void RestoreReadingAnchor()
     {
-        if (resizeAnchor is not { } anchor || scroller == null || !PresentationLoaded || WindowSizing.ScreenReaderActive) return;
+        if (correctingAnchor || resizeAnchor is not { } anchor || scroller == null || !PresentationLoaded || WindowSizing.ScreenReaderActive) return;
+        double current = scroller.VerticalOffset;
+        if (requestedAnchorOffset is { } request)
+        {
+            // ChangeView can publish a newer offset after another size sample.
+            // Wait for it rather than targeting a second stale scroll offset.
+            if (Math.Abs(current - request.Target) > .5
+                && Stopwatch.GetElapsedTime(request.Started).TotalMilliseconds < AnchorRequestMilliseconds) return;
+            requestedAnchorOffset = null;
+        }
         if (!TryReadingBounds(anchor.Item, out double top, out _))
         {
             if (realizeAnchorRequested || anchor.Item.Index >= items.Length || !ReferenceEquals(items[anchor.Item.Index], anchor.Item)) return;
@@ -197,19 +233,27 @@ public sealed partial class LyricsView
         }
 
         realizeAnchorRequested = false;
-        double current = scroller.VerticalOffset;
         double target = LyricsViewport.AnchorOffset(current, top, anchor.Top, scroller.ScrollableHeight);
-        if (Math.Abs(target - current) <= .5)
+        if (Math.Abs(target - current) <= .5) return;
+        requestedAnchorOffset = (target, Stopwatch.GetTimestamp());
+        correctingAnchor = true;
+        try
+        {
+            if (!scroller.ChangeView(null, target, null, disableAnimation: true)) requestedAnchorOffset = null;
+        }
+        catch (Exception error) when (error is ArgumentException or COMException or ObjectDisposedException)
         {
             requestedAnchorOffset = null;
-            return;
         }
-        // ChangeView is asynchronous. A layout notification for the same
-        // geometry must not enqueue the same correction again.
-        if (requestedAnchorOffset is { } request && Math.Abs(request.Current - current) <= .1
-            && Math.Abs(request.Target - target) <= .1) return;
-        requestedAnchorOffset = (current, target);
-        scroller.ChangeView(null, target, null, disableAnimation: true);
+        finally { correctingAnchor = false; }
+    }
+
+    private void AnchorViewChanged(bool intermediate)
+    {
+        if (!viewportReflow || resizeAnchor == null || scroller == null) return;
+        if (requestedAnchorOffset is { } request && (!intermediate || Math.Abs(scroller.VerticalOffset - request.Target) <= .5))
+            requestedAnchorOffset = null;
+        QueueReadingAnchorRestore();
     }
 
     private void ClearReadingAnchor()
@@ -222,7 +266,9 @@ public sealed partial class LyricsView
     private void ResetViewportMotion()
     {
         resizeQuietTimer.Stop();
-        nativeViewportResize = viewportReflow = followAfterReflow = false;
+        nativeViewportResize = !disposed && InteractiveResize;
+        viewportReflow = followAfterReflow = resizePaddingHeld = false;
+        if (!disposed) UpdateRowTransitions();
         pendingFollowRealization = null;
         ClearReadingAnchor();
         StopFollowMotion();

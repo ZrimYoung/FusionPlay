@@ -216,6 +216,23 @@ internal static class WindowInputCheck
                     Require(starts == 0 && previews == 0 && commits.Count == 0, "minor_bottom_jitter_started_lyrics");
                     window.AppWindow.MoveAndResize(new(original.Left, original.Top, side, side));
 
+                    square.SetPlayerLayout(true, false, compactPaging: true, coverBottomResize: true, allowCoverBottomResize: false);
+                    Begin();
+                    // Beginning the native gesture may settle an outgoing page
+                    // transition before the system delivers its first resize.
+                    square.SetPlayerLayout(true, false, compactPaging: true, coverBottomResize: true);
+                    var blocked = Apply(6, original, side, side + Pixels(80));
+                    int maximumSide = Math.Min(work.Width, work.Height);
+                    Require(blocked.Right - blocked.Left == blocked.Bottom - blocked.Top
+                        && blocked.Bottom - blocked.Top == Math.Min(maximumSide, side + Pixels(80)),
+                        "bottom_resize_on_lyrics_page_lost_square");
+                    var stillBlocked = Apply(6, original, side, side + Pixels(96));
+                    End();
+                    Require(stillBlocked.Right - stillBlocked.Left == stillBlocked.Bottom - stillBlocked.Top
+                        && starts == 0 && previews == 0 && cancels == 0 && commits.Count == 0,
+                        "bottom_resize_on_lyrics_page_opened_stacked_lyrics");
+                    window.AppWindow.MoveAndResize(new(original.Left, original.Top, side, side));
+
                     Begin();
                     var opened = Apply(6, original, side + Pixels(37), side + Pixels(80));
                     Require(opened.Left == original.Left && opened.Top == original.Top && opened.Right == original.Right,

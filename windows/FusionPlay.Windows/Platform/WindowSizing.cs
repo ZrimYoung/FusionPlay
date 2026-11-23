@@ -11,7 +11,7 @@ internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
     void SetPlayerLayout(bool lyricsVisible, bool fullScreen, bool compactPaging = false,
-        bool coverBottomResize = false, bool independentAlbum = false);
+        bool coverBottomResize = false, bool independentAlbum = false, bool allowCoverBottomResize = true);
     void SetLayoutTransition(bool active);
     void RememberLyricsPaneHeight();
     double PreferredLyricsHeight(double width);
@@ -138,6 +138,7 @@ internal static class WindowSizing
         private bool inResize, regionRefreshDeferred;
         private bool lyricsVisible, compactPaging, fullScreen, expandLyrics, layoutTransition;
         private bool coverBottomResize, independentAlbum;
+        private bool allowCoverBottomResize = true, allowCoverBottomAtGestureStart;
         private CoverBottomDrag? coverDrag;
         private Rect resizeWorkArea;
         private double? preferredLyricsPaneHeight;
@@ -306,6 +307,7 @@ internal static class WindowSizing
         {
             if (inMoveSize) return;
             inMoveSize = true; expandLyrics = false;
+            allowCoverBottomAtGestureStart = allowCoverBottomResize;
             try { MoveSizeStarted?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
             if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
@@ -319,7 +321,9 @@ internal static class WindowSizing
             int width = Width(client), height = Height(client);
             if (!coverBottomResize || independentAlbum || width >= NarrowWidth * scale || width <= 0 || !GetWindowRect(hwnd, out var outer)) return;
             resizeWorkArea = WorkArea(outer);
-            if (edge != BottomEdge) return;
+            // Choose the gesture once. A page change during native sizing must
+            // not turn an existing square resize into a lyric-pane drag.
+            if (edge != BottomEdge || !allowCoverBottomAtGestureStart) return;
             int frameHeight = Math.Max(0, Height(outer) - height);
             int maximumHeight = Math.Max(Math.Max(width, height), resizeWorkArea.Bottom - outer.Top - frameHeight);
             coverDrag = new(outer, frameHeight, width, height, maximumHeight, scale, lyricsVisible && !compactPaging);
@@ -389,10 +393,13 @@ internal static class WindowSizing
             // Stable controls still need new caption and border bounds on resize.
             RefreshRegions(force: changed);
         }
-        public void SetPlayerLayout(bool lyrics, bool fullscreen, bool paging = false, bool enableCoverBottomResize = false, bool album = false)
+        public void SetPlayerLayout(bool lyrics, bool fullscreen, bool paging = false, bool enableCoverBottomResize = false,
+            bool album = false, bool allowCoverBottomResize = true)
         {
+            if (disposed) return;
+            this.allowCoverBottomResize = allowCoverBottomResize;
             paging &= lyrics || enableCoverBottomResize || album;
-            if (disposed || lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen
+            if (lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen
                 && coverBottomResize == enableCoverBottomResize && independentAlbum == album) return;
             bool fullscreenChanged = fullScreen != fullscreen;
             if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging || album)) RememberLyricsPaneHeight();

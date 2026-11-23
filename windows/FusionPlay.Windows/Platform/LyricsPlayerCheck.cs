@@ -522,10 +522,11 @@ internal static class LyricsPlayerCheck
 
         async Task CheckNativeResizeTypography()
         {
-            const string mixed = "오늘의 테스트 글꼴을 확인해요 · Mixed words and 한글";
-            const string second = "두 번째 줄 · second line";
+            const string mixed = "오늘의 테스트 글꼴을 확인해요 · A mixed Hangul line keeps its reading position through each width change";
+            const int activeLine = 5;
             const uint enterSizeMove = 0x0231, sizing = 0x0214, exitSizeMove = 0x0232;
-            int[] widths = [390, 350, 375];
+            const int startingWidth = 520, startingHeight = 780;
+            int[] widths = [488, 388, 466, 378, 450, 354, 396, 340];
             await OnUi(queue!, () =>
             {
                 model!.Preferences.Update(model.Preferences.Value with
@@ -534,17 +535,18 @@ internal static class LyricsPlayerCheck
                 });
                 Accept(source with
                 {
-                    TrackId = "native-resize-typography", Phase = ReceiverPhase.Paused, Title = "표시 글꼴 · Mixed title", PositionMs = 2_000,
-                    LyricsText = $"[00:00.000]Start\n[00:02.000]{mixed}\n[00:04.000]{second}"
+                    TrackId = "native-resize-typography", Phase = ReceiverPhase.Paused, Title = "표시 글꼴 · Mixed title", PositionMs = activeLine * 1_000,
+                    LyricsText = string.Join('\n', Enumerable.Range(0, 17).Select(index =>
+                        $"[00:{index:00}.000]{(index == activeLine ? mixed : $"두 번째 줄 · Synthetic lyric {index} remains available while the viewport changes")}"))
                 });
-                WindowSizing.ResizeContent(main!, 420, 640);
+                WindowSizing.ResizeContent(main!, startingWidth, startingHeight);
             });
             await WaitLyrics();
             LyricsRowPresenter? row = null;
-            LyricsRowPresenter? blurredRow = null;
             LyricsView? view = null;
             PlayerText? title = null;
-            bool HasBlur(LyricsRowPresenter value) => value.UsesCompositionSurface && Field(value, "appliedEdgeRadius") is double radius && radius > .05;
+            bool HasBlur(LyricsView value) => Descendants(value).OfType<LyricsRowPresenter>().Any(candidate =>
+                candidate.UsesCompositionSurface && Field(candidate, "appliedEdgeRadius") is double radius && radius > .05);
             for (int attempt = 0; attempt < 25; attempt++)
             {
                 bool ready = false;
@@ -556,9 +558,8 @@ internal static class LyricsPlayerCheck
                     title = Find<PlayerText>("MiniTitle");
                     var rows = Descendants(currentView).OfType<LyricsRowPresenter>().ToArray();
                     row = rows.FirstOrDefault(item => item.Item?.Line.Text == mixed);
-                    blurredRow = rows.Where(HasBlur).MinBy(item => item.TransformToVisual(currentView).TransformPoint(new Point()).Y);
                     ready = row != null && (currentView.HighContrast || row.UsesCompositionSurface && title.UsesEnhancedSurface)
-                        && (!currentView.EffectsEnabled || blurredRow != null);
+                        && (!currentView.EffectsEnabled || HasBlur(currentView));
                 });
                 if (ready) break;
                 await Task.Delay(40);
@@ -567,17 +568,45 @@ internal static class LyricsPlayerCheck
                 (text.FontFamily.Source, text.FontWeight.Weight, text.FontSize, text.Language);
 
             (string Family, ushort Weight, double Size, string Language) originalStyle = default;
-            bool composition = false, enhancedMetadata = false, nativeGesture = false;
-            object? metadataSurface = null, blurredPlane = null;
-            long glyphs = 0, surfaces = 0;
+            bool composition = false, enhancedMetadata = false, nativeGesture = false, trackAnchor = false, expectWrapMotion = false;
+            object? metadataSurface = null;
+            LyricsRowItem? anchorItem = null;
+            long glyphs = 0, glyphsDuringHold = 0, transitionsBeforeRelease = 0;
+            double initialTextHeight = 0, anchorTop = 0, maximumAnchorDrift = 0;
+            double? initialGlyphHeight = null;
+            int liveSamples = 0, blurSamples = 0;
+            NativeRect originalWindow = default;
+            double rasterScale = 1, windowAspect = 1;
+            int frameWidth = 0, frameHeight = 0;
+            double RowTop() => row!.TransformToVisual(view!).TransformPoint(new Point()).Y;
+            double? GlyphHeight() => Field(row!, "plane") is { } plane && Field(plane, "ContentHeight") is double height ? height : null;
+
+            void SampleAnchor()
+            {
+                if (!trackAnchor) return;
+                Require(ReferenceEquals(row!.Item, anchorItem), "native_resize_replaced_reading_anchor");
+                maximumAnchorDrift = Math.Max(maximumAnchorDrift, Math.Abs(RowTop() - anchorTop));
+                liveSamples++;
+            }
+
+            void ApplyNativeWidth(int width)
+            {
+                var proposed = originalWindow;
+                proposed.Right = proposed.Left + frameWidth + (int)Math.Round(width * rasterScale);
+                proposed.Bottom = proposed.Top + frameHeight + (int)Math.Round(width * windowAspect * rasterScale);
+                _ = SendSizing(mainHwnd, sizing, 8, ref proposed); // WMSZ_BOTTOMRIGHT
+                WindowSizing.ResizeContent(main!, (proposed.Right - proposed.Left - frameWidth) / rasterScale,
+                    (proposed.Bottom - proposed.Top - frameHeight) / rasterScale);
+            }
+
             void CheckVisualsDuringResize()
             {
                 Require(ReferenceEquals(row, Descendants(view!).OfType<LyricsRowPresenter>().FirstOrDefault(item => item.Item?.Line.Text == mixed))
                     && row!.UsesCompositionSurface == composition, "resize_font_mixed_lyric_rendering_changed_during_hold");
                 Require(title!.UsesEnhancedSurface == enhancedMetadata && ReferenceEquals(Field(title, "surface"), metadataSurface),
                     "resize_font_metadata_surface_changed_during_hold");
-                Require(blurredRow == null || HasBlur(blurredRow) && ReferenceEquals(Field(blurredRow, "plane"), blurredPlane),
-                    "resize_font_edge_blur_disappeared_during_hold");
+                Require(row!.CachedPlaneCount <= 2, "native_resize_exceeded_two_glyph_planes");
+                if (HasBlur(view!)) blurSamples++;
             }
             try
             {
@@ -588,24 +617,31 @@ internal static class LyricsPlayerCheck
                     var activeView = view!;
                     var metadata = title!;
                     var original = (TextBlock)Field(active, "original")!;
-                    originalStyle = StyleOf(original); composition = active.UsesCompositionSurface;
+                    originalStyle = StyleOf(original); initialTextHeight = original.ActualHeight; composition = active.UsesCompositionSurface;
                     enhancedMetadata = metadata.UsesEnhancedSurface;
                     Require(activeView.HighContrast || composition && enhancedMetadata, "resize_font_enhanced_rendering_not_ready");
-                    Require(!activeView.EffectsEnabled || blurredRow != null, "resize_font_edge_blur_not_ready");
+                    Require(!activeView.EffectsEnabled || HasBlur(activeView), "resize_font_edge_blur_not_ready");
+                    trackAnchor = !WindowSizing.ScreenReaderActive;
+                    expectWrapMotion = trackAnchor && activeView.MotionEnabled && composition;
+                    anchorTop = RowTop(); anchorItem = active.Item;
                     metadataSurface = Field(metadata, "surface");
-                    blurredPlane = blurredRow == null ? null : Field(blurredRow, "plane");
-                    glyphs = active.GlyphRasterizations; surfaces = active.SurfaceCreations;
-                    Require(GetWindowRect(mainHwnd, out var bounds), "resize_font_window_bounds_missing");
+                    glyphs = active.GlyphRasterizations; initialGlyphHeight = GlyphHeight();
+                    Require(GetWindowRect(mainHwnd, out originalWindow), "resize_font_window_bounds_missing");
+                    Require(GetClientRect(mainHwnd, out var client), "resize_font_client_bounds_missing");
+                    rasterScale = Math.Max(96, GetDpiForWindow(mainHwnd)) / 96.0;
+                    frameWidth = originalWindow.Right - originalWindow.Left - client.Right + client.Left;
+                    frameHeight = originalWindow.Bottom - originalWindow.Top - client.Bottom + client.Top;
+                    windowAspect = (client.Bottom - client.Top) / (double)(client.Right - client.Left);
                     _ = SendMessage(mainHwnd, enterSizeMove, 0, 0);
                     nativeGesture = true;
-                    _ = SendSizing(mainHwnd, sizing, 8, ref bounds); // WMSZ_BOTTOMRIGHT
+                    ApplyNativeWidth(startingWidth);
                     Require(activeView.InteractiveResize, "resize_font_native_gesture_not_started");
                     CheckVisualsDuringResize();
                 });
                 foreach (int width in widths)
                 {
-                    await OnUi(queue!, () => WindowSizing.ResizeContent(main!, width, 620));
-                    await Task.Delay(90);
+                    await OnUi(queue!, () => ApplyNativeWidth(width));
+                    await Task.Delay(72);
                     await OnUi(queue!, () =>
                     {
                         Background(); var size = MainSize(); Arrange(Root(), size.Width, size.Height);
@@ -613,17 +649,47 @@ internal static class LyricsPlayerCheck
                         CheckVisualsDuringResize();
                         var active = row!;
                         Require(StyleOf((TextBlock)Field(active, "original")!) == originalStyle, "resize_font_mixed_lyric_style_changed_during_hold");
-                        Require(active.GlyphRasterizations == glyphs && active.SurfaceCreations == surfaces,
-                            "resize_font_retained_lyric_rasterized_during_hold");
+                        SampleAnchor();
                     });
                 }
+                // Give the last narrow stop a bounded opportunity to repaint
+                // using its real wrap while the native gesture is still open.
+                var repaintDeadline = Stopwatch.StartNew();
+                bool measuredNarrowGlyphs = false;
+                while (composition && !measuredNarrowGlyphs && repaintDeadline.ElapsedMilliseconds < 900)
+                {
+                    await Task.Delay(45);
+                    await OnUi(queue!, () =>
+                    {
+                        glyphsDuringHold = row!.GlyphRasterizations - glyphs;
+                        measuredNarrowGlyphs = glyphsDuringHold > 0 && GlyphHeight() - initialGlyphHeight is > 2;
+                    });
+                }
+                await OnUi(queue!, () =>
+                {
+                    Require(((TextBlock)Field(row!, "original")!).ActualHeight > initialTextHeight + 2, "native_resize_narrower_measurement_did_not_wrap");
+                    Require(!composition || measuredNarrowGlyphs, "native_resize_froze_the_old_glyphs_until_release");
+                    Require(!view!.EffectsEnabled || blurSamples > 1, "resize_font_edge_blur_disappeared_during_hold");
+                    transitionsBeforeRelease = row!.WrapTransitionsStarted;
+                    // Change to a differently wrapped width and release in one
+                    // UI turn, before the scheduled live redraw can run.
+                    ApplyNativeWidth(startingWidth);
+                    _ = SendMessage(mainHwnd, exitSizeMove, 0, 0);
+                    nativeGesture = false;
+                });
             }
             finally
             {
                 if (nativeGesture) await OnUi(queue!, () => { _ = SendMessage(mainHwnd, exitSizeMove, 0, 0); });
             }
-            await Task.Delay(240);
-            await OnUi(queue!, () => Pass("live_native_resize_preserves_mixed_hangul_font_and_cached_glyphs", () =>
+            bool observedFinalWrap = false;
+            for (int attempt = 0; expectWrapMotion && attempt < 25 && !observedFinalWrap; attempt++)
+            {
+                await Task.Delay(18);
+                await OnUi(queue!, () => observedFinalWrap = row!.WrapTransitionsStarted > transitionsBeforeRelease);
+            }
+            await Task.Delay(550);
+            await OnUi(queue!, () => Pass("live_native_resize_wraps_without_changing_fonts_blur_or_reading_anchor", () =>
             {
                 var active = row!;
                 var settled = StyleOf((TextBlock)Field(active, "original")!);
@@ -632,10 +698,17 @@ internal static class LyricsPlayerCheck
                 Require(title!.UsesEnhancedSurface == enhancedMetadata, "resize_font_metadata_rendering_not_restored_after_release");
                 Require(settled.Family == originalStyle.Family && settled.Weight == originalStyle.Weight && settled.Language == originalStyle.Language,
                     "resize_font_mixed_lyric_face_changed_after_release");
+                Require(!expectWrapMotion || observedFinalWrap, "native_resize_final_wrap_did_not_animate");
+                Require(!active.WrapTransitionActive && active.CachedPlaneCount <= 2,
+                    "native_resize_wrap_did_not_release_its_outgoing_plane");
+                SampleAnchor();
                 animationSamples.Add(new { stage = "native_resize_typography", composition, enhanced_metadata = enhancedMetadata,
-                    edge_blur_maintained = blurredRow != null, checked_widths = widths,
+                    edge_blur_maintained = blurSamples > 1, checked_widths = widths, maximum_anchor_drift = maximumAnchorDrift,
+                    reading_anchor_samples = liveSamples, final_wrap_motion_expected = expectWrapMotion, observed_final_wrap = observedFinalWrap,
                     originalStyle.Family, originalStyle.Weight, size_during_hold = originalStyle.Size, size_after_release = settled.Size,
-                    rasterizations_during_hold = 0, added_rasterizations_after_release = active.GlyphRasterizations - glyphs });
+                    rasterizations_during_hold = glyphsDuringHold, added_rasterizations_after_release = active.GlyphRasterizations - glyphs - glyphsDuringHold });
+                Require(!trackAnchor || liveSamples == widths.Length + 1 && maximumAnchorDrift <= 2,
+                    "native_resize_reading_anchor_jittered");
             }));
         }
 
@@ -1386,8 +1459,10 @@ internal static class LyricsPlayerCheck
             await Task.Delay(180);
             await OnUi(queue!, () => Pass("collapsed_cover_opens_lyrics_page_even_with_global_visibility_off", () =>
             {
-                Require(Field(main!, "miniPager") is CompactLyricsPager { Active: true } pager && pager.Navigate(true), "collapsed_cover_lyrics_page_unreachable");
+                var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
+                Require(pager.Active && pager.Navigate(true), "collapsed_cover_lyrics_page_unreachable");
                 Require(!LyricsVisible(), "cover_paging_changed_lyric_visibility_preference");
+                Require(pager.Navigate(false), "cover_bottom_preview_requires_the_playback_page");
             }));
             async Task DragCoverPane(int height, bool expanded)
             {

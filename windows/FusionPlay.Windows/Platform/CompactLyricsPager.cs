@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.Numerics;
+using Microsoft.UI.Composition;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -14,21 +17,36 @@ namespace FusionPlay.Windows.Platform;
 internal sealed class CompactLyricsPager : IDisposable
 {
     private const int TransitionMilliseconds = 240;
+    private const int WheelPauseMilliseconds = 90;
     internal const double HeaderHeight = 44;
     private readonly FrameworkElement surface, player, lyrics;
     private readonly Button focusTarget;
     private readonly Func<bool> canInteract, canAnimate;
     private readonly Action pageChanged;
-    private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer timer;
+    private readonly DispatcherQueueTimer timer, wheelTimer;
     private Pointer? pressedPointer;
     private LyricsRowPresenter? pressedLyric;
     private Point pressPoint;
-    private bool horizontal;
-    private double width;
+    private bool horizontal, wheelGesture, coverExpressionAttached;
+    private double width, wheelDisplacement;
+    private float coverProgress, coverDragStart;
+    private (float From, float To, long Started, TimeSpan Duration)? coverTransition;
 
     internal bool Active { get; private set; }
     internal bool ShowingLyrics { get; private set; }
+    internal bool StationaryCover { get; private set; }
+    internal bool Dragging { get; private set; }
     internal bool Animating => timer.IsRunning;
+    internal CompositionPropertySet CoverMotion { get; }
+    internal float CoverProgress
+    {
+        get
+        {
+            if (coverTransition is not { } transition) return coverProgress;
+            double remaining = 1 - Math.Clamp(Stopwatch.GetElapsedTime(transition.Started) / transition.Duration, 0, 1);
+            return transition.To + (transition.From - transition.To) * (float)(remaining * remaining * remaining);
+        }
+    }
 
     internal CompactLyricsPager(FrameworkElement surface, FrameworkElement player, FrameworkElement lyrics, Button focusTarget,
         Func<bool> canInteract, Func<bool> canAnimate, Action pageChanged)
@@ -37,10 +55,16 @@ internal sealed class CompactLyricsPager : IDisposable
         this.canInteract = canInteract; this.canAnimate = canAnimate; this.pageChanged = pageChanged;
         ElementCompositionPreview.SetIsTranslationEnabled(player, true);
         ElementCompositionPreview.SetIsTranslationEnabled(lyrics, true);
+        CoverMotion = ElementCompositionPreview.GetElementVisual(surface).Compositor.CreatePropertySet();
+        CoverMotion.InsertScalar("Width", 0);
+        CoverMotion.InsertScalar("Progress", 0);
         timer = surface.DispatcherQueue.CreateTimer();
-        timer.Interval = TimeSpan.FromMilliseconds(TransitionMilliseconds);
         timer.IsRepeating = false;
         timer.Tick += TransitionCompleted;
+        wheelTimer = surface.DispatcherQueue.CreateTimer();
+        wheelTimer.Interval = TimeSpan.FromMilliseconds(WheelPauseMilliseconds);
+        wheelTimer.IsRepeating = false;
+        wheelTimer.Tick += WheelCompleted;
         surface.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(Pressed), true);
         surface.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Moved), true);
         surface.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released), true);
@@ -49,60 +73,157 @@ internal sealed class CompactLyricsPager : IDisposable
         surface.AddHandler(UIElement.PointerWheelChangedEvent, new PointerEventHandler(WheelChanged), true);
     }
 
-    internal void Configure(bool active, double pageWidth)
+    internal void Configure(bool active, double pageWidth, bool stationaryCover = false)
     {
-        if (Active == active && width == pageWidth) return;
+        stationaryCover &= active;
+        if (Active == active && width == pageWidth && StationaryCover == stationaryCover) return;
         if (!Active && !active) { width = pageWidth; return; }
-        Active = active; width = pageWidth;
+        Active = active; width = pageWidth; StationaryCover = stationaryCover;
+        CoverMotion.InsertScalar("Width", (float)pageWidth);
         CancelGesture();
         Settle();
     }
 
     internal void ResetToPlayer()
     {
-        if (!ShowingLyrics) return;
+        if (!ShowingLyrics && !Animating && !Dragging) return;
         ShowingLyrics = false;
+        CancelGesture();
         Settle();
     }
 
     internal bool Navigate(bool showLyrics)
     {
         if (!Active || !canInteract() || ShowingLyrics == showLyrics) return false;
-        var outgoing = ShowingLyrics ? lyrics : player;
-        if (surface.XamlRoot is { IsHostVisible: true } root && FocusManager.GetFocusedElement(root) is DependencyObject focused &&
-            IsWithin(focused, outgoing))
-            focusTarget.Focus(FocusState.Programmatic);
+        bool animate = canAnimate();
+        TransferFocus();
+        if (StationaryCover)
+        {
+            CancelGesture();
+            SettleCoverDrag(showLyrics, animate);
+            return true;
+        }
         ShowingLyrics = showLyrics;
-        if (!canAnimate()) Settle();
+        if (!animate) Settle();
         else
         {
             player.Visibility = lyrics.Visibility = Visibility.Visible;
             Translate(player, PlayerX, animate: true);
             Translate(lyrics, LyricsX, animate: true);
-            timer.Stop(); timer.Start();
+            timer.Stop(); timer.Interval = TimeSpan.FromMilliseconds(TransitionMilliseconds); timer.Start();
             pageChanged();
         }
         return true;
     }
 
+    private void TransferFocus()
+    {
+        var outgoing = ShowingLyrics ? lyrics : player;
+        if (surface.XamlRoot is { IsHostVisible: true } root && FocusManager.GetFocusedElement(root) is DependencyObject focused &&
+            IsWithin(focused, outgoing))
+            focusTarget.Focus(FocusState.Programmatic);
+    }
+
     internal void Settle()
     {
         timer.Stop();
-        Translate(player, Active ? PlayerX : 0, animate: false);
-        Translate(lyrics, Active ? LyricsX : 0, animate: false);
-        player.Visibility = !Active || !ShowingLyrics ? Visibility.Visible : Visibility.Collapsed;
+        ClearCoverTransition(StationaryCover && ShowingLyrics ? 1 : 0);
+        Translate(player, Active && !StationaryCover ? PlayerX : 0, animate: false);
+        if (StationaryCover) AttachCoverExpression();
+        else
+        {
+            Translate(lyrics, Active ? LyricsX : 0, animate: false);
+            coverExpressionAttached = false;
+        }
+        player.Visibility = !Active || StationaryCover || !ShowingLyrics ? Visibility.Visible : Visibility.Collapsed;
         if (Active) lyrics.Visibility = ShowingLyrics ? Visibility.Visible : Visibility.Collapsed;
         pageChanged();
     }
 
     internal void FinishInteraction()
     {
+        bool shouldSettle = Dragging || Animating;
         CancelGesture();
-        if (Animating) Settle();
+        if (shouldSettle) Settle();
     }
 
     private float PlayerX => ShowingLyrics ? (float)-width : 0;
     private float LyricsX => ShowingLyrics ? 0 : (float)width;
+
+    private void AttachCoverExpression()
+    {
+        if (coverExpressionAttached) return;
+        var visual = ElementCompositionPreview.GetElementVisual(lyrics);
+        using var expression = visual.Compositor.CreateExpressionAnimation("Vector3(motion.Width * (1 - motion.Progress), 0, 0)");
+        expression.SetReferenceParameter("motion", CoverMotion);
+        visual.Properties.StartAnimation("Translation", expression);
+        coverExpressionAttached = true;
+    }
+
+    private void ClearCoverTransition(float progress)
+    {
+        if (coverTransition != null) CoverMotion.StopAnimation("Progress");
+        coverTransition = null;
+        SetCoverProgress(progress);
+    }
+
+    private void SetCoverProgress(float progress)
+    {
+        coverProgress = progress;
+        CoverMotion.InsertScalar("Progress", progress);
+    }
+
+    private void BeginCoverDrag()
+    {
+        float start = CoverProgress;
+        timer.Stop();
+        ClearCoverTransition(start);
+        coverDragStart = start;
+        Dragging = true;
+        lyrics.Visibility = Visibility.Visible;
+        pageChanged();
+    }
+
+    private void PreviewCoverDrag(double displacement)
+    {
+        float progress = (float)Math.Clamp(coverDragStart - displacement / Math.Max(1, width), 0, 1);
+        if (coverProgress != progress) SetCoverProgress(progress);
+    }
+
+    private bool CompleteCoverDrag(double displacement, double orthogonalDisplacement)
+    {
+        PreviewCoverDrag(displacement);
+        int direction = SwipeDirection(displacement, orthogonalDisplacement, width);
+        bool showLyrics = direction == 0 ? ShowingLyrics : direction < 0;
+        if (showLyrics != ShowingLyrics) TransferFocus();
+        CancelGesture();
+        SettleCoverDrag(showLyrics, canAnimate());
+        return direction != 0;
+    }
+
+    private void SettleCoverDrag(bool showLyrics, bool animate)
+    {
+        float start = CoverProgress, target = showLyrics ? 1 : 0;
+        ShowingLyrics = showLyrics;
+        if (!animate || Math.Abs(start - target) < .001f) { Settle(); return; }
+
+        timer.Stop();
+        ClearCoverTransition(start);
+        lyrics.Visibility = Visibility.Visible;
+        var duration = TimeSpan.FromMilliseconds(100 + 140 * Math.Abs(start - target));
+        using var animation = CoverMotion.Compositor.CreateScalarKeyFrameAnimation();
+        // The x control points make time linear. On grip takeover the same
+        // cubic ease-out gives the visual's location instead of its old target.
+        using var easing = CoverMotion.Compositor.CreateCubicBezierEasingFunction(new(1f / 3, 1), new(2f / 3, 1));
+        animation.InsertKeyFrame(0, start);
+        animation.InsertKeyFrame(1, target, easing);
+        animation.Duration = duration;
+        coverTransition = (start, target, Stopwatch.GetTimestamp(), duration);
+        CoverMotion.StartAnimation("Progress", animation);
+        timer.Interval = duration;
+        timer.Start();
+        pageChanged();
+    }
 
     private static void Translate(FrameworkElement element, float x, bool animate)
     {
@@ -122,12 +243,16 @@ internal sealed class CompactLyricsPager : IDisposable
         visual.Properties.StartAnimation("Translation", animation);
     }
 
-    private void TransitionCompleted(Microsoft.UI.Dispatching.DispatcherQueueTimer sender, object args) => Settle();
+    private void TransitionCompleted(DispatcherQueueTimer sender, object args)
+    {
+        if (StationaryCover && coverTransition is not { }) return;
+        Settle();
+    }
 
     private void Pressed(object sender, PointerRoutedEventArgs args)
     {
-        if (!Active || !canInteract() || Animating) return;
-        if (pressedPointer != null) { CancelGesture(); return; }
+        if (!Active || !canInteract() || Animating && !StationaryCover || wheelGesture) return;
+        if (pressedPointer != null) { CancelInput(); return; }
         var point = args.GetCurrentPoint(surface);
         if (point.Position.Y < HeaderHeight || args.OriginalSource is not DependencyObject source || IsPlayerControl(source)) return;
         if (args.Pointer.PointerDeviceType == PointerDeviceType.Mouse &&
@@ -146,8 +271,13 @@ internal sealed class CompactLyricsPager : IDisposable
     {
         if (pressedPointer?.PointerId != args.Pointer.PointerId) return;
         var point = args.GetCurrentPoint(surface).Position;
-        double x = Math.Abs(point.X - pressPoint.X), y = Math.Abs(point.Y - pressPoint.Y);
-        if (horizontal) { args.Handled = true; return; }
+        double displacement = point.X - pressPoint.X;
+        double x = Math.Abs(displacement), y = Math.Abs(point.Y - pressPoint.Y);
+        if (horizontal)
+        {
+            if (StationaryCover) PreviewCoverDrag(displacement);
+            args.Handled = true; return;
+        }
         if (y >= 12 && y >= x) { CancelGesture(); return; }
         if (x < 14 || x <= y * 1.4) return;
         if (!surface.CapturePointer(args.Pointer))
@@ -159,6 +289,11 @@ internal sealed class CompactLyricsPager : IDisposable
             if (!surface.CapturePointer(args.Pointer)) { CancelGesture(); return; }
         }
         horizontal = true;
+        if (StationaryCover)
+        {
+            BeginCoverDrag();
+            PreviewCoverDrag(displacement);
+        }
         args.Handled = true;
     }
 
@@ -166,6 +301,12 @@ internal sealed class CompactLyricsPager : IDisposable
     {
         if (pressedPointer?.PointerId != args.Pointer.PointerId) return;
         var point = args.GetCurrentPoint(surface).Position;
+        if (horizontal && StationaryCover)
+        {
+            CompleteCoverDrag(point.X - pressPoint.X, point.Y - pressPoint.Y);
+            args.Handled = true;
+            return;
+        }
         bool consumed = horizontal;
         int direction = SwipeDirection(point.X - pressPoint.X, point.Y - pressPoint.Y, width);
         CancelGesture();
@@ -181,7 +322,7 @@ internal sealed class CompactLyricsPager : IDisposable
 
     private void Canceled(object sender, PointerRoutedEventArgs args)
     {
-        if (pressedPointer?.PointerId == args.Pointer.PointerId) CancelGesture();
+        if (pressedPointer?.PointerId == args.Pointer.PointerId) CancelInput();
     }
 
     private void CaptureLost(object sender, PointerRoutedEventArgs args)
@@ -195,7 +336,28 @@ internal sealed class CompactLyricsPager : IDisposable
         var point = args.GetCurrentPoint(surface);
         if (!point.Properties.IsHorizontalMouseWheel || point.Properties.MouseWheelDelta == 0) return;
         args.Handled = true;
-        if (!Animating) Navigate(point.Properties.MouseWheelDelta > 0);
+        int delta = point.Properties.MouseWheelDelta;
+        if (!StationaryCover || !Dragging && Math.Abs(delta) >= 120)
+        {
+            if (!Animating || StationaryCover) Navigate(delta > 0);
+            return;
+        }
+        if (!Dragging)
+        {
+            wheelDisplacement = 0;
+            wheelGesture = true;
+            BeginCoverDrag();
+        }
+        // Precision touchpads send smaller wheel deltas throughout a swipe.
+        // Keep that stream continuous and snap only after a pause.
+        wheelDisplacement -= delta;
+        PreviewCoverDrag(wheelDisplacement);
+        wheelTimer.Stop(); wheelTimer.Start();
+    }
+
+    private void WheelCompleted(DispatcherQueueTimer sender, object args)
+    {
+        if (wheelGesture) CompleteCoverDrag(wheelDisplacement, 0);
     }
 
     private bool IsPlayerControl(DependencyObject source)
@@ -215,10 +377,21 @@ internal sealed class CompactLyricsPager : IDisposable
     private void CancelGesture()
     {
         var pointer = pressedPointer;
+        bool captured = horizontal;
         pressedPointer = null;
         pressedLyric = null;
-        if (horizontal && pointer != null) surface.ReleasePointerCapture(pointer);
         horizontal = false;
+        wheelGesture = false;
+        Dragging = false;
+        wheelTimer.Stop();
+        if (captured && pointer != null) surface.ReleasePointerCapture(pointer);
+    }
+
+    private void CancelInput()
+    {
+        bool settle = Dragging;
+        CancelGesture();
+        if (settle) SettleCoverDrag(ShowingLyrics, canAnimate());
     }
 
     public void Dispose()
@@ -226,5 +399,9 @@ internal sealed class CompactLyricsPager : IDisposable
         CancelGesture();
         timer.Stop();
         timer.Tick -= TransitionCompleted;
+        wheelTimer.Tick -= WheelCompleted;
+        CoverMotion.StopAnimation("Progress");
+        if (coverExpressionAttached) ElementCompositionPreview.GetElementVisual(lyrics).Properties.StopAnimation("Translation");
+        CoverMotion.Dispose();
     }
 }

@@ -2,11 +2,13 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using FusionPlay.Core;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
@@ -24,8 +26,11 @@ internal static class PlayerRefinementCheck
     [DllImport("user32.dll")] private static extern nint GetForegroundWindow();
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint hwnd);
     [DllImport("user32.dll")] private static extern bool GetClientRect(nint hwnd, out NativeRect rect);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(nint hwnd, out NativeRect rect);
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(nint hwnd);
     [DllImport("user32.dll")] private static extern nint SendMessage(nint hwnd, uint message, nuint wparam, nint lparam);
+    [DllImport("user32.dll", EntryPoint = "SendMessageW")]
+    private static extern nint SendSizing(nint hwnd, uint message, nuint wparam, ref NativeRect rect);
     private sealed class CheckFailure(string code) : Exception(code);
 
     public static async Task Run(string directory)
@@ -311,29 +316,111 @@ internal static class PlayerRefinementCheck
             step = "compact_player_lyrics_paging";
             CompactLyricsPager Pager() => (CompactLyricsPager)Field(main!, "miniPager")!;
             LyricsView? compactLyrics = null;
-            await OnUi(queue!, () =>
+            byte[]? coverBytes = null;
+            BitmapImage? previousArtwork = null;
+            byte[]? previousArtworkBytes = null;
+            await OnUi(queue!, async () =>
             {
                 Require(CompactLyricsPager.SwipeDirection(-64, 8, 360) == -1 && CompactLyricsPager.SwipeDirection(64, 8, 360) == 1
                     && CompactLyricsPager.SwipeDirection(64, 60, 360) == 0 && CompactLyricsPager.SwipeDirection(20, 0, 360) == 0, "paging_gesture_axis_or_threshold");
                 model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "collapsed", LyricsBackgroundMode = "album" });
                 WindowSizing.ResizeContent(main!, 360, 360);
+                previousArtwork = model.Artwork; previousArtworkBytes = model.ArtworkBytes;
+                var (artwork, bytes) = await MakeCoverArtwork();
+                coverBytes = bytes;
+                typeof(ReceiverController).GetProperty(nameof(ReceiverController.Artwork))!.SetValue(model, artwork);
+                typeof(ReceiverController).GetProperty(nameof(ReceiverController.ArtworkBytes))!.SetValue(model, coverBytes);
                 Accept(song);
             });
             await Parsed();
-            await OnUi(queue!, () =>
+            await OnUi(queue!, () => Pass("cover_lyrics_follows_drag_only_with_stationary_artwork", () =>
             {
-                Require(Pager().Active && !Pager().ShowingLyrics && Find<Button>("MiniLyricsToggleButton").IsEnabled, "compact_paging_not_on_player");
+                var pager = Pager();
+                Require(pager.Active && pager.StationaryCover && !pager.ShowingLyrics && Find<Button>("MiniLyricsToggleButton").IsEnabled, "compact_paging_not_on_player");
                 Require(Math.Abs(Size().Width - Size().Height) <= 2 && Visible(Find<Grid>("MiniCoverPanel")), "compact_paging_lost_square_player");
                 compactLyrics = (LyricsView)Find<Grid>("MiniLyricsHost").Children[0];
-                Require(Pager().Navigate(true), "compact_lyrics_page_not_selected");
-            });
+                var panel = Find<Grid>("MiniCoverPanel");
+                var panelVisual = ElementCompositionPreview.GetElementVisual(panel);
+                var origin = panel.TransformToVisual(Find<Grid>("MiniRoot")).TransformPoint(new Point());
+                var blurredBackground = Find<Grid>("MiniLyricsBackground");
+                object backdrop = Field(main!, "lyricsBackdrop")!;
+                object? blurLayer = Field(backdrop, "layer");
+                var effects = new global::Windows.UI.ViewManagement.UISettings();
+                bool expectBlur = effects.AdvancedEffectsEnabled && !new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
+                float[] progressSamples = new float[5];
+                Require(Visible(blurredBackground), "cover_paging_blurred_background_missing");
+                Require(!expectBlur || blurLayer != null && ReferenceEquals(Field(backdrop, "current"), coverBytes), "cover_paging_blur_did_not_prepare_the_same_artwork");
+                Require(Field(main!, "coverPageOpacity") is ExpressionAnimation { Expression: "1.0 - motion.Progress" },
+                    "cover_paging_artwork_blend_not_bound_to_motion");
+
+                void InvokeGesture(string name, params object[] arguments)
+                    => typeof(CompactLyricsPager).GetMethod(name, Private)!.Invoke(pager, arguments);
+                float CheckProgress(float expected)
+                {
+                    Require(pager.CoverMotion.TryGetScalar("Progress", out float progress) == CompositionGetValueStatus.Succeeded
+                        && Math.Abs(progress - expected) < .015f, "cover_pager_progress_did_not_follow_the_gesture");
+                    var currentOrigin = panel.TransformToVisual(Find<Grid>("MiniRoot")).TransformPoint(new Point());
+                    Require(Visible(panel) && Math.Abs(currentOrigin.X - origin.X) < .1 && Math.Abs(currentOrigin.Y - origin.Y) < .1
+                        && panelVisual.Properties.TryGetVector3("Translation", out var translation) == CompositionGetValueStatus.Succeeded
+                        && Math.Abs(translation.X) < .1f, "cover_artwork_moved_during_lyric_drag");
+                    Require(ReferenceEquals(blurLayer, Field(backdrop, "layer")) && Visible(blurredBackground), "cover_paging_replaced_its_blur_while_dragging");
+                    return progress;
+                }
+
+                double width = panel.ActualWidth;
+                InvokeGesture("BeginCoverDrag");
+                InvokeGesture("PreviewCoverDrag", -width * .35);
+                Require(pager.Dragging && !pager.ShowingLyrics && Visible(Find<Grid>("MiniLyricsHost")), "cover_drag_did_not_preview_lyrics");
+                progressSamples[0] = CheckProgress(.35f);
+                InvokeGesture("PreviewCoverDrag", -width * .63);
+                progressSamples[1] = CheckProgress(.63f);
+                InvokeGesture("CancelInput");
+                Require(!pager.Dragging && !pager.ShowingLyrics && !Visible(Find<Grid>("MiniLyricsHost")), "cancelled_cover_drag_changed_page");
+                progressSamples[2] = CheckProgress(0);
+                InvokeGesture("BeginCoverDrag");
+                InvokeGesture("CompleteCoverDrag", -width * .40, 0d);
+                Require(!pager.Dragging && pager.ShowingLyrics, "compact_lyrics_page_not_selected");
+                progressSamples[3] = CheckProgress(1);
+                InvokeGesture("BeginCoverDrag");
+                InvokeGesture("PreviewCoverDrag", width * .30);
+                progressSamples[4] = CheckProgress(.70f);
+                InvokeGesture("CancelInput");
+                CheckProgress(1);
+                Require(pager.ShowingLyrics && !pager.Dragging, "cancelled_lyric_drag_did_not_restore_page");
+                samples.Add(new { name = "stationary_cover_page_gesture", progress = progressSamples, blur_layer_available = blurLayer != null });
+            }));
             await Settle();
-            await OnUi(queue!, () =>
+            void ProbeBottomEdge(bool shouldPreview)
             {
-                Require(Visible(Find<Grid>("MiniLyricsHost")) && !Visible(Find<Grid>("MiniCoverPanel")) && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 0,
+                Require(GetWindowRect(hwnd, out var original), "cover_paging_window_rect_missing");
+                var proposed = original;
+                int delta = (int)Math.Round(Math.Max(96, GetDpiForWindow(hwnd)) / 96.0 * 100);
+                proposed.Bottom += delta;
+                SendMessage(hwnd, 0x0231, 0, 0);
+                try
+                {
+                    SendSizing(hwnd, 0x0214, 6, ref proposed);
+                    Require(Field(main!, "coverLyricsResizing") is bool resizing && resizing == shouldPreview,
+                        shouldPreview ? "cover_page_did_not_allow_bottom_lyrics" : "lyric_page_allowed_bottom_lyrics");
+                    int widthDelta = (proposed.Right - proposed.Left) - (original.Right - original.Left);
+                    int heightDelta = (proposed.Bottom - proposed.Top) - (original.Bottom - original.Top);
+                    Require(shouldPreview ? widthDelta == 0 && heightDelta > 0 : Math.Abs(widthDelta - heightDelta) <= 1,
+                        "paged_bottom_resize_used_wrong_geometry");
+                }
+                finally { SendMessage(hwnd, 0x0232, 0, 0); }
+                Require(model!.Preferences.Value.CoverLyricsPane == "collapsed", "unapplied_paging_edge_gesture_changed_preference");
+            }
+            await OnUi(queue!, () => Pass("bottom_edge_only_previews_stacked_lyrics_on_the_cover_page", () =>
+            {
+                Require(Visible(Find<Grid>("MiniLyricsHost")) && Visible(Find<Grid>("MiniCoverPanel")) && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 0,
                     "compact_lyrics_not_in_own_page");
+                ProbeBottomEdge(shouldPreview: false);
+                Require(Pager().ShowingLyrics, "lyric_page_changed_during_bottom_resize");
+                Require(Pager().Navigate(false), "cover_paging_bottom_gate_could_not_return_to_cover");
+                ProbeBottomEdge(shouldPreview: true);
+                Require(Pager().Navigate(true), "cover_paging_did_not_recover_after_bottom_resize");
                 WindowSizing.ResizeContent(main!, 840, 600);
-            });
+            }));
             await Settle();
             await OnUi(queue!, () =>
             {
@@ -349,6 +436,8 @@ internal static class PlayerRefinementCheck
                 model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "automatic" });
                 Require(!Pager().Active && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2,
                     "paging_preference_did_not_restore_stacked_layout");
+                typeof(ReceiverController).GetProperty(nameof(ReceiverController.Artwork))!.SetValue(model, previousArtwork);
+                typeof(ReceiverController).GetProperty(nameof(ReceiverController.ArtworkBytes))!.SetValue(model, previousArtworkBytes);
                 Require(UnhandledErrors.Count == 0, "unhandled_ui_exception");
             }));
             step = "independent_album_player";
@@ -457,6 +546,32 @@ internal static class PlayerRefinementCheck
             }
             if (queue == null || queue.HasThreadAccess) Finish(); else await OnUi(queue, Finish);
         }
+    }
+
+    private static async Task<(BitmapImage Artwork, byte[] Bytes)> MakeCoverArtwork()
+    {
+        const uint side = 32;
+        var pixels = new byte[side * side * 4];
+        for (int i = 0; i < pixels.Length; i += 4)
+        {
+            bool warm = i % (side * 4) >= side * 2;
+            pixels[i] = warm ? (byte)45 : (byte)210;
+            pixels[i + 1] = warm ? (byte)160 : (byte)105;
+            pixels[i + 2] = warm ? (byte)230 : (byte)50;
+            pixels[i + 3] = 255;
+        }
+        using var stream = new InMemoryRandomAccessStream();
+        var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
+        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, side, side, 96, 96, pixels);
+        await encoder.FlushAsync();
+        var bytes = new byte[checked((int)stream.Size)];
+        using var reader = new DataReader(stream.GetInputStreamAt(0));
+        await reader.LoadAsync((uint)bytes.Length);
+        reader.ReadBytes(bytes);
+        stream.Seek(0);
+        var artwork = new BitmapImage();
+        await artwork.SetSourceAsync(stream);
+        return (artwork, bytes);
     }
 
     private static IEnumerable<DependencyObject> Descendants(DependencyObject root)

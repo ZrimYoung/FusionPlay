@@ -97,7 +97,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
         glyphTimer = DispatcherQueue.CreateTimer(); glyphTimer.IsRepeating = false; glyphTimer.Interval = TimeSpan.FromMilliseconds(16); glyphTimer.Tick += DrawQueuedGlyphs;
         resizeQuietTimer = DispatcherQueue.CreateTimer();
         resizeQuietTimer.IsRepeating = false;
-        resizeQuietTimer.Interval = TimeSpan.FromMilliseconds(180);
+        resizeQuietTimer.Interval = TimeSpan.FromMilliseconds(ResizeQuietMilliseconds);
         resizeQuietTimer.Tick += ResizeQuietElapsed;
         followMotionTimer = DispatcherQueue.CreateTimer();
         followMotionTimer.IsRepeating = true;
@@ -181,10 +181,18 @@ public sealed partial class LyricsView : UserControl, IDisposable
         bool contrast = accessibility.HighContrast, effects, motion; double textScale;
         try { effects = settings.AdvancedEffectsEnabled && !contrast; motion = settings.AnimationsEnabled && !contrast; textScale = settings.TextScaleFactor; }
         catch (COMException) { effects = motion = false; textScale = observedTextScale; }
-        bool changed = HighContrast != contrast || EffectsEnabled != effects || MotionEnabled != motion || textScale != observedTextScale;
-        if (MotionEnabled != motion || list.ItemContainerTransitions == null && motion)
-            list.ItemContainerTransitions = motion ? (TransitionCollection)Resources["LyricsReflowTransitions"] : null;
-        HighContrast = contrast; EffectsEnabled = effects; MotionEnabled = motion; observedTextScale = textScale; return changed;
+        bool motionChanged = MotionEnabled != motion;
+        bool changed = HighContrast != contrast || EffectsEnabled != effects || motionChanged || textScale != observedTextScale;
+        HighContrast = contrast; EffectsEnabled = effects; MotionEnabled = motion; observedTextScale = textScale;
+        if (motionChanged) UpdateRowTransitions();
+        return changed;
+    }
+    private void UpdateRowTransitions()
+    {
+        // Glyphs animate real wrap changes. A simultaneous XAML reposition
+        // transition would also move the same rows underneath them.
+        var transitions = MotionEnabled && !ViewportResizePending ? (TransitionCollection)Resources["LyricsReflowTransitions"] : null;
+        if (!ReferenceEquals(list.ItemContainerTransitions, transitions)) list.ItemContainerTransitions = transitions;
     }
     private void Localize()
     {
@@ -208,6 +216,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     {
         if (disposed) return; loaded = true; RefreshPresentation(); subscribedRoot = XamlRoot; observedRasterScale = XamlRoot?.RasterizationScale ?? 1; if (subscribedRoot != null) subscribedRoot.Changed += RootChanged;
         LayoutUpdated += ReadingLayoutUpdated;
+        UpdateRowTransitions();
         AttachScroller(); UpdateGeometry(); RefreshRows(style: true); ScheduleFollow(animated: false);
     }
     private void ViewUnloaded(object sender, RoutedEventArgs args)
@@ -251,23 +260,37 @@ public sealed partial class LyricsView : UserControl, IDisposable
         UpdateGeometry();
         if (widthChanged && !InteractiveResize) RefreshRows(style: true);
         if (viewportReflow) QueueReadingAnchorRestore();
-        else ScheduleFollow(animated: false);
+        else if (!nativeViewportResize) ScheduleFollow(animated: false);
     }
     private void UpdateGeometry()
     {
         list.Margin = new Thickness(-Bleed, 0, -Bleed, 0);
-        double height = ViewportHeight;
-        topSpace.Height = document.IsTimed ? Math.Max(14, height * .32) : Math.Max(12, height * .30) + 14;
-        bottomSpace.Height = document.IsTimed ? Math.Max(14, height * .68) : Math.Max(12, height * .45) + 14;
+        // Keep the scroll extent independent of pointer-height samples. Apply
+        // the new top/bottom room once when the native drag exits.
+        if (!resizePaddingHeld)
+        {
+            UpdateViewportPadding();
+            resizePaddingHeld = nativeViewportResize && PresentationLoaded;
+        }
         QueueEdges();
+    }
+    private bool UpdateViewportPadding()
+    {
+        double height = ViewportHeight;
+        double top = document.IsTimed ? Math.Max(14, height * .32) : Math.Max(12, height * .30) + 14;
+        double bottom = document.IsTimed ? Math.Max(14, height * .68) : Math.Max(12, height * .45) + 14;
+        if (topSpace.Height == top && bottomSpace.Height == bottom) return false;
+        topSpace.Height = top; bottomSpace.Height = bottom;
+        return true;
     }
     private void ScrollChanged(object? sender, ScrollViewerViewChangedEventArgs args)
     {
         QueueEdges();
         // Native inertia continues after the last wheel/pointer event. Resume
         // only after scrolling itself has been quiet for the full interval.
-        if (browsing && !viewportReflow) RestartBrowsingDeadline();
-        if (!ViewportResizePending) RememberReadingAnchor();
+        if (browsing && !ViewportResizePending) RestartBrowsingDeadline();
+        if (ViewportResizePending) AnchorViewChanged(args.IsIntermediate);
+        else RememberReadingAnchor();
     }
     private void DirectManipulation(object? sender, object args) => BeginBrowsing();
     private void WheelChanged(object sender, PointerRoutedEventArgs args)
