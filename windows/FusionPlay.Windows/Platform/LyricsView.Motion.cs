@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Hosting;
 using Windows.Foundation;
 
 namespace FusionPlay.Windows.Platform;
@@ -13,7 +15,9 @@ public sealed partial class LyricsView
     private const int ResizeQuietMilliseconds = 180;
     private const int AnchorRequestMilliseconds = 64;
     private readonly DispatcherQueueTimer resizeQuietTimer, followMotionTimer;
-    private readonly HashSet<LyricsRowPresenter> laggingRows = [];
+    private readonly Dictionary<LyricsRowPresenter, Visual> followRows = [];
+    private bool followRowsNeedLayout;
+    private CompositionPropertySet? followClock, followScroll;
     private ReadingAnchor? readingAnchor, resizeAnchor;
     private (int Revision, LyricsRowItem Item, bool ExplicitRequest)? pendingFollowRealization;
     private bool nativeViewportResize, viewportReflow, followAfterReflow, restoreQueued, realizeAnchorRequested;
@@ -26,6 +30,7 @@ public sealed partial class LyricsView
     private readonly record struct ReadingAnchor(LyricsRowItem Item, double Top);
 
     internal bool InteractiveResize { get; private set; }
+    internal string? FollowCompositorFailure { get; private set; }
     private bool ViewportResizePending => nativeViewportResize || viewportReflow;
     private bool CanAnimateFollow => PresentationLoaded && MotionEnabled && allowFollowMotion && connected && !loading
         && !browsing && !ViewportResizePending && !InteractiveResize && !WindowSizing.ScreenReaderActive;
@@ -62,7 +67,12 @@ public sealed partial class LyricsView
     {
         if (disposed || nativeViewportResize) return;
         if (!viewportReflow && PresentationLoaded)
+        {
             resizeAnchor = WindowSizing.ScreenReaderActive ? null : CaptureReadingAnchor();
+            if (resizeAnchor is { } anchor && scroller != null && followMotion is { } motion)
+                resizeAnchor = anchor with { Top = anchor.Top + scroller.VerticalOffset - motion.ScrollOffset(Stopwatch.GetTimestamp()) };
+        }
+        StopFollowMotion(keepReadingPosition: true);
         nativeViewportResize = true;
         resizePaddingHeld = PresentationLoaded;
         resizeQuietTimer.Stop();
@@ -137,6 +147,7 @@ public sealed partial class LyricsView
     private void ReadingLayoutUpdated(object? sender, object args)
     {
         ResumeRealizedFollow();
+        if (followRowsNeedLayout && followMotion != null) AttachFollowRows();
         // The narrow and wide views can trade places during the same drag. Pin
         // the newly visible view once its own containers have been arranged.
         if (nativeViewportResize && resizeAnchor == null && !WindowSizing.ScreenReaderActive)
@@ -144,7 +155,7 @@ public sealed partial class LyricsView
         // The row has its new arranged height now. Correct its offset in
         // this layout turn before the deferred resize fallback can run.
         if (viewportReflow) RestoreReadingAnchor();
-        else if (!nativeViewportResize) RememberReadingAnchor();
+        else if (!nativeViewportResize && followMotion == null) RememberReadingAnchor();
     }
 
     private void ResumeRealizedFollow()
@@ -274,93 +285,174 @@ public sealed partial class LyricsView
         StopFollowMotion();
     }
 
-    private void StartFollowMotion(double startOffset, double targetOffset)
+    private bool StartFollowMotion(double targetOffset)
     {
-        double span = preferences.LyricsStaggerEnabled ? preferences.LyricsStaggerMilliseconds : 0;
-        var motion = new LyricsFollowMotion(Stopwatch.GetTimestamp(), startOffset, targetOffset,
-            preferences.LyricsFollowDurationMilliseconds, span);
-        foreach (var row in realized)
+        if (scroller == null) return false;
+        FollowCompositorFailure = null;
+        long now = Stopwatch.GetTimestamp();
+        double nativeOffset = scroller.VerticalOffset;
+        var previous = followMotion;
+        double startOffset = previous?.ScrollOffset(now) ?? nativeOffset;
+        // The ListView retains a limited realization cache. Longer jumps use
+        // native scrolling so it can bring the intervening containers on screen.
+        if (Math.Abs(targetOffset - startOffset) > ViewportHeight * .5
+            || Math.Abs(targetOffset - nativeOffset) > ViewportHeight * .5)
         {
-            if (!TryVisibleRow(row, out int index, out double middle)) continue;
-            // A new wave begins from the translation actually applied to this row.
-            float presented = laggingRows.Contains(row) ? row.Translation.Y : 0;
-            motion.CaptureRank(index, middle, ViewportHeight, presented);
+            FollowCompositorFailure = $"outside_cache:{targetOffset - startOffset:G4}/{ViewportHeight:G4}";
+            return false;
         }
-        followMotion = motion;
-        if (!followMotionTimer.IsRunning) followMotionTimer.Start();
+
+        double span = preferences.LyricsStaggerEnabled ? preferences.LyricsStaggerMilliseconds : 0;
+        var motion = new LyricsFollowMotion(now, startOffset, targetOffset, preferences.LyricsFollowDurationMilliseconds, span);
+        try
+        {
+            var compositor = ElementCompositionPreview.GetElementVisual(this).Compositor;
+            followScroll ??= ElementCompositionPreview.GetScrollViewerManipulationPropertySet(scroller);
+            followClock ??= compositor.CreatePropertySet();
+            if (previous != null)
+            {
+                followClock.StopAnimation("Elapsed");
+                followClock.StopAnimation("Progress");
+            }
+            followClock.InsertScalar("Elapsed", 0);
+            followClock.InsertScalar("Progress", 0);
+            followClock.InsertScalar("Start", (float)startOffset);
+            followClock.InsertScalar("Target", (float)targetOffset);
+            int direction = Math.Sign(targetOffset - startOffset);
+            followClock.InsertScalar("Direction", direction);
+            followClock.InsertScalar("Lag", (float)(direction * LyricsFollowMotion.MaxLag));
+
+            followMotion = motion;
+            AttachFollowRows(previous, now, nativeOffset - startOffset, restarting: true);
+            if (followRows.Count == 0 || !scroller.ChangeView(null, targetOffset, null, disableAnimation: true))
+            {
+                FollowCompositorFailure ??= followRows.Count == 0 ? "no_rows" : "native_scroll_rejected";
+                StopFollowMotion();
+                return false;
+            }
+
+            using var elapsed = compositor.CreateScalarKeyFrameAnimation();
+            using var linear = compositor.CreateLinearEasingFunction();
+            elapsed.Duration = TimeSpan.FromMilliseconds(motion.TotalDuration);
+            elapsed.InsertKeyFrame(0, 0);
+            elapsed.InsertKeyFrame(1, (float)(motion.TotalDuration / motion.Duration), linear);
+            elapsed.StopBehavior = AnimationStopBehavior.SetToFinalValue;
+            using var progress = compositor.CreateScalarKeyFrameAnimation();
+            using var ease = compositor.CreateCubicBezierEasingFunction(new(1f / 3, 0), new(2f / 3, 1));
+            progress.Duration = elapsed.Duration;
+            progress.InsertKeyFrame(0, 0);
+            progress.InsertKeyFrame((float)(motion.Duration / motion.TotalDuration), 1, ease);
+            if (motion.Duration < motion.TotalDuration) progress.InsertKeyFrame(1, 1, linear);
+            progress.StopBehavior = AnimationStopBehavior.SetToFinalValue;
+            followClock.StartAnimation("Elapsed", elapsed);
+            followClock.StartAnimation("Progress", progress);
+            if (!followMotionTimer.IsRunning) followMotionTimer.Start();
+            return true;
+        }
+        catch (Exception error) when (error is COMException or ArgumentException or ObjectDisposedException)
+        {
+            FollowCompositorFailure = $"motion:{error.HResult:X8}:{error.Message}";
+            StopFollowMotion();
+            return false;
+        }
     }
 
-    private bool TryVisibleRow(LyricsRowPresenter row, out int index, out double middle)
+    private static string SmoothStep(string t) => $"({t} * {t} * (3 - 2 * {t}))";
+    private static readonly string RowProgress = SmoothStep("Clamp(clock.Elapsed - delay, 0, 1)");
+    private const string CarriedLag = "(carry * (1 - clock.Progress))";
+    private static readonly string FollowTranslation = "Vector3(0, "
+        + "-Lerp(clock.Start, clock.Target, clock.Progress) - scroll.Translation.Y"
+        + $" + {CarriedLag} + clock.Lag * (clock.Progress - {RowProgress})"
+        + $" * (1 - Max(0, clock.Direction * {CarriedLag}) / {LyricsFollowMotion.MaxLag:0}), 0)";
+
+    private void AttachFollowRows(LyricsFollowMotion? previous = null, long now = 0, double offset = 0, bool restarting = false)
     {
-        index = 0; middle = 0;
-        if (row.Item is not { } item || !TryReadingBounds(item, out double top, out double height)
-            || !LyricsViewport.IntersectsViewport(top, height, ViewportHeight, bleed: 0)) return false;
-        index = item.Index;
-        middle = top + height * .5;
-        return true;
+        followRowsNeedLayout = false;
+        if (followMotion is not { } motion || followClock == null || followScroll == null) return;
+        if (!restarting && scroller != null)
+            offset = scroller.VerticalOffset - motion.ScrollOffset(Stopwatch.GetTimestamp());
+        foreach (var row in realized)
+        {
+            bool tracked = followRows.TryGetValue(row, out var visual);
+            if (!restarting && tracked) continue;
+            if (row.Item is not { } item || !TryReadingBounds(item, out double top, out double height))
+            {
+                ResetRowMotion(row);
+                followRowsNeedLayout = true;
+                continue;
+            }
+            double middle = top + offset + height * .5;
+            float carry = tracked ? previous?.RowOffset(now, item.Index, middle, ViewportHeight) ?? 0 : 0;
+            motion.CaptureRank(item.Index, middle, ViewportHeight, carry);
+            try
+            {
+                if (visual == null)
+                {
+                    ElementCompositionPreview.SetIsTranslationEnabled(row, true);
+                    visual = ElementCompositionPreview.GetElementVisual(row);
+                }
+                // Compensate for the *presented* native offset, including the
+                // delay between ChangeView and the next compositor commit.
+                using var expression = visual.Compositor.CreateExpressionAnimation(FollowTranslation);
+                expression.SetReferenceParameter("clock", followClock);
+                expression.SetReferenceParameter("scroll", followScroll);
+                expression.SetScalarParameter("delay", (float)(motion.RowDelay(item.Index) / motion.Duration));
+                expression.SetScalarParameter("carry", carry);
+                visual.Properties.StartAnimation("Translation", expression);
+                followRows[row] = visual;
+            }
+            catch (Exception error) when (error is COMException or ArgumentException or ObjectDisposedException)
+            {
+                FollowCompositorFailure = $"row:{error.HResult:X8}:{error.Message}";
+                ResetRowMotion(row);
+            }
+        }
     }
 
     private void FollowMotionTick(DispatcherQueueTimer sender, object args)
     {
-        if (!CanAnimateFollow || scroller == null || followMotion is not { } motion)
-        {
+        if (!CanAnimateFollow || !settings.AnimationsEnabled || followMotion?.IsComplete(Stopwatch.GetTimestamp()) != false)
             StopFollowMotion();
-            return;
-        }
-        try
-        {
-            if (!settings.AnimationsEnabled)
-            {
-                StopFollowMotion();
-                ScheduleFollow(animated: false);
-                return;
-            }
-            long now = Stopwatch.GetTimestamp();
-            double current = scroller.VerticalOffset;
-            double desired = Math.Min(motion.ScrollOffset(now), scroller.ScrollableHeight);
-            if (Math.Abs(desired - current) > .25) scroller.ChangeView(null, desired, null, disableAnimation: true);
-            if (motion.IsComplete(now))
-            {
-                StopFollowMotion();
-                return;
-            }
+        else QueueEdges();
+    }
 
-            foreach (var row in realized)
-            {
-                if (!TryVisibleRow(row, out int index, out double middle))
-                {
-                    ResetRowMotion(row);
-                    continue;
-                }
-                float offset = motion.RowOffset(now, index, middle, ViewportHeight);
-                if (offset == 0) ResetRowMotion(row);
-                else
-                {
-                    row.Translation = new Vector3(0, offset, 0);
-                    laggingRows.Add(row);
-                }
-            }
-            if (laggingRows.Count > 0) QueueEdges();
-        }
-        catch (Exception error) when (error is COMException or ObjectDisposedException)
-        {
-            StopFollowMotion();
-            ScheduleFollow(animated: false);
-        }
+    internal double FollowRowOffset(LyricsRowPresenter row, int index, double middle)
+    {
+        if (followMotion is not { } motion || scroller == null || !followRows.ContainsKey(row)) return 0;
+        long now = Stopwatch.GetTimestamp();
+        return scroller.VerticalOffset - motion.ScrollOffset(now) + motion.RowOffset(now, index, middle, ViewportHeight);
     }
 
     private void ResetRowMotion(LyricsRowPresenter row)
     {
-        if (laggingRows.Remove(row)) row.Translation = Vector3.Zero;
+        if (!followRows.Remove(row, out var visual)) return;
+        try
+        {
+            visual.Properties.StopAnimation("Translation");
+            visual.Properties.InsertVector3("Translation", Vector3.Zero);
+        }
+        catch (Exception error) when (error is COMException or ObjectDisposedException) { }
     }
 
-    private void StopFollowMotion()
+    private void StopFollowMotion(bool keepReadingPosition = false)
     {
-        if (followMotion == null && laggingRows.Count == 0) return;
+        if (followMotion is not { } motion) return;
         followMotionTimer.Stop();
         followMotion = null;
-        foreach (var row in laggingRows) row.Translation = Vector3.Zero;
-        if (laggingRows.Count > 0) QueueEdges();
-        laggingRows.Clear();
+        followRowsNeedLayout = false;
+        if (keepReadingPosition && scroller != null)
+        {
+            double position = Math.Clamp(motion.ScrollOffset(Stopwatch.GetTimestamp()), 0, scroller.ScrollableHeight);
+            try { scroller.ChangeView(null, position, null, disableAnimation: true); }
+            catch (Exception error) when (error is COMException or ArgumentException or ObjectDisposedException) { }
+        }
+        foreach (var row in followRows.Keys.ToArray()) ResetRowMotion(row);
+        try
+        {
+            followClock?.StopAnimation("Elapsed");
+            followClock?.StopAnimation("Progress");
+        }
+        catch (Exception error) when (error is COMException or ArgumentException or ObjectDisposedException) { }
+        QueueEdges();
     }
 }

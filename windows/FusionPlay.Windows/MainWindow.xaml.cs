@@ -143,6 +143,7 @@ public sealed partial class MainWindow : Window
         AttachVolume(VolumeSlider, model);
         RootGrid.Loaded += (_, _) => { UiTypography.Apply(RootGrid, model.Preferences.Value, force: true); UpdateInputRegions(); layoutTransition.Remember(); };
         RootGrid.LayoutUpdated += Root_LayoutUpdated;
+        RootGrid.BeforeMeasure = PrepareWideResizeLayout;
         AppWindow.Changed += WindowFrameChanged;
         WindowSizing.ResizeContent(this, 420, 420);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
@@ -225,6 +226,7 @@ public sealed partial class MainWindow : Window
             squareSizing.CoverLyricsResizeCanceled -= CoverLyricsResizeCanceled;
             layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
+            RootGrid.BeforeMeasure = null;
             AppWindow.Changed -= WindowFrameChanged;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
             ProgressSeek.PointerPreviewChanged -= UpdateScrubPreview; MiniProgressSeek.PointerPreviewChanged -= UpdateScrubPreview;
@@ -742,6 +744,19 @@ public sealed partial class MainWindow : Window
         foreach (var text in new[] { TitleText, ArtistText, PositionText, DurationText, MiniTitle, MiniArtist, MiniPosition, MiniDuration })
             text.SetInteractiveResize(active);
     }
+
+    private void PrepareWideResizeLayout(global::Windows.Foundation.Size availableSize)
+    {
+        if (!interactiveResize || closed || compact || !lyricsVisible || presenterTransitionPending
+            || appliedLayout?.Lyrics != true || !double.IsFinite(availableSize.Width) || !double.IsFinite(availableSize.Height)
+            || UseCompactLayout(availableSize.Width, availableSize.Height, IsFullScreen)) return;
+
+        // Give the lyric list its final width on its first measure of the sample.
+        // Updating the columns and insets in SizeChanged measures it twice and
+        // can apply reading-anchor or glyph reflow work at the intermediate width.
+        ApplyPlayerLayout(availableSize.Width, availableSize.Height);
+    }
+
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (presenterTransitionPending) { QueueGeometryCommit(); return; }
@@ -1173,5 +1188,16 @@ public sealed partial class MainWindow : Window
     {
         var dialog = new ContentDialog { XamlRoot = RootGrid.XamlRoot, Title = L.Text("为此电脑建立独立身份"), Content = L.Text("将保留名称、音量等设置，并备份旧设备身份。此电脑会作为新的接收设备出现在手机上。"), PrimaryButtonText = L.Text("备份并建立"), CloseButtonText = L.Text("取消"), DefaultButton = ContentDialogButton.Close };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary) await model.MigrateAsync();
+    }
+}
+
+public sealed class PlayerRootGrid : Grid
+{
+    internal Action<global::Windows.Foundation.Size>? BeforeMeasure { get; set; }
+
+    protected override global::Windows.Foundation.Size MeasureOverride(global::Windows.Foundation.Size availableSize)
+    {
+        BeforeMeasure?.Invoke(availableSize);
+        return base.MeasureOverride(availableSize);
     }
 }

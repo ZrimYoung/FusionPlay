@@ -6,7 +6,7 @@ namespace FusionPlay.Windows.Platform;
 internal sealed class LyricsFollowMotion
 {
     private const int RankSteps = 32;
-    private const double MaxLag = 36;
+    internal const double MaxLag = 36;
     internal const int MaximumTrackedRows = 128;
     private readonly long started;
     private readonly double startOffset, targetOffset, duration, span, direction;
@@ -24,11 +24,15 @@ internal sealed class LyricsFollowMotion
     }
 
     internal bool IsComplete(long now) => Elapsed(now) >= duration + span;
+    internal double Duration => duration;
+    internal double TotalDuration => duration + span;
+    internal double TargetOffset => targetOffset;
 
     internal double ScrollOffset(long now) => startOffset + (targetOffset - startOffset) * Ease(Elapsed(now));
 
     internal void CaptureRank(int index, double middle, double viewportHeight, float presentedOffset) =>
         TryGetRow(index, middle, viewportHeight, presentedOffset, out _);
+    internal double RowDelay(int index) => rows.TryGetValue(index, out var row) ? span * row.Rank / RankSteps : 0;
 
     internal float RowOffset(long now, int index, double middle, double viewportHeight)
     {

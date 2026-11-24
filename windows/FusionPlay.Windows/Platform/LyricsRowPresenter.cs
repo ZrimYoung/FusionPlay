@@ -210,11 +210,13 @@ public sealed class LyricsRowPresenter : Button
             // uncached row is published by the bounded glyph queue once visible.
             if (owner.InteractiveResize && surface == null && !owner.HighContrast && !faulted) measurement.Opacity = 0;
             double y = TransformToVisual(owner).TransformPoint(new Point()).Y;
+            double followOffset = owner.FollowRowOffset(this, current.Index, y + ActualHeight * .5);
+            y += followOffset;
             actuallyVisible = LyricsViewport.IntersectsViewport(y, ActualHeight, owner.ViewportHeight, owner.Bleed);
             if (!actuallyVisible) { FinishWrap(queueDraw: false); if (sprite != null) sprite.IsVisible = false; return; }
             if (!owner.MotionEnabled) FinishWrap(queueDraw: false);
             double radius = LyricsViewport.EdgeBlur(y + ActualHeight * .5, owner.ViewportHeight, owner.Compact, owner.EffectsEnabled);
-            double top = measurement.TransformToVisual(owner).TransformPoint(new Point()).Y - owner.Bleed;
+            double top = measurement.TransformToVisual(owner).TransformPoint(new Point()).Y - owner.Bleed + followOffset;
             bool changed = double.IsNaN(appliedEdgeRadius) || Math.Abs(radius - appliedEdgeRadius) > .05 || Math.Abs(top - appliedSurfaceTop) > .5 || appliedViewportHeight != owner.ViewportHeight;
             edgeRadius = radius; surfaceTop = top; viewportHeight = owner.ViewportHeight;
             if (glyphReflow != null && (WindowSizing.ScreenReaderActive || !CanShowClusterMotion(owner, sourceHeight: plane?.ContentHeight ?? 0)))

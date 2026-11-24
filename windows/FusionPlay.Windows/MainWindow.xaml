@@ -1,5 +1,5 @@
 <Window x:Class="FusionPlay.Windows.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:FusionPlay.Windows" xmlns:platform="using:FusionPlay.Windows.Platform" Title="FusionPlay">
- <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden" SizeChanged="Root_SizeChanged" PointerEntered="Root_PointerEntered" PointerExited="Root_PointerExited" GotFocus="Root_GotFocus" LostFocus="Root_LostFocus">
+ <local:PlayerRootGrid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden" SizeChanged="Root_SizeChanged" PointerEntered="Root_PointerEntered" PointerExited="Root_PointerExited" GotFocus="Root_GotFocus" LostFocus="Root_LostFocus">
   <Grid.ContextFlyout><MenuFlyout><MenuFlyoutItem x:Name="FullScreenMenuItem" Click="FullScreen_Click" Text="全屏" KeyboardAcceleratorTextOverride="F11"/></MenuFlyout></Grid.ContextFlyout>
   <Grid x:Name="SceneBacking" IsHitTestVisible="False" Background="#FF152136" Visibility="Collapsed"><Grid x:Name="SceneBackingLayer"/><Border x:Name="SceneBackingShade"/></Grid>
   <Grid x:Name="ExpandedRoot" Visibility="Collapsed">
@@ -95,5 +95,5 @@
    </Grid>
   </Grid>
   <FontIcon x:Name="IdlePlaceholder" Glyph="&#xEC4F;" FontSize="64" Opacity="0.24" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"/>
- </Grid>
+ </local:PlayerRootGrid>
 </Window>

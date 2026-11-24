@@ -1282,20 +1282,117 @@ internal static class LyricsPlayerCheck
                     Require(liveSamples == 11 && maximumLiveDrift <= 2, "reading_anchor_jumped_in_live_layout_turn");
                     Require(Math.Abs(settled - anchorTop) <= 2 && ReferenceEquals(anchorItem, ((LyricsRowItem[])Field(component!, "items")!)[active]),
                         "reading_anchor_jumped_on_release_or_replaced_items");
-                    component!.Update(followFixture, (active + 1) * 1_000, true);
                 }));
-                await Task.Delay(120);
-                await OnUi(queue!, () => Pass("native_adjacent_follow_motion_respects_preferences_and_cancellation", () =>
+
+                step = "compositor_lyric_follow";
+                var motionFixture = LyricsDocument.Parse(string.Join('\n', Enumerable.Range(0, 18)
+                    .Select(index => $"[00:{index:00}.000]Fixture row {index}")));
+                var motionPreferences = new UiPreferences { LyricsStaggerEnabled = true, LyricsFollowDurationMilliseconds = 640, LyricsStaggerMilliseconds = 320 };
+                const int motionStart = 2;
+                ScrollViewer FollowScroller() => (ScrollViewer)Field(component!, "scroller")!;
+                Dictionary<LyricsRowPresenter, Visual> FollowRows() => (Dictionary<LyricsRowPresenter, Visual>)Field(component!, "followRows")!;
+                double? ExpectedFollowOffset(int index)
                 {
-                    if (component!.MotionEnabled)
+                    if (Field(component!, "scroller") is not ScrollViewer scroll
+                        || FollowList().ContainerFromIndex(index) is not FrameworkElement { ActualHeight: > 0 } rowContainer)
+                        return null;
+                    return LyricsViewport.FollowOffset(scroll.VerticalOffset, FollowTop(index), rowContainer.ActualHeight, component!.ViewportHeight, scroll.ScrollableHeight);
+                }
+                async Task WaitForFollow(Func<bool> ready, string failure, Action? report = null)
+                {
+                    var elapsed = Stopwatch.StartNew();
+                    while (elapsed.ElapsedMilliseconds < 2_500)
                     {
-                        Require(Field(component, "followMotion") is LyricsFollowMotion, "adjacent_follow_did_not_start");
-                        component.CancelFollowAnimation();
+                        bool found = false;
+                        await OnUi(queue!, () => found = ready());
+                        if (found) return;
+                        await Task.Delay(20);
                     }
-                    Require(Field(component, "followMotion") == null
-                        && Descendants(component).OfType<LyricsRowPresenter>().All(presenter => presenter.Translation.Y == 0),
-                        "cancelled_follow_left_row_translations");
+                    if (report != null) await OnUi(queue!, report);
+                    throw new CheckFailure(failure);
+                }
+                await OnUi(queue!, () =>
+                {
+                    var content = (Grid)componentWindow!.Content;
+                    component!.Dispose();
+                    content.Children.Remove(component);
+                    component = new LyricsView();
+                    component.SeekRequested += requested.Add;
+                    component.Update(motionFixture, motionStart * 1_000, true, preferences: motionPreferences);
+                    content.Children.Add(component);
+                    Arrange(content, 420, 340);
+                });
+                await WaitForFollow(() =>
+                {
+                    if (Field(component!, "scroller") is not ScrollViewer scroll) return false;
+                    if (ExpectedFollowOffset(motionStart) is not { } target)
+                        FollowList().ScrollIntoView(FollowList().Items[motionStart], ScrollIntoViewAlignment.Leading);
+                    else if (Math.Abs(scroll.VerticalOffset - target) > 2)
+                        scroll.ChangeView(null, target, null, disableAnimation: true);
+                    else if (ExpectedFollowOffset(motionStart + 1) != null)
+                        return true;
+                    Arrange((Grid)componentWindow!.Content, 420, 340);
+                    return false;
+                }, "adjacent_follow_fixture_not_aligned", () => animationSamples.Add(new
+                {
+                    stage = "compositor_follow_alignment_failed",
+                    actual = (Field(component!, "scroller") as ScrollViewer)?.VerticalOffset,
+                    start_target = ExpectedFollowOffset(motionStart), next_target = ExpectedFollowOffset(motionStart + 1),
+                    component!.ViewportHeight, component.PresentationLoaded,
+                    realized_rows = Descendants(component).OfType<LyricsRowPresenter>().Count()
                 }));
+
+                foreach (bool interrupt in new[] { false, true })
+                {
+                    int index = motionStart + (interrupt ? 2 : 1);
+                    double start = 0, target = 0, top = 0, rowHeight = 0;
+                    bool motionEnabled = false;
+                    Visual[] animatedRows = [];
+                    void Sample(string phase) => animationSamples.Add(new
+                    {
+                        stage = "compositor_follow_" + phase,
+                        index, start, target, delta = target - start, top, rowHeight,
+                        viewport = component!.ViewportHeight, actual = FollowScroller().VerticalOffset,
+                        motionEnabled, component.PresentationLoaded, component.InteractiveResize,
+                        eligible = typeof(LyricsView).GetProperty("CanAnimateFollow", Private)?.GetValue(component) is true,
+                        follow_active = Field(component, "followMotion") != null,
+                        animated_rows = FollowRows().Count, realized_rows = Descendants(component).OfType<LyricsRowPresenter>().Count(),
+                        compositor_failure = component.FollowCompositorFailure
+                    });
+                    await OnUi(queue!, () =>
+                    {
+                        start = FollowScroller().VerticalOffset;
+                        target = ExpectedFollowOffset(index) ?? throw new CheckFailure("adjacent_follow_target_not_realized");
+                        top = FollowTop(index);
+                        rowHeight = FollowContainer(index).ActualHeight;
+                        motionEnabled = component!.MotionEnabled;
+                        Sample("before_advance");
+                        Require(target - start > .5 && target - start <= component.ViewportHeight * .5, "adjacent_follow_fixture_delta_outside_cache");
+                        component.Update(motionFixture, (ulong)index * 1_000, true, preferences: motionPreferences);
+                    });
+                    await WaitForFollow(() =>
+                    {
+                        if (Math.Abs(FollowScroller().VerticalOffset - target) > 1) return false;
+                        if (!motionEnabled) return true;
+                        if (Field(component!, "followMotion") is not LyricsFollowMotion motion || FollowRows().Count == 0) return false;
+                        Require(motion.TotalDuration == 960 && Math.Abs(motion.TargetOffset - target) <= 1
+                            && FollowRows().Keys.Any(row => row.Item is { } item && motion.RowDelay(item.Index) > 0),
+                            "compositor_follow_ignored_timing_preferences");
+                        animatedRows = FollowRows().Values.ToArray();
+                        Sample("running");
+                        if (interrupt) component!.CancelFollowAnimation();
+                        return true;
+                    }, "adjacent_follow_did_not_start_or_move_native_offset", () => Sample("start_failed"));
+                    await WaitForFollow(() => Field(component!, "followMotion") == null, "compositor_follow_did_not_settle", () => Sample("settle_failed"));
+                    await OnUi(queue!, () => Pass(interrupt ? "native_adjacent_follow_cancels_and_resets_composition" : "native_adjacent_follow_composes_and_settles_at_target", () =>
+                    {
+                        Sample(interrupt ? "cancelled" : "settled");
+                        Require(FollowRows().Count == 0 && ((DispatcherQueueTimer)Field(component!, "followMotionTimer")!).IsRunning == false
+                            && animatedRows.All(visual => visual.Properties.TryGetVector3("Translation", out var offset) == CompositionGetValueStatus.Succeeded
+                                && offset == System.Numerics.Vector3.Zero), "stopped_follow_left_composition_translations");
+                        Require(Math.Abs(FollowScroller().VerticalOffset - target) <= 1, "stopped_follow_lost_native_target");
+                    }));
+                }
             }
             step = "coalesced_gpu_wrap_and_rapid_reverse";
             LyricsRowPresenter? wrapRow = null; long transitionsBefore = 0; bool canCheckWrap = false, observedWrap = false;
