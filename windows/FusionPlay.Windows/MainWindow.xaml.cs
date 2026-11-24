@@ -212,9 +212,10 @@ public sealed partial class MainWindow : Window
             { pointerInside = focusInside = false; ShowCaption(false); ScheduleHide(); }
         };
         model.Changed += Render;
+        model.PositionChanged += RenderPlaybackPosition;
         Closed += (_, _) =>
         {
-            closed = true; model.Changed -= Render;
+            closed = true; model.Changed -= Render; model.PositionChanged -= RenderPlaybackPosition;
             backdrop.Changed -= Render; miniBackdrop.Changed -= Render; loadingBackdrop.Changed -= Render;
             backdrop.Failed -= LogBackdropFailure; miniBackdrop.Failed -= LogBackdropFailure; loadingBackdrop.Failed -= LogBackdropFailure;
             lyricsBackdrop.Changed -= Render; lyricsBackdrop.Failed -= LogBackdropFailure;
@@ -301,11 +302,7 @@ public sealed partial class MainWindow : Window
         ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
         SetNativePlayerLayout(lyricsVisible, IsFullScreen);
         if (!model.LyricsLoading) { lyricsTrackId = state.TrackId; lyricsTitle = state.Title; }
-        bool lyricSeek = model.CanSeek && !model.LyricsLoading && !lyricsLayoutTransitioning;
-        bool allowStagger = state.Phase == ReceiverPhase.Playing && !model.SeekPending && !lyricsLayoutTransitioning
-            && !MiniProgressSeek.PointerSeekActive && !ProgressSeek.PointerSeekActive && !miniPager.Animating;
-        miniLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: true, preferences: preferences, allowStagger: allowStagger);
-        expandedLyrics.Update(model.Lyrics, model.LyricsPositionMs, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: false, preferences: preferences, allowStagger: allowStagger);
+        RenderLyricsPresentation(state, preferences);
         UiTypography.Apply(RootGrid, preferences);
         var presentation = model.DisplayMetadata;
         MiniTitle.Text = TitleText.Text = presentation.Title.Length > 0 ? presentation.Title : L.Text(state.HasMedia ? "正在接收音乐" : "让音乐，连接此刻");
@@ -451,6 +448,25 @@ public sealed partial class MainWindow : Window
         // callbacks still coalesce the later geometry updates during animations.
         UpdateBlurCoverage(); UpdateInputRegions(); rendering = false;
     }
+    private void RenderPlaybackPosition()
+    {
+        if (closed || rendering || !AppWindow.IsVisible && !AnimateHiddenLayoutForCheck) return;
+        var preferences = model.Preferences.Value;
+        RenderLyricsPresentation(model.State, preferences);
+        UpdateAlbumPages(preferences);
+        RenderProgressPresentation();
+    }
+
+    private void RenderLyricsPresentation(ReceiverSnapshot state, UiPreferences preferences)
+    {
+        bool lyricSeek = model.CanSeek && !model.LyricsLoading && !lyricsLayoutTransitioning;
+        bool allowStagger = state.Phase == ReceiverPhase.Playing && !model.SeekPending && !lyricsLayoutTransitioning
+            && !MiniProgressSeek.PointerSeekActive && !ProgressSeek.PointerSeekActive && !miniPager.Animating;
+        var position = model.LyricsPositionMs;
+        miniLyrics.Update(model.Lyrics, position, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: true, preferences: preferences, allowStagger: allowStagger);
+        expandedLyrics.Update(model.Lyrics, position, lyricSeek, model.LyricsLoading, connected: state.ControlsAvailable, compact: false, preferences: preferences, allowStagger: allowStagger);
+    }
+
     private void UpdateScrubPreview()
     {
         if (closed) return;

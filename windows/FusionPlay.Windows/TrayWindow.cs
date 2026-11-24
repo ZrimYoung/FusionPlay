@@ -96,7 +96,7 @@ internal sealed class TrayWindow : Window
         top.Children.Add(trackColumn); root.Children.Add(top);
         AutomationProperties.SetAccessibilityView(progress, AccessibilityView.Raw);
         progressSeek.Content = progress;
-        progressSeek.Snapshot = () => model.State;
+        progressSeek.Snapshot = () => model.State with { PositionMs = model.DisplayPositionMs };
         progressSeek.SeekRequested += request => _ = model.SeekAsync(request);
         progressSeek.PointerPreviewChanged += RenderProgress;
         root.Children.Add(progressSeek);
@@ -149,7 +149,7 @@ internal sealed class TrayWindow : Window
         Closed += (_, _) =>
         {
             closed = true; volumeAnimation?.Stop();
-            if (visible) model.Changed -= Render;
+            if (visible) { model.Changed -= Render; model.PositionChanged -= RenderProgress; }
             progressSeek.CancelPointer();
             artVisual.Clip = null; artworkClip.Dispose(); artworkGeometry.Dispose();
         };
@@ -278,7 +278,7 @@ internal sealed class TrayWindow : Window
         if (Environment.TickCount64 - closedByTrayClick < 600) { closedByTrayClick = long.MinValue / 2; return; }
         Render();
         FitToContent(); PositionAtTray();
-        visible = true; model.Changed += Render;
+        visible = true; model.Changed += Render; model.PositionChanged += RenderProgress;
         AppWindow.Show(); TrayIcon.Native.SetForegroundWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)); Activate();
         QueueFit();
     }
@@ -296,7 +296,7 @@ internal sealed class TrayWindow : Window
     public void HidePanel()
     {
         if (closed) return;
-        if (visible) model.Changed -= Render;
+        if (visible) { model.Changed -= Render; model.PositionChanged -= RenderProgress; }
         visible = false;
         progressSeek.IsEnabled = false;
         progressSeek.CancelPointer();

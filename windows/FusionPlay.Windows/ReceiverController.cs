@@ -10,10 +10,12 @@ namespace FusionPlay.Windows;
 public sealed class ReceiverController : IAsyncDisposable
 {
     private readonly DispatcherQueue ui;
+    private readonly DispatcherQueueTimer positionTimer;
     private readonly SemaphoreSlim operations = new(1, 1);
     private readonly CancellationTokenSource lifetime = new();
     private NativeReceiver? native;
-    private readonly PlaybackTimeline timeline = new();
+    private readonly PlaybackTimeline timeline;
+    private ulong? publishedPosition;
     private readonly LyricsState lyrics = new();
     private readonly DisplayMetadataCache displayMetadata = new();
     private long? scheduledLyricsWait;
@@ -49,7 +51,7 @@ public sealed class ReceiverController : IAsyncDisposable
             return displayMetadata.Resolve(state);
         }
     }
-    public ulong? DisplayPositionMs => timeline.DisplayPositionMs;
+    public ulong? DisplayPositionMs => sleeping || disposed ? null : timeline.DisplayPositionMs;
     internal bool SeekPending => timeline.IsPending;
     public LyricsDocument Lyrics => lyrics.Document;
     public bool LyricsLoading => lyrics.Loading || lyrics.WaitingForLyrics;
@@ -75,9 +77,27 @@ public sealed class ReceiverController : IAsyncDisposable
     public bool CanSeek => Initialized && CanControl && Seeking.CanSeek(State);
     public event Action? Changed;
     public event Action? DevicesChanged;
-    public ReceiverController(DispatcherQueue dispatcher)
+    internal event Action? PositionChanged;
+
+    public ReceiverController(DispatcherQueue dispatcher) : this(dispatcher, null) { }
+
+    internal ReceiverController(DispatcherQueue dispatcher, Func<TimeSpan>? playbackClock)
     {
         ui = dispatcher;
+        timeline = new(playbackClock);
+        positionTimer = ui.CreateTimer();
+        positionTimer.Interval = TimeSpan.FromMilliseconds(100);
+        positionTimer.IsRepeating = true;
+        positionTimer.Tick += (_, _) =>
+        {
+            var position = DisplayPositionMs;
+            if (position != publishedPosition)
+            {
+                publishedPosition = position;
+                NotifyViews(PositionChanged);
+            }
+            RefreshPositionTimer();
+        };
         Preferences = new UiPreferencesStore(Store.Data);
         L.Language = Preferences.Value.Language;
         Preferences.Changed += PreferencesChanged;
@@ -85,9 +105,25 @@ public sealed class ReceiverController : IAsyncDisposable
     private void PreferencesChanged() { displayMetadata.Reset(); L.Language = Preferences.Value.Language; Notify(); }
     private void Notify()
     {
+        publishedPosition = DisplayPositionMs;
+        RefreshPositionTimer();
+        NotifyViews(Changed);
+    }
+
+    private void RefreshPositionTimer()
+    {
+        if (!disposed && !sleeping && !Busy && timeline.IsAdvancing)
+        {
+            if (!positionTimer.IsRunning) positionTimer.Start();
+        }
+        else if (positionTimer.IsRunning) positionTimer.Stop();
+    }
+
+    private void NotifyViews(Action? views)
+    {
         // One view failing to refresh must not interrupt cover loading, polling,
         // or publication to the other windows and system media controls.
-        foreach (Action view in Changed?.GetInvocationList() ?? [])
+        foreach (Action view in views?.GetInvocationList() ?? [])
         {
             try { view(); }
             catch (Exception error)
@@ -163,7 +199,7 @@ public sealed class ReceiverController : IAsyncDisposable
     private async Task ApplyLifecycleAsync()
     {
         long request = Interlocked.Increment(ref generation);
-        timeline.Cancel(); StopSeekFeedbackTimer();
+        timeline.Cancel(); timeline.ResetPosition(); StopSeekFeedbackTimer();
         lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         bool start = WantsReceiving && !sleeping;
         var settings = Settings;
@@ -202,7 +238,7 @@ public sealed class ReceiverController : IAsyncDisposable
                     var observation = await ReadSnapshotAsync(timeline.Revision, cancellation);
                     await OnUi(() =>
                     {
-                        if (disposed || observedGeneration != Interlocked.Read(ref generation)) return;
+                        if (disposed || Busy || observedGeneration != Interlocked.Read(ref generation)) return;
                         bool recovered = pollFailed;
                         pollFailed = false;
                         if (recovered && Error == PollError) Error = "";
@@ -541,6 +577,7 @@ public sealed class ReceiverController : IAsyncDisposable
         if (disposed) return;
         disposed = true; WantsReceiving = false; Interlocked.Increment(ref generation);
         timeline.Cancel(); StopSeekFeedbackTimer();
+        positionTimer.Stop();
         lyrics.Clear(); scheduledLyricsWait = null; displayMetadata.Reset();
         Preferences.Changed -= PreferencesChanged;
         artworkRequests.Cancel(); lifetime.Cancel();

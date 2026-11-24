@@ -63,6 +63,7 @@ internal static class LyricsPlayerCheck
         byte[]? originalPreferences = null; HashSet<string> originalInvalid = [];
         byte[] coverBytes = []; BitmapImage? cover = null;
         ulong revision = 0;
+        TimeSpan playbackTime = TimeSpan.Zero;
         string timed = "[ti:Synthetic fixture]\n[00:00.000]A quiet beginning\n[00:00.000]合成歌词 · 开始\n[00:02.000]Blue turns into gold\n[00:02.000]蓝色渐渐变成金色\n[00:04.000]A line for this moment\n[00:06.000]Music connects the room\n[00:08.000]合成的下一句\n[00:10.000]The final fixture line";
         var source = new ReceiverSnapshot { ControlsAvailable = true, Phase = ReceiverPhase.Playing, TrackId = "lyrics-fixture", Title = "Synthetic fixture", Artist = "Generated test media", DurationMs = 30_000, PositionMs = 2_000, LyricsText = "", ArtworkUrl = "fixture:color-blocks" };
 
@@ -944,7 +945,7 @@ internal static class LyricsPlayerCheck
                 originalInvalid = Directory.Exists(store.Data) ? Directory.GetFiles(store.Data, "ui-preferences.json.invalid-*").ToHashSet(StringComparer.OrdinalIgnoreCase) : [];
                 preferencesCaptured = true;
                 step = "create_fixture_controller";
-                model = new ReceiverController(queue!);
+                model = new ReceiverController(queue!, () => playbackTime);
                 step = "seed_fixture_preferences";
                 model.Preferences.Update(new UiPreferences { AlwaysShowControls = true, ShowProgress = true, LyricsDisplayMode = "automatic" });
                 step = "create_real_hidden_player";
@@ -1007,6 +1008,33 @@ internal static class LyricsPlayerCheck
                 var seek = Find<ProgressSeekButton>("MiniProgressSeek");
                 Require(Seeking.AtFraction(seek.Snapshot!(), .5)?.ExpectedTrackId == source.TrackId, "player_seek_guard_lost_track_identity");
             }));
+            step = "lyrics_and_progress_tick_without_source_update";
+            await OnUi(queue!, () =>
+            {
+                main!.AnimateHiddenLayoutForCheck = true;
+                Accept(source with { TrackId = "lyrics-clock-fixture" });
+            });
+            await WaitLyrics();
+            await OnUi(queue!, () => playbackTime += TimeSpan.FromMilliseconds(2_350));
+            bool advanced = false;
+            for (int attempt = 0; attempt < 20 && !advanced; attempt++)
+            {
+                await Task.Delay(50);
+                await OnUi(queue!, () =>
+                {
+                    var miniLyrics = Field(main!, "miniLyrics")!;
+                    advanced = Field(miniLyrics, "activeIndex") is 2
+                        && Find<PlayerProgressBar>("MiniProgress").Value > 14
+                        && model!.State.PositionMs == 2_000;
+                });
+            }
+            await OnUi(queue!, () =>
+            {
+                Pass("lyrics_and_progress_follow_local_clock_between_reports", () => Require(advanced, "display_did_not_advance_without_native_snapshot"));
+                main!.AnimateHiddenLayoutForCheck = false;
+                Accept(source);
+            });
+            await WaitLyrics();
             step = "current_track_lyrics_toggle";
             await OnUi(queue!, () => WindowSizing.ResizeContent(main!, 840, 640));
             await Task.Delay(220);
