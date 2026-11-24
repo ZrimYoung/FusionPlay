@@ -20,7 +20,7 @@ internal sealed class CompactLyricsPager : IDisposable
     private const int WheelPauseMilliseconds = 90;
     internal const double HeaderHeight = 44;
     private readonly FrameworkElement surface, player, lyrics;
-    private readonly Button focusTarget;
+    private readonly Button focusTarget, fallbackFocusTarget;
     private readonly Func<bool> canInteract, canAnimate;
     private readonly Action pageChanged;
     private readonly DispatcherQueueTimer timer, wheelTimer;
@@ -48,10 +48,10 @@ internal sealed class CompactLyricsPager : IDisposable
         }
     }
 
-    internal CompactLyricsPager(FrameworkElement surface, FrameworkElement player, FrameworkElement lyrics, Button focusTarget,
+    internal CompactLyricsPager(FrameworkElement surface, FrameworkElement player, FrameworkElement lyrics, Button focusTarget, Button fallbackFocusTarget,
         Func<bool> canInteract, Func<bool> canAnimate, Action pageChanged)
     {
-        this.surface = surface; this.player = player; this.lyrics = lyrics; this.focusTarget = focusTarget;
+        this.surface = surface; this.player = player; this.lyrics = lyrics; this.focusTarget = focusTarget; this.fallbackFocusTarget = fallbackFocusTarget;
         this.canInteract = canInteract; this.canAnimate = canAnimate; this.pageChanged = pageChanged;
         ElementCompositionPreview.SetIsTranslationEnabled(player, true);
         ElementCompositionPreview.SetIsTranslationEnabled(lyrics, true);
@@ -121,7 +121,10 @@ internal sealed class CompactLyricsPager : IDisposable
         var outgoing = ShowingLyrics ? lyrics : player;
         if (surface.XamlRoot is { IsHostVisible: true } root && FocusManager.GetFocusedElement(root) is DependencyObject focused &&
             IsWithin(focused, outgoing))
-            focusTarget.Focus(FocusState.Programmatic);
+        {
+            if (focusTarget.Visibility == Visibility.Visible && focusTarget.Focus(FocusState.Programmatic)) return;
+            fallbackFocusTarget.Focus(FocusState.Programmatic);
+        }
     }
 
     internal void Settle()

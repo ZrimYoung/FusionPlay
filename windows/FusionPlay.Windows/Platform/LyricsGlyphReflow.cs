@@ -13,6 +13,7 @@ namespace FusionPlay.Windows.Platform;
 internal sealed class LyricsGlyphReflow : IDisposable
 {
     internal const int CrossLineMilliseconds = 480;
+    internal const int MaximumLiveClusters = 32;
     private const int SameLineMilliseconds = 190;
     private const int MaximumClusters = 64;
     private const int MaximumSourceLength = 256;
@@ -53,7 +54,7 @@ internal sealed class LyricsGlyphReflow : IDisposable
     internal static LyricsGlyphReflow? TryStart(
         LyricsGraphicsResources resources, CompositionDrawingSurface source, CompositionDrawingSurface target,
         IReadOnlyList<LayoutSection> before, IReadOnlyList<LayoutSection> after, float bleed, float pixelScale,
-        IReadOnlyDictionary<ClusterKey, Presentation>? continuation, out string status)
+        IReadOnlyDictionary<ClusterKey, Presentation>? continuation, out string status, bool liveResize = false)
     {
         status = "cluster_motion_budget";
         if (!resources.TryReserveClusterMotion()) return null;
@@ -61,9 +62,10 @@ internal sealed class LyricsGlyphReflow : IDisposable
         bool transferred = false;
         try
         {
-            var previous = ClusterRenderer.Capture(resources.Device, before, pixelScale, out status);
+            int maximum = liveResize ? MaximumLiveClusters : MaximumClusters;
+            var previous = ClusterRenderer.Capture(resources.Device, before, pixelScale, maximum, out status);
             if (previous == null) return null;
-            var next = ClusterRenderer.Capture(resources.Device, after, pixelScale, out status);
+            var next = ClusterRenderer.Capture(resources.Device, after, pixelScale, maximum, out status);
             if (next == null) return null;
             status = "changed_cluster_boundaries";
             if (previous.Count == 0 || previous.Count != next.Count) return null;
@@ -220,7 +222,7 @@ internal sealed class LyricsGlyphReflow : IDisposable
         segments.Clear(); resources.ReleaseClusterMotion();
     }
 
-    private sealed class ClusterRenderer(CanvasDevice device, float pixelScale) : ICanvasTextRenderer
+    private sealed class ClusterRenderer(CanvasDevice device, float pixelScale, int maximumClusters) : ICanvasTextRenderer
     {
         private readonly Dictionary<ClusterKey, Cluster> clusters = [];
         private int section;
@@ -230,9 +232,10 @@ internal sealed class LyricsGlyphReflow : IDisposable
         public bool PixelSnappingDisabled => true;
         public Matrix3x2 Transform => Matrix3x2.Identity;
 
-        internal static Dictionary<ClusterKey, Cluster>? Capture(CanvasDevice device, IReadOnlyList<LayoutSection> layouts, float pixelScale, out string status)
+        internal static Dictionary<ClusterKey, Cluster>? Capture(CanvasDevice device, IReadOnlyList<LayoutSection> layouts,
+            float pixelScale, int maximumClusters, out string status)
         {
-            var renderer = new ClusterRenderer(device, pixelScale);
+            var renderer = new ClusterRenderer(device, pixelScale, maximumClusters);
             foreach (var layout in layouts)
             {
                 renderer.text = layout.Text;
@@ -278,7 +281,7 @@ internal sealed class LyricsGlyphReflow : IDisposable
                     {
                         double x = Math.Floor(bounds.Left * pixelScale) / pixelScale, y = Math.Floor(bounds.Top * pixelScale) / pixelScale;
                         var ink = new Rect(x, y, Math.Ceiling(bounds.Right * pixelScale) / pixelScale - x, Math.Ceiling(bounds.Bottom * pixelScale) / pixelScale - y);
-                        if (clusters.Count >= MaximumClusters || !clusters.TryAdd(new(section, characterIndex + (uint)start, end - start), new(ink, point.Y, fontSize)))
+                        if (clusters.Count >= maximumClusters || !clusters.TryAdd(new(section, characterIndex + (uint)start, end - start), new(ink, point.Y, fontSize)))
                         { unsupported = "duplicate_or_too_many_clusters"; return; }
                     }
                     else { unsupported = "missing_cluster_outline"; return; }

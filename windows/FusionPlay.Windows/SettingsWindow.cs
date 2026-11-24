@@ -48,7 +48,7 @@ internal sealed class SettingsWindow : Window
     private readonly Button save = new() { Name = "ApplyReceiver" }, applyOutput = new() { Name = "ApplyOutput" }, receiving = new() { Name = "ReceivingToggle" };
     private readonly TextBlock receiverStatus = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock outputStatus = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
-    private readonly InfoBar receiverError = ErrorBar("ReceiverError"), audioError = ErrorBar("AudioError"), playerError = ErrorBar("PlayerPreferenceError"), generalError = ErrorBar("GeneralPreferenceError"), aboutError = ErrorBar("AboutError");
+    private readonly InfoBar receiverError = ErrorBar("ReceiverError"), startupPreferenceError = ErrorBar("StartupPreferenceError"), audioError = ErrorBar("AudioError"), playerError = ErrorBar("PlayerPreferenceError"), generalError = ErrorBar("GeneralPreferenceError"), aboutError = ErrorBar("AboutError");
     private readonly TextBlock diagnostics = new() { Name = "ReceiverDiagnostics", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, FontFamily = new FontFamily("Cascadia Mono"), FontSize = 12 };
     private readonly TextBlock artwork = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Slider offset = new() { Name = "CalibrationRange", Minimum = -500, Maximum = 500, StepFrequency = 1, TickFrequency = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -65,6 +65,8 @@ internal sealed class SettingsWindow : Window
         narrowPlayerLayout = new() { Name = "NarrowPlayerLayout" };
     private readonly SettingsChoiceCard transport = new("\uE768") { Name = "ShowTransport" }, progress = new("\uE9E9") { Name = "ShowProgress" }, pinButton = new("\uE718") { Name = "ShowPinButton" },
         settingsButton = new("\uE713") { Name = "ShowSettingsButton" }, fullScreenButton = new("\uE740") { Name = "ShowFullScreenButton" },
+        lyricsButton = new("\uE8BD") { Name = "ShowLyricsButton", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
+        autoStartReceiving = new("\uE7E8") { Name = "AutoStartReceiving", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         correctLyricTitles = new("\uE8D2") { Name = "CorrectLyricTitles", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         wrapTrackMetadata = new("\uE8FD") { Name = "WrapTrackMetadata", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
         lyricsStagger = new("\uE8CB") { Name = "LyricsStaggerEnabled", MaxWidth = 260, HorizontalAlignment = HorizontalAlignment.Left },
@@ -75,6 +77,9 @@ internal sealed class SettingsWindow : Window
     private readonly Slider lyricsStaggerTiming = new() { Name = "LyricsStaggerMilliseconds", Minimum = 0, Maximum = 1000, StepFrequency = 10, Width = 180 },
         lyricsFollowTiming = new() { Name = "LyricsFollowDurationMilliseconds", Minimum = 100, Maximum = 1500, StepFrequency = 10, Width = 180 },
         lyricsTextScale = new() { Name = "LyricsTextScalePercent", Minimum = 75, Maximum = 200, StepFrequency = 5, Width = 180 };
+    private readonly Slider albumBlurStrength = new() { Name = "AlbumBlurStrength", Minimum = 0, Maximum = 100, StepFrequency = 1, Width = 180 };
+    private readonly TextBlock albumBlurValue = new() { Name = "AlbumBlurStrengthValue", MinWidth = 40, VerticalAlignment = VerticalAlignment.Center, TextAlignment = TextAlignment.Right };
+    private bool draggingAlbumBlur;
     private readonly ToggleButton pinned = new() { Name = "Pinned", MinWidth = 94, Padding = new Thickness(12, 7, 12, 7) };
     private FontSettingsPanel fontSettings = null!;
     private readonly TextBlock fontSummary = new() { FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
@@ -147,6 +152,7 @@ internal sealed class SettingsWindow : Window
         model.Preferences.Changed += PreferencesChanged; L.Changed += Localize;
         AppWindow.Closing += (_, args) =>
         {
+            FinishAlbumBlurDrag();
             // Commit the native hex editor before flushing its latest valid color.
             if (progressColorEditor.Visibility == Visibility.Visible) progressColorMode.Focus(FocusState.Programmatic);
             if (!FlushProgressColor()) { args.Cancel = true; navigation.SelectedItem = navigation.MenuItems[2]; }
@@ -154,6 +160,7 @@ internal sealed class SettingsWindow : Window
         Closed += (_, _) =>
         {
             // Programmatic Close can bypass AppWindow.Closing during application exit.
+            FinishAlbumBlurDrag();
             FlushProgressColor();
             closed = true; ++calibrationRefreshVersion; ++deferredCommitVersion;
             progressColorSaveTimer.Stop(); progressColorSaveTimer.Tick -= ProgressColorSaveTick;
@@ -353,6 +360,10 @@ internal sealed class SettingsWindow : Window
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 }; actions.Children.Add(save); actions.Children.Add(receiving);
         page.Children.Add(actions); page.Children.Add(receiverStatus); page.Children.Add(receiverError);
         page.Children.Add(Text("应用后会重新连接，手机可能需要重新选择此设备。未应用的更改不会被“启动接收”使用。", "Applying reconnects the receiver; you may need to select it again on your phone. Starting the receiver uses the applied settings.", true));
+        ConfigureCard(autoStartReceiving, "打开应用时自动接收", "Start receiving on launch",
+            (p, value) => p with { AutoStartReceiving = value }, activationLabels: true);
+        page.Children.Add(Group("应用启动", "App startup", autoStartReceiving,
+            Text("下次启动 FusionPlay 时生效。", "Applies the next time FusionPlay starts.", true), startupPreferenceError));
         save.Click += async (_, _) => await ApplyReceiverAsync();
         receiving.Click += async (_, _) => await ToggleReceivingAsync();
         return page;
@@ -493,7 +504,7 @@ internal sealed class SettingsWindow : Window
             // Save the newest color at most every 300 ms during continuous dragging.
             if (!progressColorSaveTimer.IsRunning) progressColorSaveTimer.Start();
         };
-        var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, progressColorSurface,
+        var display = Group("播放显示", "Player display", Cards(transport, progress, pinButton), lyricsSurface, AlbumBlurSurface(), progressColorSurface,
             Text("封面模式和专辑模式分别保存播放控制和进度设置。拖动进度条可预览位置，松手跳转。", "Cover and Album modes save playback controls and progress settings separately. Drag the progress bar to preview and release to seek.", true));
         page.Children.Add(display);
         ConfigureCard(lyricsStagger, "逐行错峰", "Stagger lyric lines", (p, value) => p with { LyricsStaggerEnabled = value }, activationLabels: true);
@@ -522,9 +533,10 @@ internal sealed class SettingsWindow : Window
         page.Children.Add(Group("曲目信息", "Track information", Cards(correctLyricTitles, wrapTrackMetadata), titleCorrectionDescription));
         ConfigureCard(settingsButton, "设置按钮", "Settings button", (p, value) => p with { ShowSettingsButton = value });
         ConfigureCard(fullScreenButton, "全屏按钮", "Full screen button", (p, value) => p with { ShowFullScreenButton = value });
-        var buttonDescription = Text("设置按钮仅在展开播放器显示；全屏按钮适用于大小播放器。隐藏后仍可用 Ctrl+, 打开设置、F11 切换全屏。", "The settings button appears only in the expanded player; the full screen button appears in both layouts. Ctrl+, still opens Settings and F11 toggles full screen when the buttons are hidden.", true);
+        ConfigureCard(lyricsButton, "歌词快捷按钮", "Lyrics shortcut button", (p, value) => p with { ShowLyricsButton = value });
+        var buttonDescription = Text("设置按钮仅在展开播放器显示。隐藏按钮后，可用 Ctrl+, 打开设置、F11 切换全屏、Ctrl+Shift+L 切换歌词。", "The settings button appears in the expanded player. With the buttons hidden, Ctrl+, opens Settings, F11 toggles full screen, and Ctrl+Shift+L toggles lyrics.", true);
         buttonDescription.Name = "WindowButtonsDescription";
-        var windowButtons = Group("窗口按钮", "Window buttons", Cards(settingsButton, fullScreenButton), buttonDescription); windowButtons.Name = "WindowButtons";
+        var windowButtons = Group("窗口按钮", "Window buttons", Cards(settingsButton, fullScreenButton), lyricsButton, buttonDescription); windowButtons.Name = "WindowButtons";
         page.Children.Add(windowButtons);
         RoutedEventHandler pinChanged = (_, _) =>
         {
@@ -536,6 +548,37 @@ internal sealed class SettingsWindow : Window
         Label(() => AutomationProperties.SetName(pinned, L.Text("窗口置顶", "Keep window on top")));
         page.Children.Add(Group("窗口行为", "Window behavior", Surface(Row(Text("窗口置顶", "Keep on top"), pinned)))); page.Children.Add(playerError);
         return page;
+    }
+    private Border AlbumBlurSurface()
+    {
+        var controls = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, VerticalAlignment = VerticalAlignment.Center };
+        controls.Children.Add(albumBlurStrength);
+        controls.Children.Add(albumBlurValue);
+        Label(() => AutomationProperties.SetName(albumBlurStrength, L.Text("专辑背景模糊强度", "Album background blur strength")));
+        albumBlurStrength.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, args) =>
+        {
+            if (args.GetCurrentPoint(albumBlurStrength).Properties.IsLeftButtonPressed) draggingAlbumBlur = true;
+        }), true);
+        foreach (var ending in new[] { UIElement.PointerReleasedEvent, UIElement.PointerCanceledEvent, UIElement.PointerCaptureLostEvent })
+            albumBlurStrength.AddHandler(ending, new PointerEventHandler((_, _) => FinishAlbumBlurDrag()), true);
+        albumBlurStrength.ValueChanged += (_, args) =>
+        {
+            albumBlurValue.Text = $"{args.NewValue:0}%";
+            if (!renderingPreferences && !draggingAlbumBlur) SaveAlbumBlur();
+        };
+        return Surface(Row(Text("专辑背景模糊", "Album background blur"), controls));
+    }
+    private void FinishAlbumBlurDrag()
+    {
+        if (!draggingAlbumBlur) return;
+        draggingAlbumBlur = false;
+        SaveAlbumBlur();
+    }
+    private void SaveAlbumBlur()
+    {
+        int strength = (int)Math.Round(albumBlurStrength.Value);
+        if (!closed && strength != model.Preferences.Value.AlbumBlurStrength)
+            UpdatePreferences(p => p with { AlbumBlurStrength = strength });
     }
     private StackPanel GeneralPage()
     {
@@ -660,7 +703,7 @@ internal sealed class SettingsWindow : Window
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException)
         {
-            saved = false; preferenceMessage = L.Text("界面设置保存失败，请检查程序旁的数据目录是否可写。", "Appearance settings could not be saved. Check that the data folder beside the application is writable."); RenderPreferences();
+            saved = false; preferenceMessage = L.Text("设置保存失败，请检查程序旁的数据目录是否可写。", "Settings could not be saved. Check that the data folder beside the application is writable."); RenderPreferences();
         }
         Render(); return saved;
     }
@@ -676,6 +719,7 @@ internal sealed class SettingsWindow : Window
             SelectSegment(language, preferences.Language); SelectSegment(progressColorMode, preferences.ProgressColorMode); SelectSegment(miniVisibility, preferences.AlwaysShowControls ? "always" : "hover");
             SelectSegment(lyricsDisplayMode, preferences.LyricsDisplayMode);
             SelectSegment(lyricsBackgroundMode, preferences.LyricsBackgroundMode);
+            if (!draggingAlbumBlur) albumBlurStrength.Value = preferences.AlbumBlurStrength;
             SelectSegment(narrowPlayerLayout, preferences.NarrowPlayerLayout);
             bool albumMode = preferences.NarrowPlayerLayout == "album";
             coverControlsSurface.Visibility = albumMode ? Visibility.Collapsed : Visibility.Visible;
@@ -689,6 +733,8 @@ internal sealed class SettingsWindow : Window
             lyricsFollowTiming.Value = preferences.LyricsFollowDurationMilliseconds;
             transport.IsChecked = preferences.ShowPlayerTransport; progress.IsChecked = preferences.ShowPlayerProgress; pinButton.IsChecked = preferences.ShowPinButton;
             settingsButton.IsChecked = preferences.ShowSettingsButton; fullScreenButton.IsChecked = preferences.ShowFullScreenButton;
+            lyricsButton.IsChecked = preferences.ShowLyricsButton;
+            autoStartReceiving.IsChecked = preferences.AutoStartReceiving;
             correctLyricTitles.IsChecked = preferences.CorrectLyricTitles;
             wrapTrackMetadata.IsChecked = preferences.WrapTrackMetadata;
             pinned.IsChecked = preferences.Pinned; pinned.Content = L.Text(preferences.Pinned ? "已置顶" : "未置顶", preferences.Pinned ? "Pinned" : "Not pinned");
@@ -752,7 +798,8 @@ internal sealed class SettingsWindow : Window
         var state = model.State;
         diagnostics.Text = $"{L.Text("状态")}    {L.Text(state.PhaseLabel)}\n{L.Text("输出设备")}    {(state.Output.Length > 0 ? state.Output : L.Text("尚未输出"))}\n{L.Text("音频缓冲")}    {state.QueueMs:F1} ms\n{L.Text("设备输出延迟")}    {state.OutputLatencyMs:F1} ms\n{L.Text("调度误差")}    {state.ScheduleErrorMs:F1} ms\n{L.Text("欠载 / 丢帧")} {state.Underruns} / {state.DroppedFrames}\n{L.Text("重新同步")}    {state.Resyncs}\n\n{L.Text("调度误差不代表实际声学同步偏差。")}";
         artwork.Text = L.Text("专辑封面", "Artwork") + ": " + L.Text(model.ArtworkStatus);
-        ShowError(receiverError, receiverMessage.Length > 0 ? receiverMessage : !outputRetryRequired ? L.Text(model.Error) : ""); ShowError(audioError, audioMessage); ShowError(playerError, preferenceMessage); ShowError(generalError, preferenceMessage); ShowError(aboutError, aboutMessage);
+        ShowError(receiverError, receiverMessage.Length > 0 ? receiverMessage : !outputRetryRequired ? L.Text(model.Error) : ""); ShowError(startupPreferenceError, preferenceMessage);
+        ShowError(audioError, audioMessage); ShowError(playerError, preferenceMessage); ShowError(generalError, preferenceMessage); ShowError(aboutError, aboutMessage);
     }
     private async Task RefreshCalibrationAsync(bool force = false)
     {

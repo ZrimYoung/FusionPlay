@@ -232,21 +232,28 @@ internal static class SettingsLayoutCheck
                 "settings_titlebar_caption_clipped");
             Require(titleBar.Padding.Right >= settings.AppWindow.TitleBar.RightInset / scale && titleBar.Padding.Left >= settings.AppWindow.TitleBar.LeftInset / scale,
                 "settings_titlebar_native_buttons_not_reserved");
-            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ShowSettingsButton", "ShowFullScreenButton", "CorrectLyricTitles", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "LyricsBackgroundMode", "NarrowPlayerLayout", "MiniControlsVisibility", "AlbumLyricsArtwork", "AlbumLyricsTrackInfo", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            string[] controlNames = ["ReceiverName", "NetworkInterface", "ApplyReceiver", "ReceivingToggle", "AutoStartReceiving", "AudioOutput", "ApplyOutput", "ShowTransport", "ShowProgress", "ShowPinButton", "ShowSettingsButton", "ShowFullScreenButton", "ShowLyricsButton", "CorrectLyricTitles", "ProgressColorMode", "ProgressCustomColor", "LyricsDisplayMode", "LyricsBackgroundMode", "AlbumBlurStrength", "NarrowPlayerLayout", "MiniControlsVisibility", "AlbumLyricsArtwork", "AlbumLyricsTrackInfo", "Pinned", "InterfaceLanguage", "FontDisclosure", "TaskbarEntry", "TrayEntry", "CalibrationEarlier", "CalibrationRange", "CalibrationLater", "CalibrationValue", "CalibrationReset"];
+            if (page == "receiver")
+                Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("AutoStartReceiving")).GetName() == L.Text("打开应用时自动接收", "Start receiving on launch"),
+                    "auto_start_receiving_choice_name_not_localized");
             if (page == "player")
             {
                 var choices = Find<StackPanel>("WindowButtons").Children.OfType<Grid>().Single();
                 Require(choices.ColumnDefinitions.Count == 2 && choices.Children.Count == 2, "window_button_choices_not_separate_two_column_group");
                 Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowSettingsButton")).GetName() == L.Text("设置按钮", "Settings button")
-                    && new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowFullScreenButton")).GetName() == L.Text("全屏按钮", "Full screen button"), "window_button_choice_names_not_localized");
+                    && new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowFullScreenButton")).GetName() == L.Text("全屏按钮", "Full screen button")
+                    && new ToggleButtonAutomationPeer(Find<ToggleButton>("ShowLyricsButton")).GetName() == L.Text("歌词快捷按钮", "Lyrics shortcut button"), "window_button_choice_names_not_localized");
                 string description = Find<TextBlock>("WindowButtonsDescription").Text;
-                Require(description.Contains("Ctrl+,") && description.Contains("F11") && description.Contains(language == "en" ? "expanded" : "展开"), "window_button_scope_or_shortcut_description_missing");
+                Require(description.Contains("Ctrl+,") && description.Contains("F11") && description.Contains("Ctrl+Shift+L")
+                    && description.Contains(language == "en" ? "expanded" : "展开"), "window_button_scope_or_shortcut_description_missing");
                 Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("CorrectLyricTitles")).GetName() == L.Text("修正歌词标题", "Correct lyric titles"), "title_correction_choice_name_not_localized");
                 Require(Find<TextBlock>("TitleCorrectionDescription").Text.Contains(language == "en" ? "verifiable" : "可信"), "title_correction_evidence_requirement_missing");
                 var background = Find<SelectorBar>("LyricsBackgroundMode");
                 Require(background.Items.Select(item => item.Tag as string).SequenceEqual(new[] { "album", "acrylic" })
                     && background.Items.Select(item => item.Text).SequenceEqual(new[] { L.Text("专辑模糊", "Album blur"), L.Text("亚克力", "Acrylic") })
                     && Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(background) == L.Text("歌词背景", "Lyrics background"), "lyrics_background_options_not_localized");
+                Require(Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(Find<Slider>("AlbumBlurStrength")) == L.Text("专辑背景模糊强度", "Album background blur strength"),
+                    "album_blur_strength_not_localized");
                 var compactLayout = Find<SelectorBar>("NarrowPlayerLayout");
                 Require(compactLayout.Items.Select(item => item.Tag as string).SequenceEqual(new[] { "cover", "album" })
                     && compactLayout.Items.Select(item => item.Text).SequenceEqual(new[] { L.Text("封面模式", "Cover mode"), L.Text("专辑模式", "Album mode") }),
@@ -337,6 +344,11 @@ internal static class SettingsLayoutCheck
                 var networks = Find<ComboBox>("NetworkInterface");
                 Require(fixtureNetworks.All(item => networks.Items.Cast<object>().Any(choice => Key(choice) == item.Name && Label(choice).Contains(item.Name) && Label(choice).Contains(item.Address))), "network_names_or_addresses_missing");
                 Require(Key(networks.SelectedItem) == fixtureSettings.InterfaceName && networks.Items.Count >= fixtureNetworks.Length + 2, "missing_network_selection_lost");
+                bool currentReceiving = controller!.WantsReceiving;
+                Require(controller.Preferences.Value.AutoStartReceiving && Find<ToggleButton>("AutoStartReceiving").IsChecked == true, "auto_start_receiving_default_not_bound");
+                Toggle("AutoStartReceiving");
+                Require(!new UiPreferencesStore(store.Data).Value.AutoStartReceiving && controller.WantsReceiving == currentReceiving,
+                    "auto_start_receiving_not_saved_or_changed_current_session");
             }));
             await OnUi(queue!, () => Navigate("audio"));
             await Task.Delay(700);
@@ -391,13 +403,16 @@ internal static class SettingsLayoutCheck
                 Require(!controller!.Preferences.Value.CorrectLyricTitles && Find<ToggleButton>("CorrectLyricTitles").IsChecked == false, "title_correction_default_not_off");
                 Toggle("CorrectLyricTitles");
                 Require(controller.Preferences.Value.CorrectLyricTitles && new UiPreferencesStore(store.Data).Value.CorrectLyricTitles, "title_correction_choice_not_persisted");
-                Require(controller!.Preferences.Value.ShowSettingsButton && controller.Preferences.Value.ShowFullScreenButton
-                    && Find<ToggleButton>("ShowSettingsButton").IsChecked == true && Find<ToggleButton>("ShowFullScreenButton").IsChecked == true, "window_button_choices_default_hidden");
+                Require(controller!.Preferences.Value is { ShowSettingsButton: true, ShowFullScreenButton: true, ShowLyricsButton: true }
+                    && Find<ToggleButton>("ShowSettingsButton").IsChecked == true && Find<ToggleButton>("ShowFullScreenButton").IsChecked == true
+                    && Find<ToggleButton>("ShowLyricsButton").IsChecked == true, "window_button_choices_default_hidden");
                 Toggle("ShowSettingsButton"); Toggle("ShowFullScreenButton");
                 Require(!controller.Preferences.Value.ShowSettingsButton && !controller.Preferences.Value.ShowFullScreenButton, "window_button_choices_not_saved");
                 Require(new UiPreferencesStore(store.Data).Value == controller.Preferences.Value, "window_button_choices_not_persisted");
                 Toggle("ShowFullScreenButton");
-                Require(!controller.Preferences.Value.ShowSettingsButton && controller.Preferences.Value.ShowFullScreenButton, "window_button_choices_not_independent");
+                Toggle("ShowLyricsButton");
+                Require(controller.Preferences.Value is { ShowSettingsButton: false, ShowFullScreenButton: true, ShowLyricsButton: false }
+                    && !new UiPreferencesStore(store.Data).Value.ShowLyricsButton, "window_button_choices_not_independent");
                 Toggle("ShowTransport"); Toggle("ShowProgress"); Toggle("ShowPinButton");
                 var value = controller!.Preferences.Value;
                 Require(!value.ShowPlayerTransport && !value.ShowPlayerProgress && value.ShowPinButton, "choice_tiles_not_saved");
@@ -424,6 +439,14 @@ internal static class SettingsLayoutCheck
                     Require(controller.Preferences.Value.LyricsBackgroundMode == mode && new UiPreferencesStore(store.Data).Value.LyricsBackgroundMode == mode
                         && controller.Preferences.Value.LyricsDisplayMode == "automatic", "lyrics_background_not_saved_independently");
                 }
+                var blur = Find<Slider>("AlbumBlurStrength");
+                var blurValue = Find<TextBlock>("AlbumBlurStrengthValue");
+                Require(blur.Minimum == 0 && blur.Maximum == 100 && blur.Value == 100 && blurValue.Text == "100%", "album_blur_strength_default_not_bound");
+                blur.Value = 0;
+                Require(blurValue.Text == "0%" && new UiPreferencesStore(store.Data).Value.AlbumBlurStrength == 0, "album_blur_zero_not_saved");
+                blur.Value = 37;
+                Require(blurValue.Text == "37%" && new UiPreferencesStore(store.Data).Value is { AlbumBlurStrength: 37, LyricsBackgroundMode: "acrylic" },
+                    "album_blur_strength_not_saved_independently");
                 SelectSegment("MiniControlsVisibility", "always"); Require(controller.Preferences.Value.AlwaysShowControls, "mini_segment_not_saved");
             }));
             await OnUi(queue!, () => Pass("compact_layout_preferences", () =>
@@ -538,9 +561,13 @@ internal static class SettingsLayoutCheck
                     && Find<ToggleButton>("AlbumLyricsArtwork").IsChecked == expectedPreferences.AlbumLyricsArtwork
                     && Find<ToggleButton>("AlbumLyricsTrackInfo").IsChecked == expectedPreferences.AlbumLyricsTrackInfo, "reopened_album_choices_not_bound");
                 Require(Find<ToggleButton>("ShowSettingsButton").IsChecked == expectedPreferences.ShowSettingsButton
-                    && Find<ToggleButton>("ShowFullScreenButton").IsChecked == expectedPreferences.ShowFullScreenButton, "reopened_window_button_choices_not_bound");
+                    && Find<ToggleButton>("ShowFullScreenButton").IsChecked == expectedPreferences.ShowFullScreenButton
+                    && Find<ToggleButton>("ShowLyricsButton").IsChecked == expectedPreferences.ShowLyricsButton, "reopened_window_button_choices_not_bound");
                 Require(Find<ToggleButton>("CorrectLyricTitles").IsChecked == expectedPreferences.CorrectLyricTitles, "reopened_title_correction_choice_not_bound");
                 Require(Find<SelectorBar>("LyricsBackgroundMode").SelectedItem?.Tag as string == expectedPreferences.LyricsBackgroundMode, "reopened_lyrics_background_not_bound");
+                Require(Find<Slider>("AlbumBlurStrength").Value == expectedPreferences.AlbumBlurStrength, "reopened_album_blur_strength_not_bound");
+                Navigate("receiver");
+                Require(Find<ToggleButton>("AutoStartReceiving").IsChecked == expectedPreferences.AutoStartReceiving, "reopened_auto_start_receiving_not_bound");
             }));
             step = "native_navigation_reversal_preserves_page_and_draft";
             string navigationDraft = "", originalDraft = "";

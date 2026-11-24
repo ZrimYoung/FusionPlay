@@ -16,34 +16,51 @@ internal sealed class Backdrop : IDisposable
     private sealed class Layer : IDisposable
     {
         public required ContainerVisual Visual;
-        public required LoadedImageSurface Surface;
-        public required IRandomAccessStream Stream;
+        public LoadedImageSurface? Surface;
+        public IRandomAccessStream? Stream;
+        public AlbumBackdropCache.PreparedArtwork? Prepared;
         public readonly List<IDisposable> Resources = [];
+        public readonly List<IDisposable> LiveResources = [];
         public readonly List<(CompositionColorGradientStop Start, CompositionColorGradientStop End)> Edges = [];
+        public readonly List<(float Radius, SpriteVisual Sprite, CompositionMaskBrush? Mask)> Sprites = [];
         public Action? Unsubscribe;
+        public bool IsReady;
         public bool Disposed { get; private set; }
+
+        public void ReleaseLiveArtwork()
+        {
+            try { Unsubscribe?.Invoke(); } catch (ObjectDisposedException) { } catch (COMException) { }
+            Unsubscribe = null;
+            for (int index = LiveResources.Count - 1; index >= 0; index--) Close(LiveResources[index]);
+            LiveResources.Clear();
+            Close(Surface); Close(Stream);
+            Surface = null; Stream = null;
+        }
+
         public void Dispose()
         {
             if (Disposed) return;
             Disposed = true;
-            try { Unsubscribe?.Invoke(); } catch (ObjectDisposedException) { } catch (COMException) { }
-            Unsubscribe = null;
             // Disconnect first. A container and its brush graph can share WinRT
             // projections; closing one must not abort retirement of the rest.
             try { Visual.StopAnimation("Opacity"); Visual.Children.RemoveAll(); } catch (ObjectDisposedException) { } catch (COMException) { }
             for (int index = Resources.Count - 1; index >= 0; index--) Close(Resources[index]);
-            Resources.Clear(); Edges.Clear();
-            Close(Visual); Close(Surface); Close(Stream);
+            Resources.Clear(); Edges.Clear(); Sprites.Clear();
+            ReleaseLiveArtwork();
+            Prepared?.Dispose(); Prepared = null;
+            Close(Visual);
         }
     }
-    private static void Close(IDisposable value)
-    { try { value.Dispose(); } catch (ObjectDisposedException) { } catch (COMException) { } }
+    private static void Close(IDisposable? value)
+    { try { value?.Dispose(); } catch (ObjectDisposedException) { } catch (COMException) { } }
     private readonly Grid target;
     private readonly bool progressive;
     private readonly float blur;
+    private readonly AlbumBackdropCache? cache;
     private readonly UISettings settings = new();
     private readonly Microsoft.UI.Dispatching.DispatcherQueueTimer retirement;
     private byte[]? current, failedArtwork;
+    private int currentStrength, failedStrength;
     private Layer? layer, previous;
     private ContainerVisual? root;
     private double coverage = 0.65;
@@ -53,50 +70,39 @@ internal sealed class Backdrop : IDisposable
     private void Report(string stage, Exception error) => Failed?.Invoke(stage + ":" + error.GetType().Name + ":" + error.HResult.ToString("X8"));
     public static bool AnimationsEnabled
     { get { try { return new UISettings().AnimationsEnabled && !IsHighContrast(); } catch (COMException) { return false; } } }
-    public Backdrop(Grid host, bool progressive = false, float blur = 34)
+    public Backdrop(Grid host, bool progressive = false, float blur = 34, AlbumBackdropCache? cache = null)
     {
-        target = host; this.progressive = progressive; this.blur = blur;
+        target = host; this.progressive = progressive; this.blur = blur; this.cache = cache;
         retirement = host.DispatcherQueue.CreateTimer(); retirement.IsRepeating = false;
         retirement.Interval = TimeSpan.FromMilliseconds(400);
         retirement.Tick += (_, _) => RetirePrevious();
         settings.AdvancedEffectsEnabledChanged += EffectsChanged;
         target.ActualThemeChanged += ThemeChanged;
+        if (cache != null) cache.Ready += UsePreparedArtwork;
     }
-    public bool SetArtwork(byte[]? bytes)
+    internal bool UsesPreparedArtwork => layer?.Prepared != null;
+    public bool SetArtwork(byte[]? bytes, int strength = 100)
     {
         if (disposed) return false;
         bool enabled;
         try { enabled = bytes != null && settings.AdvancedEffectsEnabled && !IsHighContrast(); }
         catch (COMException) { enabled = false; }
         if (!enabled) { Clear(); current = failedArtwork = null; return false; }
-        if (ReferenceEquals(failedArtwork, bytes)) return false;
-        if (ReferenceEquals(current, bytes)) return layer != null;
+        if (ReferenceEquals(failedArtwork, bytes) && failedStrength == strength) return false;
+        if (ReferenceEquals(current, bytes) && currentStrength == strength) return layer != null;
         Layer? incoming = null;
-        IRandomAccessStream? pendingStream = null;
-        LoadedImageSurface? pendingSurface = null;
         try
         {
             var compositor = ElementCompositionPreview.GetElementVisual(target).Compositor;
             root ??= compositor.CreateContainerVisual(); root.RelativeSizeAdjustment = Vector2.One;
             ElementCompositionPreview.SetElementChildVisual(target, root);
             RetirePrevious(); previous = layer; layer = null;
-            pendingStream = new MemoryStream(bytes!, writable: false).AsRandomAccessStream();
-            // Backgrounds are deliberately blurred. Bound each retained decode
-            // instead of caching the full source resolution for every layout.
-            pendingSurface = LoadedImageSurface.StartLoadFromStream(pendingStream, new global::Windows.Foundation.Size(1024, 1024));
-            incoming = new Layer { Visual = compositor.CreateContainerVisual(), Surface = pendingSurface, Stream = pendingStream };
-            pendingStream = null; pendingSurface = null;
+            incoming = new Layer { Visual = compositor.CreateContainerVisual() };
             incoming.Visual.RelativeSizeAdjustment = Vector2.One;
-            var image = compositor.CreateSurfaceBrush(incoming.Surface); incoming.Resources.Add(image);
-            image.Stretch = CompositionStretch.UniformToFill;
-            float[] radii = progressive ? [6, 14, 26, 40] : [blur];
+            ReadOnlySpan<float> radii = progressive ? AlbumBackdropCache.ProgressiveRadii : [blur];
             foreach (float radius in radii)
             {
-                var gaussian = new GaussianBlurEffect { BlurAmount = radius, BorderMode = EffectBorderMode.Hard, Source = new CompositionEffectSourceParameter("artwork") };
-                var factory = compositor.CreateEffectFactory(gaussian); incoming.Resources.Add(factory);
-                var effect = factory.CreateBrush(); incoming.Resources.Add(effect);
-                effect.SetSourceParameter("artwork", image);
-                CompositionBrush brush = effect;
+                CompositionMaskBrush? masked = null;
                 if (progressive)
                 {
                     var mask = compositor.CreateLinearGradientBrush(); incoming.Resources.Add(mask);
@@ -107,16 +113,27 @@ internal sealed class Backdrop : IDisposable
                     var bottom = compositor.CreateColorGradientStop(1, Colors.White);
                     foreach (var stop in new[] { top, start, end, bottom }) { incoming.Resources.Add(stop); mask.ColorStops.Add(stop); }
                     incoming.Edges.Add((start, end));
-                    var masked = compositor.CreateMaskBrush(); incoming.Resources.Add(masked);
-                    masked.Source = effect; masked.Mask = mask; brush = masked;
+                    masked = compositor.CreateMaskBrush(); incoming.Resources.Add(masked);
+                    masked.Mask = mask;
                 }
                 var sprite = compositor.CreateSpriteVisual(); incoming.Resources.Add(sprite);
-                sprite.RelativeSizeAdjustment = Vector2.One; sprite.Brush = brush; incoming.Visual.Children.InsertAtTop(sprite);
+                sprite.RelativeSizeAdjustment = Vector2.One;
+                sprite.Brush = masked;
+                incoming.Visual.Children.InsertAtTop(sprite);
+                incoming.Sprites.Add((radius, sprite, masked));
             }
-            layer = incoming; current = bytes; UpdateCoverage(incoming);
+            cache?.Prepare(bytes!, strength);
+            if (!TryApplyPrepared(incoming, bytes!, strength, radii)) BuildLiveArtwork(incoming, bytes!, strength);
+            layer = incoming; current = bytes; currentStrength = strength; UpdateCoverage(incoming);
             root.Children.InsertAtTop(incoming.Visual);
             incoming.Visual.Opacity = 1;
+            if (incoming.Prepared != null)
+            {
+                ShowReadyLayer(incoming);
+                return true;
+            }
             var ready = incoming;
+            var surface = ready.Surface!;
             global::Windows.Foundation.TypedEventHandler<LoadedImageSurface, LoadedImageSourceLoadCompletedEventArgs> completed = (_, args) =>
             {
                 // Event arguments belong to the native callback. Do not keep a
@@ -124,30 +141,23 @@ internal sealed class Backdrop : IDisposable
                 var status = args.Status;
                 target.DispatcherQueue.TryEnqueue(() =>
                 {
-                    if (disposed || ready.Disposed || !ReferenceEquals(layer, ready)) return;
+                    if (disposed || ready.Disposed || ready.Prepared != null || !ReferenceEquals(layer, ready)) return;
                     try
                     {
                         if (status != LoadedImageSourceLoadStatus.Success)
                         {
-                            Clear(); current = null; failedArtwork = bytes; Changed?.Invoke(); return;
+                            Clear(); current = null; failedArtwork = bytes; failedStrength = strength; Changed?.Invoke(); return;
                         }
-                        if (previous != null && AnimationsEnabled)
-                        {
-                            var animation = compositor.CreateScalarKeyFrameAnimation();
-                            animation.InsertKeyFrame(0, 0); animation.InsertKeyFrame(1, 1);
-                            animation.Duration = TimeSpan.FromMilliseconds(350); ready.Visual.StartAnimation("Opacity", animation); Close(animation);
-                            retirement.Start();
-                        }
-                        else { ready.Visual.Opacity = 1; RetirePrevious(); }
+                        ShowReadyLayer(ready);
                     }
                     catch (Exception error) when (error is COMException or ObjectDisposedException)
                     {
-                        Report("load_completed", error); Clear(); current = null; failedArtwork = bytes; Changed?.Invoke();
+                        Report("load_completed", error); Clear(); current = null; failedArtwork = bytes; failedStrength = strength; Changed?.Invoke();
                     }
                 });
             };
-            ready.Unsubscribe = () => ready.Surface.LoadCompleted -= completed;
-            ready.Surface.LoadCompleted += completed;
+            ready.Unsubscribe = () => surface.LoadCompleted -= completed;
+            surface.LoadCompleted += completed;
             return true;
         }
         catch (Exception error)
@@ -155,9 +165,108 @@ internal sealed class Backdrop : IDisposable
             // Ownership transfers only after a complete layer exists. Close every
             // partial allocation once, including failures while creating an effect.
             if (incoming != null && !ReferenceEquals(layer, incoming)) incoming.Dispose();
-            if (pendingSurface != null) Close(pendingSurface); if (pendingStream != null) Close(pendingStream);
-            Report("create", error); Clear(); current = null; failedArtwork = bytes; return false;
+            Report("create", error); Clear(); current = null; failedArtwork = bytes; failedStrength = strength; return false;
         }
+    }
+
+    private static void BuildLiveArtwork(Layer value, byte[] bytes, int strength)
+    {
+        var compositor = value.Visual.Compositor;
+        value.Stream = new MemoryStream(bytes, writable: false).AsRandomAccessStream();
+        // Bound the retained immediate decode until the shared blurred artwork has loaded.
+        value.Surface = LoadedImageSurface.StartLoadFromStream(value.Stream, new global::Windows.Foundation.Size(1024, 1024));
+        var image = compositor.CreateSurfaceBrush(value.Surface);
+        value.LiveResources.Add(image);
+        image.Stretch = CompositionStretch.UniformToFill;
+        foreach (var (radius, sprite, mask) in value.Sprites)
+        {
+            CompositionBrush brush = image;
+            if (strength > 0)
+            {
+                using var gaussian = new GaussianBlurEffect
+                {
+                    BlurAmount = radius * (strength / 100f),
+                    BorderMode = EffectBorderMode.Hard,
+                    Source = new CompositionEffectSourceParameter("artwork")
+                };
+                var factory = compositor.CreateEffectFactory(gaussian); value.LiveResources.Add(factory);
+                var effect = factory.CreateBrush(); value.LiveResources.Add(effect);
+                effect.SetSourceParameter("artwork", image);
+                brush = effect;
+            }
+            if (mask != null) mask.Source = brush;
+            else sprite.Brush = brush;
+        }
+    }
+
+    private void UsePreparedArtwork()
+    {
+        if (disposed || current == null || layer is not { Prepared: null } value) return;
+        ReadOnlySpan<float> radii = progressive ? AlbumBackdropCache.ProgressiveRadii : [blur];
+        try
+        {
+            if (TryApplyPrepared(value, current, currentStrength, radii)) ShowReadyLayer(value);
+        }
+        catch (Exception error) when (error is COMException or ObjectDisposedException)
+        {
+            Report("cached_artwork", error);
+        }
+    }
+
+    private bool TryApplyPrepared(Layer value, byte[] bytes, int strength, ReadOnlySpan<float> radii)
+    {
+        var prepared = cache?.Acquire(bytes, strength, radii);
+        if (prepared == null) return false;
+        var compositor = value.Visual.Compositor;
+        var brushes = new List<CompositionSurfaceBrush>(radii.Length);
+        var attached = new List<(SpriteVisual Sprite, CompositionMaskBrush? Mask, CompositionBrush? Previous)>(radii.Length);
+        try
+        {
+            foreach (var (radius, _, _) in value.Sprites)
+            {
+                var brush = compositor.CreateSurfaceBrush(prepared.Surface(radius));
+                brushes.Add(brush);
+                brush.Stretch = CompositionStretch.UniformToFill;
+            }
+            for (int index = 0; index < brushes.Count; index++)
+            {
+                var (_, sprite, mask) = value.Sprites[index];
+                attached.Add((sprite, mask, mask != null ? mask.Source : sprite.Brush));
+                if (mask != null) mask.Source = brushes[index];
+                else sprite.Brush = brushes[index];
+            }
+        }
+        catch (Exception error) when (error is COMException or ObjectDisposedException or ArgumentException)
+        {
+            foreach (var (sprite, mask, oldBrush) in attached)
+            {
+                try { if (mask != null) mask.Source = oldBrush; else sprite.Brush = oldBrush; }
+                catch (Exception restoreError) when (restoreError is COMException or ObjectDisposedException) { }
+            }
+            foreach (var brush in brushes) Close(brush);
+            prepared.Dispose();
+            Report("cached_brush", error);
+            return false;
+        }
+        value.Resources.AddRange(brushes);
+        value.Prepared = prepared;
+        value.ReleaseLiveArtwork();
+        return true;
+    }
+
+    private void ShowReadyLayer(Layer value)
+    {
+        if (value.IsReady) return;
+        value.IsReady = true;
+        if (previous != null && AnimationsEnabled)
+        {
+            using var animation = value.Visual.Compositor.CreateScalarKeyFrameAnimation();
+            animation.InsertKeyFrame(0, 0); animation.InsertKeyFrame(1, 1);
+            animation.Duration = TimeSpan.FromMilliseconds(350);
+            value.Visual.StartAnimation("Opacity", animation);
+            retirement.Start();
+        }
+        else { value.Visual.Opacity = 1; RetirePrevious(); }
     }
     public void SetCoverage(double fraction)
     {
@@ -172,7 +281,7 @@ internal sealed class Backdrop : IDisposable
         }
         catch (Exception error) when (error is COMException or ObjectDisposedException)
         {
-            var failed = current; Report("coverage", error); Clear(); current = null; failedArtwork = failed;
+            var failed = current; Report("coverage", error); Clear(); current = null; failedArtwork = failed; failedStrength = currentStrength;
             Changed?.Invoke();
         }
     }
@@ -218,6 +327,8 @@ internal sealed class Backdrop : IDisposable
     public void Dispose()
     {
         if (disposed) return; disposed = true;
-        settings.AdvancedEffectsEnabledChanged -= EffectsChanged; target.ActualThemeChanged -= ThemeChanged; Clear();
+        settings.AdvancedEffectsEnabledChanged -= EffectsChanged; target.ActualThemeChanged -= ThemeChanged;
+        if (cache != null) cache.Ready -= UsePreparedArtwork;
+        Clear();
     }
 }

@@ -10,6 +10,7 @@ namespace FusionPlay.Windows.Platform;
 internal interface ISquareWindow : IDisposable
 {
     void UpdateInputRegions(RectInt32[] passthrough);
+    void RefreshCoverResizeCue();
     void SetPlayerLayout(bool lyricsVisible, bool fullScreen, bool compactPaging = false,
         bool coverBottomResize = false, bool independentAlbum = false, bool allowCoverBottomResize = true);
     void SetLayoutTransition(bool active);
@@ -23,6 +24,8 @@ internal interface ISquareWindow : IDisposable
     event Action? CoverLyricsResizeCanceled;
     event Action<bool>? CoverLyricsResizeCompleted;
 }
+
+internal enum CoverResizeCue { Hidden, Hover, Dragging }
 
 internal static class WindowSizing
 {
@@ -117,8 +120,8 @@ internal static class WindowSizing
     }
     // Existing callers retain this API. Only compact content is constrained to
     // a square; the expanded player remains freely resizable in both axes.
-    public static ISquareWindow FixedSquare(Window window, Action<bool> hoverChanged)
-        => new SquareConstraint(window, hoverChanged);
+    public static ISquareWindow FixedSquare(Window window, Action<bool> hoverChanged, Action<CoverResizeCue>? cueChanged = null)
+        => new SquareConstraint(window, hoverChanged, cueChanged);
     private sealed class SquareConstraint : ISquareWindow
     {
         private const int BottomEdge = 6;
@@ -134,6 +137,8 @@ internal static class WindowSizing
         private readonly SubclassProc callback;
         private readonly InputNonClientPointerSource input;
         private readonly Action<bool> hoverChanged;
+        private readonly Action<CoverResizeCue>? cueChanged;
+        private CoverResizeCue coverCue;
         private bool disposed, settling, settlementQueued, regionRefreshQueued, inMoveSize, hover;
         private bool inResize, regionRefreshDeferred;
         private bool lyricsVisible, compactPaging, fullScreen, expandLyrics, layoutTransition;
@@ -153,10 +158,11 @@ internal static class WindowSizing
         private int regionWidth, regionHeight;
         private int resizeStartWidth, resizeStartHeight;
         private uint dpi;
-        public SquareConstraint(Window target, Action<bool> changed)
+        public SquareConstraint(Window target, Action<bool> changed, Action<CoverResizeCue>? cueChanged)
         {
             window = target; hwnd = WinRT.Interop.WindowNative.GetWindowHandle(target); callback = Process;
             hoverChanged = changed; dpi = GetDpiForWindow(hwnd);
+            this.cueChanged = cueChanged;
             input = InputNonClientPointerSource.GetForWindowId(target.AppWindow.Id);
             if (!SetWindowSubclass(hwnd, callback, 0x4650, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
             // Recalculate once after installing the zero-inset client area. Keep the
@@ -308,6 +314,7 @@ internal static class WindowSizing
             if (inMoveSize) return;
             inMoveSize = true; expandLyrics = false;
             allowCoverBottomAtGestureStart = allowCoverBottomResize;
+            RefreshCoverResizeCue();
             try { MoveSizeStarted?.Invoke(); }
             catch (Exception error) when (error is COMException or ObjectDisposedException or InvalidOperationException or ArgumentException) { }
             if (GetClientRect(hwnd, out var start)) { resizeStartWidth = Width(start); resizeStartHeight = Height(start); }
@@ -327,6 +334,7 @@ internal static class WindowSizing
             int frameHeight = Math.Max(0, Height(outer) - height);
             int maximumHeight = Math.Max(Math.Max(width, height), resizeWorkArea.Bottom - outer.Top - frameHeight);
             coverDrag = new(outer, frameHeight, width, height, maximumHeight, scale, lyricsVisible && !compactPaging);
+            RefreshCoverResizeCue();
         }
         private void ExitedMoveSize(InputNonClientPointerSource sender, ExitedMoveSizeEventArgs args)
             => EndMoveSize();
@@ -400,12 +408,17 @@ internal static class WindowSizing
             this.allowCoverBottomResize = allowCoverBottomResize;
             paging &= lyrics || enableCoverBottomResize || album;
             if (lyricsVisible == lyrics && compactPaging == paging && fullScreen == fullscreen
-                && coverBottomResize == enableCoverBottomResize && independentAlbum == album) return;
+                && coverBottomResize == enableCoverBottomResize && independentAlbum == album)
+            {
+                if (!allowCoverBottomResize && !inMoveSize) SetCoverResizeCue(CoverResizeCue.Hidden);
+                return;
+            }
             bool fullscreenChanged = fullScreen != fullscreen;
             if (lyricsVisible && !fullScreen && (fullscreen || !lyrics || paging || album)) RememberLyricsPaneHeight();
             expandLyrics |= !inMoveSize && (!lyricsVisible || compactPaging || independentAlbum) && lyrics && !paging && !fullscreen && !album;
             lyricsVisible = lyrics; compactPaging = paging; fullScreen = fullscreen;
             coverBottomResize = enableCoverBottomResize; independentAlbum = album;
+            RefreshCoverResizeCue();
             if (fullscreen || paging || !lyrics || album) expandLyrics = false;
             if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             {
@@ -421,6 +434,7 @@ internal static class WindowSizing
         {
             if (disposed || layoutTransition == active) return;
             layoutTransition = active;
+            RefreshCoverResizeCue();
             if (!active) QueueSettlement(force: true);
         }
         private void QueueRegionRefresh(bool force = false)
@@ -496,9 +510,47 @@ internal static class WindowSizing
         }
         private void SetHover(bool value)
         {
-            if (disposed || hover == value) return;
+            if (disposed) return;
+            if (value) RefreshCoverResizeCue();
+            else if (!inMoveSize) SetCoverResizeCue(CoverResizeCue.Hidden);
+            if (hover == value) return;
             hover = value;
             try { hoverChanged(value); }
+            catch (Exception error) when (error is COMException or InvalidOperationException or ArgumentException) { }
+        }
+
+        public void RefreshCoverResizeCue()
+        {
+            if (disposed || cueChanged == null) return;
+            if (fullScreen || independentAlbum || !coverBottomResize || layoutTransition)
+            {
+                SetCoverResizeCue(CoverResizeCue.Hidden);
+                return;
+            }
+            if (inMoveSize)
+            {
+                SetCoverResizeCue(coverDrag != null ? CoverResizeCue.Dragging : CoverResizeCue.Hidden);
+                return;
+            }
+            var cue = CoverResizeCue.Hidden;
+            double scale = Math.Max(96, dpi) / 96d;
+            if (allowCoverBottomResize && regionWidth > 0 && regionWidth < NarrowWidth * scale
+                && GetCursorPos(out var cursor) && GetWindowRect(hwnd, out var bounds))
+            {
+                var corner = (int)Math.Ceiling(24 * scale);
+                if (cursor.Y >= bounds.Bottom - 14 * scale && cursor.Y < bounds.Bottom
+                    && cursor.X >= bounds.Left + corner && cursor.X < bounds.Right - corner
+                    && GetAncestor(WindowFromPoint(cursor), 2) == hwnd)
+                    cue = CoverResizeCue.Hover;
+            }
+            SetCoverResizeCue(cue);
+        }
+
+        private void SetCoverResizeCue(CoverResizeCue cue)
+        {
+            if (coverCue == cue) return;
+            coverCue = cue;
+            try { cueChanged?.Invoke(cue); }
             catch (Exception error) when (error is COMException or InvalidOperationException or ArgumentException) { }
         }
         private void QueueSettlement(bool force = false)

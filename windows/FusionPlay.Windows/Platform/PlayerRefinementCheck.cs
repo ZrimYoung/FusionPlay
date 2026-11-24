@@ -180,6 +180,18 @@ internal static class PlayerRefinementCheck
                 Require(trayTitle.Text == "A Synthetic Question", "tray_title_not_corrected");
                 var display = SystemMedia.DisplaySnapshot(model.State, model.DisplayMetadata);
                 Require(display.Title == "A Synthetic Question" && display.Artist == "Example Artist" && display.TrackId == song.TrackId && display.PositionMs == song.PositionMs, "system_metadata_selection_wrong");
+                var clipboardText = typeof(MainWindow).GetMethod("TrackClipboardText", Private)!;
+                Require(clipboardText.Invoke(main, [true]) is "A Synthetic Question"
+                    && clipboardText.Invoke(main, [false]) is string info && info.StartsWith("A Synthetic Question · Example Artist", StringComparison.Ordinal),
+                    "copy_track_did_not_use_displayed_metadata");
+                model.Preferences.Update(model.Preferences.Value with { ShowLyricsButton = false });
+                Require(Find<Button>("LyricsToggleButton").Visibility == Visibility.Collapsed
+                    && Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Collapsed
+                    && ((FrameworkElement)main!.Content).KeyboardAccelerators.Any(key =>
+                        key.Key == global::Windows.System.VirtualKey.L
+                        && key.Modifiers == (global::Windows.System.VirtualKeyModifiers.Control | global::Windows.System.VirtualKeyModifiers.Shift)),
+                    "hiding_lyrics_button_removed_existing_input");
+                model.Preferences.Update(model.Preferences.Value with { ShowLyricsButton = true });
                 var request = Seeking.AtFraction(model.State, .5);
                 Require(model.State == song && request != null && request.ExpectedTitle == song.Title && request.ExpectedTrackId == song.TrackId && request.PositionMs == 90_000, "display_correction_changed_control_source");
                 Accept(song with { Phase = ReceiverPhase.Paused }); model.Preferences.Update(model.Preferences.Value with { CorrectLyricTitles = false });
@@ -333,6 +345,70 @@ internal static class PlayerRefinementCheck
                 Accept(song);
             });
             await Parsed();
+            var pagingStep = step;
+            step = "shared_album_backdrop_cache";
+            var appearance = new global::Windows.UI.ViewManagement.UISettings();
+            bool checkAlbumBlur = appearance.AdvancedEffectsEnabled && !new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
+            if (checkAlbumBlur)
+            {
+                Backdrop BackdropFor(string name) => (Backdrop)Field(main!, name)!;
+                object BackdropLayer(string name) => Field(BackdropFor(name), "layer") ?? throw new CheckFailure("album_backdrop_layer_missing");
+                object? LayerMember(object layer, string name) => layer.GetType().GetField(name)!.GetValue(layer);
+                var names = new[] { "miniBackdrop", "lyricsBackdrop", "expandedLyricsBackdrop", "sceneBackdrop" };
+
+                async Task CheckStrength(int strength, bool setPreference)
+                {
+                    if (setPreference)
+                        await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { AlbumBlurStrength = strength }));
+                    for (int attempt = 0; attempt < 125; attempt++)
+                    {
+                        bool ready = false;
+                        await OnUi(queue!, () =>
+                        {
+                            Background();
+                            ready = names.All(name => BackdropFor(name).UsesPreparedArtwork == (strength > 0)
+                                && Field(BackdropFor(name), "currentStrength") is int applied && applied == strength);
+                        });
+                        if (ready) break;
+                        if (attempt == 124) throw new CheckFailure($"album_backdrop_strength_not_applied_{strength}");
+                        await Task.Delay(40);
+                    }
+                    await OnUi(queue!, () =>
+                    {
+                        var progressive = BackdropLayer("miniBackdrop");
+                        Require(LayerMember(progressive, "Edges") is System.Collections.ICollection { Count: 4 }, "progressive_album_blur_masks_changed");
+                        var prepared = LayerMember(progressive, "Prepared");
+                        Require(strength == 0 ? prepared == null : prepared != null, "album_blur_preparation_did_not_match_strength");
+                        foreach (string name in names)
+                        {
+                            var currentLayer = BackdropLayer(name);
+                            Require(ReferenceEquals(LayerMember(currentLayer, "Prepared"), prepared), "album_backdrop_repeated_a_prepared_batch");
+                            Require(LayerMember(currentLayer, "LiveResources") is System.Collections.ICollection live
+                                && live.Count == (strength == 0 ? 1 : 0), "album_backdrop_retained_a_live_gaussian_effect");
+                        }
+                    });
+                }
+
+                await CheckStrength(100, setPreference: false);
+                await CheckStrength(0, setPreference: true);
+                await CheckStrength(60, setPreference: true);
+                await CheckStrength(100, setPreference: true);
+                object[]? beforeResize = null;
+                await OnUi(queue!, () =>
+                {
+                    beforeResize = names.Select(BackdropLayer).ToArray();
+                    WindowSizing.ResizeContent(main!, 840, 600);
+                });
+                await Settle();
+                await OnUi(queue!, () => Pass(step, () =>
+                {
+                    Require(Size().Width >= 600 && names.Select(BackdropLayer).SequenceEqual(beforeResize!), "album_backdrop_rebuilt_on_layout_change");
+                    samples.Add(new { mode = "prepared_album_backdrop", strength_values = new[] { 0, 60, 100 }, progressive_masks = 4, shared_batch = true });
+                    WindowSizing.ResizeContent(main!, 360, 360);
+                }));
+                await Settle();
+            }
+            step = pagingStep;
             await OnUi(queue!, () => Pass("cover_lyrics_follows_drag_only_with_stationary_artwork", () =>
             {
                 var pager = Pager();
@@ -503,7 +579,7 @@ internal static class PlayerRefinementCheck
             await OnUi(queue!, () => Pass(step, () =>
             {
                 var title = Find<PlayerText>("TitleText");
-                Require(title.MaxLines == 2 && title.TextWrapping == TextWrapping.Wrap && title.ActualHeight > titleHeight
+                Require(title.MaxLines == 3 && title.TextWrapping == TextWrapping.Wrap && title.ActualHeight > titleHeight
                     && title.FontSize == titleFontSize, "track_title_did_not_wrap_at_the_same_font_size");
                 var row = TranslatedRow();
                 Require(Math.Abs(((TextBlock)Field(row, "original")!).FontSize - originalSize * 1.5) < .1

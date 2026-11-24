@@ -123,6 +123,7 @@ public sealed class ReceiverController : IAsyncDisposable
     }
     public async Task InitializeAsync()
     {
+        bool autoStart = Preferences.Value.AutoStartReceiving;
         Busy = true; Error = ""; Notify();
         try
         {
@@ -136,7 +137,7 @@ public sealed class ReceiverController : IAsyncDisposable
             volume.Observe(Settings.Volume); Initialized = true; MigrationRequired = false;
             Busy = false; DevicesChanged?.Invoke(); Notify();
             polling = PollAsync(lifetime.Token);
-            await StartAsync(Settings);
+            if (autoStart) await StartAsync(Settings);
         }
         catch (IdentityMigrationRequiredException e) { MigrationRequired = true; Error = e.Message; Busy = false; Notify(); }
         catch (Exception e) { Error = Friendly(e); Busy = false; Store.EventDiagnostic("initialization_failed"); Notify(); }

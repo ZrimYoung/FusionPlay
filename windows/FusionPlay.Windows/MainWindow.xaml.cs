@@ -21,6 +21,7 @@ public sealed partial class MainWindow : Window
 {
     private readonly ReceiverController model;
     private readonly Action settings;
+    private readonly AlbumBackdropCache albumBackdropCache;
     private readonly Backdrop backdrop, miniBackdrop, loadingBackdrop, lyricsBackdrop, expandedLyricsBackdrop, sceneBackdrop;
     private readonly global::Windows.UI.ViewManagement.AccessibilitySettings accessibility = new();
     private readonly global::Windows.UI.ViewManagement.UISettings appearance = new();
@@ -89,7 +90,7 @@ public sealed partial class MainWindow : Window
         miniLyrics = new LyricsView(); expandedLyrics = new LyricsView();
         MiniLyricsHost.Children.Insert(0, miniLyrics); Grid.SetRow(miniLyrics, 1);
         ExpandedLyricsHost.Children.Add(expandedLyrics);
-        miniPager = new CompactLyricsPager(MiniRoot, MiniCoverPanel, MiniLyricsHost, MiniLyricsToggleButton,
+        miniPager = new CompactLyricsPager(MiniRoot, MiniCoverPanel, MiniLyricsHost, MiniLyricsToggleButton, CloseButton,
             () => !closed && compact && !idle && !interactiveResize && !lyricsLayoutTransitioning && !presenterTransitionPending && !MiniProgressSeek.PointerSeekActive,
             () => CanAnimateLayout && !WindowSizing.ScreenReaderActive, MiniPageChanged);
         var coverPageVisual = ElementCompositionPreview.GetElementVisual(MiniCoverPanel);
@@ -118,7 +119,10 @@ public sealed partial class MainWindow : Window
             presenter.IsResizable = true; presenter.IsMaximizable = false; presenter.IsMinimizable = false;
         }
         WindowSizing.Apply(this, 420, 420, 260, 260);
-        squareSizing = WindowSizing.FixedSquare(this, NativeHoverChanged);
+        squareSizing = WindowSizing.FixedSquare(this, NativeHoverChanged, CoverResizeCueChanged);
+        RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(Root_PointerMoved), true);
+        metadataTextScale = appearance.TextScaleFactor;
+        appearance.TextScaleFactorChanged += PlayerTextScaleChanged;
         resizeTransition = new WindowResizeTransition(this, squareSizing);
         layoutTransition = new PlayerLayoutTransition(RootGrid,
             [MiniControlsTransitionLayer, ExpandedDetails, MiniLyricsHost, ExpandedLyricsHost],
@@ -156,12 +160,13 @@ public sealed partial class MainWindow : Window
             if (IsFullScreen) fullScreen.Exit();
             args.Cancel = true; AppWindow.Hide(); ClosingToTray?.Invoke();
         };
-        backdrop = new Backdrop(BackdropLayer);
-        miniBackdrop = new Backdrop(MiniBackdropLayer, progressive: true);
-        loadingBackdrop = new Backdrop(LoadingArtworkLayer, blur: 12);
-        lyricsBackdrop = new Backdrop(MiniLyricsBackground, blur: 48);
-        expandedLyricsBackdrop = new Backdrop(ExpandedLyricsBackground, blur: 48);
-        sceneBackdrop = new Backdrop(SceneBackingLayer, blur: 48);
+        albumBackdropCache = new AlbumBackdropCache(RootGrid.DispatcherQueue);
+        backdrop = new Backdrop(BackdropLayer, cache: albumBackdropCache);
+        miniBackdrop = new Backdrop(MiniBackdropLayer, progressive: true, cache: albumBackdropCache);
+        loadingBackdrop = new Backdrop(LoadingArtworkLayer, blur: 12, cache: albumBackdropCache);
+        lyricsBackdrop = new Backdrop(MiniLyricsBackground, blur: 48, cache: albumBackdropCache);
+        expandedLyricsBackdrop = new Backdrop(ExpandedLyricsBackground, blur: 48, cache: albumBackdropCache);
+        sceneBackdrop = new Backdrop(SceneBackingLayer, blur: 48, cache: albumBackdropCache);
         backdrop.Changed += Render; miniBackdrop.Changed += Render; loadingBackdrop.Changed += Render;
         backdrop.Failed += LogBackdropFailure; miniBackdrop.Failed += LogBackdropFailure; loadingBackdrop.Failed += LogBackdropFailure;
         lyricsBackdrop.Changed += Render; lyricsBackdrop.Failed += LogBackdropFailure;
@@ -187,6 +192,9 @@ public sealed partial class MainWindow : Window
         var lyricsKey = new KeyboardAccelerator { Key = VirtualKey.L, Modifiers = VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift };
         lyricsKey.Invoked += (_, args) => args.Handled = ToggleCurrentLyrics();
         RootGrid.KeyboardAccelerators.Add(lyricsKey);
+        var copyTrackKey = new KeyboardAccelerator { Key = VirtualKey.C, Modifiers = VirtualKeyModifiers.Control };
+        copyTrackKey.Invoked += (_, args) => args.Handled = CopyTrackMetadata(titleOnly: false);
+        RootGrid.KeyboardAccelerators.Add(copyTrackKey);
         var escape = new KeyboardAccelerator { Key = VirtualKey.Escape };
         escape.Invoked += (_, args) => { if (IsFullScreen) { ToggleFullScreen(); args.Handled = true; } };
         RootGrid.KeyboardAccelerators.Add(escape);
@@ -226,11 +234,13 @@ public sealed partial class MainWindow : Window
             squareSizing.CoverLyricsResizeCanceled -= CoverLyricsResizeCanceled;
             layoutTransition.Dispose(); resizeTransition.Dispose();
             RootGrid.LayoutUpdated -= Root_LayoutUpdated;
+            appearance.TextScaleFactorChanged -= PlayerTextScaleChanged;
             RootGrid.BeforeMeasure = null;
             AppWindow.Changed -= WindowFrameChanged;
             ProgressSeek.SeekRequested -= SeekRequested; MiniProgressSeek.SeekRequested -= SeekRequested;
             ProgressSeek.PointerPreviewChanged -= UpdateScrubPreview; MiniProgressSeek.PointerPreviewChanged -= UpdateScrubPreview;
             hideTimer.Stop(); coverTimer.Stop(); transportTransition.Dispose(); expandedTransportTransition.Dispose(); progressTransition.Dispose(); expandedProgressTransition.Dispose(); squareSizing.Dispose(); backdrop.Dispose(); miniBackdrop.Dispose(); loadingBackdrop.Dispose(); lyricsBackdrop.Dispose(); expandedLyricsBackdrop.Dispose(); sceneBackdrop.Dispose();
+            albumBackdropCache.Dispose();
         };
         Render(); ScheduleHide();
     }
@@ -309,15 +319,16 @@ public sealed partial class MainWindow : Window
         // Retain each scene's prepared artwork through responsive/full-screen
         // transitions, but never cover the native acrylic of the idle window.
         byte[]? artwork = idle ? null : model.ArtworkBytes;
-        bool legacyExpandedEffects = backdrop.SetArtwork(artwork);
-        bool expandedLyricEffects = expandedLyricsBackdrop.SetArtwork(artwork);
+        int blurStrength = preferences.AlbumBlurStrength;
+        bool legacyExpandedEffects = backdrop.SetArtwork(artwork, blurStrength);
+        bool expandedLyricEffects = expandedLyricsBackdrop.SetArtwork(artwork, blurStrength);
         bool expandedLyricsMode = !compact ? lyricsVisible : configuredLyricsLayout == true;
         bool miniLyricsMode = configuredMiniLyricsLayout == true;
         bool expandedEffects = expandedLyricsMode ? expandedLyricEffects : legacyExpandedEffects;
-        bool effects = miniBackdrop.SetArtwork(artwork);
-        loadingBackdrop.SetArtwork(model.ArtworkLoading ? artwork : null);
-        bool miniLyricEffects = lyricsBackdrop.SetArtwork(artwork);
-        bool sceneEffects = sceneBackdrop.SetArtwork(artwork);
+        bool effects = miniBackdrop.SetArtwork(artwork, blurStrength);
+        loadingBackdrop.SetArtwork(model.ArtworkLoading ? artwork : null, blurStrength);
+        bool miniLyricEffects = lyricsBackdrop.SetArtwork(artwork, blurStrength);
+        bool sceneEffects = sceneBackdrop.SetArtwork(artwork, blurStrength);
         bool highContrast = accessibility.HighContrast;
         bool coverPaging = compact && miniPager.StationaryCover;
         bool acrylicRequested = !idle && (compact ? miniLyricsMode && !coverPaging : lyricsVisible) && preferences.LyricsBackgroundMode == "acrylic";
@@ -520,6 +531,7 @@ public sealed partial class MainWindow : Window
         && (!string.IsNullOrWhiteSpace(state.TrackId) || !string.IsNullOrWhiteSpace(state.Title));
     private void UpdateLyricsToggle(bool available, bool visible)
     {
+        available &= model.Preferences.Value.ShowLyricsButton;
         var presentation = (Available: available, Visible: available && visible, Paged: miniPager.Active,
             LyricsPage: miniPager.Active && miniPager.ShowingLyrics, Language: L.Language);
         if (lyricsTogglePresentation == presentation) return;
@@ -733,6 +745,7 @@ public sealed partial class MainWindow : Window
         miniLyrics.EndViewportResize();
         expandedLyrics.EndViewportResize();
         SetResizeTextRendering(false);
+        appliedLayout = null;
         ApplyPlayerLayout(RootGrid.ActualWidth, RootGrid.ActualHeight);
         layoutTransition.Remember();
         QueueInputRegions();
@@ -832,12 +845,14 @@ public sealed partial class MainWindow : Window
         if (appliedLayout?.WrapMetadata != preferences.WrapTrackMetadata)
         {
             TextWrapping metadataWrapping = preferences.WrapTrackMetadata ? TextWrapping.Wrap : TextWrapping.NoWrap;
-            int metadataLines = preferences.WrapTrackMetadata ? 2 : 1;
             TitleText.TextWrapping = ArtistText.TextWrapping = MiniTitle.TextWrapping = MiniArtist.TextWrapping = metadataWrapping;
-            TitleText.MaxLines = ArtistText.MaxLines = MiniTitle.MaxLines = MiniArtist.MaxLines = metadataLines;
+            ArtistText.MaxLines = MiniArtist.MaxLines = preferences.WrapTrackMetadata ? 2 : 1;
         }
+        // Keep cached title surfaces stable until the native sizing gesture ends.
+        if (!interactiveResize) UpdateTrackTitleLineLimits(preferences.WrapTrackMetadata, width, height, album);
         appliedLayout = layout;
         if (compact != nextCompact) { ProgressSeek.CancelPointer(); MiniProgressSeek.CancelPointer(); }
+        HandoffLyricsReadingPosition(nextCompact);
         compact = nextCompact;
         ExpandedRoot.Visibility = !compact || ReferenceEquals(layoutTransition?.RetainedScene, ExpandedRoot) ? Visibility.Visible : Visibility.Collapsed;
         MiniRoot.Visibility = compact || ReferenceEquals(layoutTransition?.RetainedScene, MiniRoot) ? Visibility.Visible : Visibility.Collapsed;
@@ -1087,12 +1102,12 @@ public sealed partial class MainWindow : Window
         }
         UpdateInputRegions();
     }
-    private static void AnimateVisibility(FrameworkElement element, bool visible, double seconds, double delay)
+    private static void AnimateVisibility(FrameworkElement element, bool visible, double seconds, double delay, float shownOpacity = 1)
     {
         var visual = ElementCompositionPreview.GetElementVisual(element);
         if (!Backdrop.AnimationsEnabled)
         {
-            visual.StopAnimation("Opacity"); visual.Opacity = visible ? 1 : 0; return;
+            visual.StopAnimation("Opacity"); visual.Opacity = visible ? shownOpacity : 0; return;
         }
         using var animation = visual.Compositor.CreateScalarKeyFrameAnimation();
         using var easing = visible
@@ -1102,7 +1117,7 @@ public sealed partial class MainWindow : Window
         // replaced. Do not StopAnimation here: that would reset to the base value
         // and flash when a pointer reverses direction partway through a fade.
         animation.InsertExpressionKeyFrame(0, "this.StartingValue");
-        animation.InsertKeyFrame(1, visible ? 1 : 0, easing);
+        animation.InsertKeyFrame(1, visible ? shownOpacity : 0, easing);
         animation.DelayBehavior = AnimationDelayBehavior.SetInitialValueBeforeDelay;
         animation.DelayTime = TimeSpan.FromSeconds(delay);
         animation.Duration = TimeSpan.FromSeconds(seconds);

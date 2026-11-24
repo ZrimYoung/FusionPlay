@@ -155,6 +155,10 @@ public sealed partial class LyricsView : UserControl, IDisposable
             int active = document.ActiveLineIndex(lastPosition);
             if (active != activeIndex)
             {
+                // A hidden page can wait long after the switch. On normal
+                // playback, follow the latest line when it eventually opens.
+                if (!PresentationLoaded && incomingReadingPosition is { } pending && pending.BrowseUntil <= Stopwatch.GetTimestamp())
+                    incomingReadingPosition = null;
                 int previous = activeIndex;
                 activeIndex = active;
                 stateChanged = true;
@@ -345,6 +349,7 @@ public sealed partial class LyricsView : UserControl, IDisposable
     private void ScheduleFollow(bool animated, bool explicitRequest = false, bool adjacentAdvance = false)
     {
         if (!PresentationLoaded || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
+        if (incomingReadingPosition != null && !restoringIncomingPosition) return;
         if (ViewportResizePending)
         {
             followAfterReflow = true;
@@ -355,7 +360,8 @@ public sealed partial class LyricsView : UserControl, IDisposable
     }
     private void Follow(int revision, bool animated, bool explicitRequest, bool realize, bool adjacentAdvance = false)
     {
-        if (!PresentationLoaded || revision != followRevision || ViewportResizePending || browsing || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
+        if (!PresentationLoaded || revision != followRevision || ViewportResizePending || incomingReadingPosition != null || browsing
+            || !document.IsTimed || !lastPosition.HasValue || (!explicitRequest && WindowSizing.ScreenReaderActive)) return;
         AttachScroller(); if (scroller == null || items.Length == 0 || ViewportHeight <= 0) return;
         int index = Math.Max(0, activeIndex);
         if (!TryReadingBounds(items[index], out double y, out double height))
@@ -391,6 +397,9 @@ public sealed partial class LyricsView : UserControl, IDisposable
         row.ApplyState(style: true);
         QueueEdges();
     }
+    internal bool CanStartLiveGlyphReflow(LyricsRowPresenter row)
+        => !realized.Any(candidate => !ReferenceEquals(candidate, row) && candidate.GlyphReflowClusterCount > 0);
+
     internal void Unregister(LyricsRowPresenter row)
     {
         ResetRowMotion(row);

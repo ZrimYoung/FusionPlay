@@ -43,6 +43,7 @@ internal static class WindowInputCheck
         bool visibilityPreserved = true, foregroundPreserved = true, foregroundNotTaken = true;
         var samples = new List<Sample>();
         var motionSamples = new List<object>();
+        var coverCues = new List<CoverResizeCue>();
         void Require(bool condition, string code) { if (!condition) throw new CheckFailure(code); }
         void RequireBackground()
         {
@@ -67,7 +68,7 @@ internal static class WindowInputCheck
                 presenter.SetBorderAndTitleBar(false, false); presenter.IsResizable = true; presenter.IsMaximizable = false;
                 WindowSizing.Apply(window, 420, 420, 260, 260);
                 RequireBackground();
-                square = WindowSizing.FixedSquare(window, _ => { });
+                square = WindowSizing.FixedSquare(window, _ => { }, coverCues.Add);
                 WindowSizing.ResizeContent(window, 420, 420);
                 RequireBackground();
                 Require(GetClientRect(hwnd, out var client), "client_bounds_unavailable");
@@ -210,6 +211,7 @@ internal static class WindowInputCheck
                 square.MoveSizeEnded += MoveSizeEnded;
                 try
                 {
+                    coverCues.Clear();
                     Begin();
                     Apply(6, original, side, side + Pixels(2));
                     End();
@@ -239,7 +241,10 @@ internal static class WindowInputCheck
                         "cover_lyrics_drag_changed_top_left_or_width");
                     Require(opened.Bottom - opened.Top == side + Pixels(80), "cover_lyrics_live_rectangle_was_clamped_to_settled_height");
                     Require(starts == 1 && previews == 1 && commits.Count == 0, "cover_lyrics_preview_order");
+                    Require(coverCues.Count(cue => cue == CoverResizeCue.Dragging) == 2,
+                        "cover_resize_cue_did_not_follow_eligible_gestures");
                     End();
+                    Require(coverCues.LastOrDefault() == CoverResizeCue.Hidden, "cover_resize_cue_survived_release");
                     Require(GetWindowRect(hwnd, out opened) && opened.Bottom - opened.Top == side + Pixels(136)
                         && opened.Left == original.Left && opened.Top == original.Top, "cover_lyrics_open_snap_wrong");
                     Require(commits.SequenceEqual(new[] { true }) && ordering.TakeLast(2).SequenceEqual(new[] { "commit", "ended" }),

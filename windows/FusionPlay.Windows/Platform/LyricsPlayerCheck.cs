@@ -759,6 +759,101 @@ internal static class LyricsPlayerCheck
             }));
         }
 
+        async Task CheckResponsiveReadingPosition()
+        {
+            if (WindowSizing.ScreenReaderActive) return;
+            const int browseLine = 10;
+            LyricsView ActiveLyrics() => (LyricsView)Field(main!, Field(main!, "compact") is true ? "miniLyrics" : "expandedLyrics")!;
+            ListView LyricsList(LyricsView view) => Descendants(view).OfType<ListView>().Single();
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with
+                {
+                    NarrowPlayerLayout = "cover", CoverLyricsPane = "expanded", LyricsDisplayMode = "always"
+                });
+                Accept(source with
+                {
+                    TrackId = "responsive-reading-position", Phase = ReceiverPhase.Paused, PositionMs = 2_000,
+                    LyricsText = string.Join('\n', Enumerable.Range(0, 30).Select(index =>
+                        $"[00:{index:00}.000]Line {index:00} · Reading position stays on this line when the layout changes"))
+                });
+                WindowSizing.ResizeContent(main!, 620, 800);
+            });
+            await WaitLyrics();
+            await Task.Delay(250);
+            await OnUi(queue!, () =>
+            {
+                var size = MainSize(); Arrange(Root(), size.Width, size.Height);
+                var view = ActiveLyrics();
+                Require(view.PresentationLoaded && Field(main!, "compact") is false, "responsive_reading_position_wide_setup_failed");
+                typeof(LyricsView).GetMethod("BeginBrowsing", Private)!.Invoke(view, null);
+                var list = LyricsList(view);
+                list.ScrollIntoView(list.Items[browseLine], ScrollIntoViewAlignment.Leading);
+            });
+
+            LyricsView.ReadingPosition? anchorPosition = null;
+            var startingWait = Stopwatch.StartNew();
+            while (anchorPosition == null && startingWait.ElapsedMilliseconds < 800)
+            {
+                await Task.Delay(22);
+                await OnUi(queue!, () =>
+                {
+                    var size = MainSize(); Arrange(Root(), size.Width, size.Height);
+                    if (ActiveLyrics().CaptureReadingPosition() is { BrowseUntil: > 0 } position && Math.Abs(position.Index - browseLine) <= 1)
+                        anchorPosition = position;
+                });
+            }
+            var expected = anchorPosition ?? throw new CheckFailure("responsive_reading_position_browse_row_not_realized");
+
+            const uint enterSizeMove = 0x0231, sizing = 0x0214, exitSizeMove = 0x0232;
+            var samples = new List<double>();
+            try
+            {
+                await OnUi(queue!, () =>
+                {
+                    Require(GetWindowRect(mainHwnd, out var current), "responsive_reading_position_window_bounds_missing");
+                    _ = SendMessage(mainHwnd, enterSizeMove, 0, 0);
+                    _ = SendSizing(mainHwnd, sizing, 8, ref current);
+                    Require(ActiveLyrics().InteractiveResize, "responsive_reading_position_resize_not_started");
+                    if (ActiveLyrics().CaptureReadingPosition() is { } liveAnchor && liveAnchor.Index == expected.Index)
+                        expected = liveAnchor;
+                });
+                foreach (int width in new[] { 598, 602, 599, 620 })
+                {
+                    await OnUi(queue!, () => WindowSizing.ResizeContent(main!, width, 800));
+                    bool aligned = false;
+                    double? measuredTop = null;
+                    var crossing = Stopwatch.StartNew();
+                    while (!aligned && crossing.ElapsedMilliseconds < 700)
+                    {
+                        await Task.Delay(20);
+                        await OnUi(queue!, () =>
+                        {
+                            var size = MainSize(); Arrange(Root(), size.Width, size.Height);
+                            var view = ActiveLyrics();
+                            if (Field(main!, "compact") is not bool compact || compact != (width < 600) || !view.PresentationLoaded
+                                || LyricsList(view).ContainerFromIndex(expected.Index) is not FrameworkElement { ActualHeight: > 0 } row) return;
+                            measuredTop = row.TransformToVisual(view).TransformPoint(new Point()).Y;
+                            aligned = Math.Abs(measuredTop.Value - expected.Top) <= 2;
+                            if (aligned)
+                                Require(view.CaptureReadingPosition() is { } carried && ReferenceEquals(carried.Document, expected.Document)
+                                    && carried.Index == expected.Index && carried.BrowseUntil == expected.BrowseUntil,
+                                    "responsive_reading_position_changed_document_or_browse_deadline");
+                        });
+                    }
+                    animationSamples.Add(new { stage = "responsive_reading_position", width, expected.Index, expected.Top, measuredTop });
+                    Require(aligned, "responsive_reading_position_row_drifted_on_layout_change");
+                    samples.Add(Math.Abs(measuredTop!.Value - expected.Top));
+                }
+            }
+            finally
+            {
+                await OnUi(queue!, () => { _ = SendMessage(mainHwnd, exitSizeMove, 0, 0); });
+            }
+            await OnUi(queue!, () => Pass("responsive_live_resize_transfers_browsed_lyric_row_and_deadline", () =>
+                Require(samples.Count == 4 && samples.Max() <= 2, "responsive_reading_position_did_not_survive_reverse_resize")));
+        }
+
         try
         {
             Require(queue != null, "lyrics_dispatcher_unavailable");
@@ -1471,6 +1566,7 @@ internal static class LyricsPlayerCheck
                 await OnUi(queue!, () =>
                 {
                     Require(shapedRow!.UsesCompositionSurface, "shaped_reflow_fixture_did_not_realize_glyphs");
+                    component!.SetInteractiveResize(true);
                     shapedRow.Width = 220; Arrange((Grid)componentWindow!.Content, 400, 340);
                 });
                 bool observedClusters = false;
@@ -1481,10 +1577,11 @@ internal static class LyricsPlayerCheck
                     {
                         observedClusters = shapedRow!.GlyphReflowTransitionsStarted > 0 && shapedRow.GlyphReflowClusterCount > 1;
                         if (!observedClusters) return;
-                        Require(shapedRow.CachedPlaneCount == 2 && shapedRow.WrapTransitionDurationMs is >= 190 and <= 480,
+                        Require(component!.InteractiveResize && shapedRow.GlyphReflowClusterCount <= LyricsGlyphReflow.MaximumLiveClusters
+                            && shapedRow.CachedPlaneCount == 2 && shapedRow.WrapTransitionDurationMs is >= 190 and <= 480,
                             "shaped_reflow_exceeded_plane_or_duration_budget");
                         animationSamples.Add(new { stage = "directwrite_cluster_reflow", shapedRow.GlyphReflowClusterCount,
-                            shapedRow.CachedPlaneCount, shapedRow.WrapTransitionDurationMs });
+                            shapedRow.CachedPlaneCount, shapedRow.WrapTransitionDurationMs, live_resize = true });
                         var content = (Grid)componentWindow!.Content;
                         shapedRow.Width = 260; Arrange(content, 400, 340);
                         shapedRow.Width = 400; Arrange(content, 400, 340);
@@ -1498,6 +1595,14 @@ internal static class LyricsPlayerCheck
                     viewport_height = Field(shapedRow, "viewportHeight")
                 }));
                 Require(observedClusters, "directwrite_cluster_reflow_did_not_engage");
+                bool observedReverse = false;
+                for (int attempt = 0; attempt < 30 && !observedReverse; attempt++)
+                {
+                    await Task.Delay(18);
+                    await OnUi(queue!, () => observedReverse = shapedRow!.GlyphReflowTransitionsStarted >= 2);
+                }
+                Require(observedReverse, "directwrite_cluster_reflow_did_not_continue_after_live_reversal");
+                await OnUi(queue!, () => component!.SetInteractiveResize(false));
                 await Task.Delay(720);
                 await OnUi(queue!, () => Pass(step, () =>
                 {
@@ -1592,6 +1697,8 @@ internal static class LyricsPlayerCheck
             }));
             step = "native_resize_typography";
             await CheckNativeResizeTypography();
+            step = "responsive_reading_position";
+            await CheckResponsiveReadingPosition();
             step = "native_cover_bottom_paging";
             await OnUi(queue!, () =>
             {

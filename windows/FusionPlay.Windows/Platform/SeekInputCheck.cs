@@ -553,6 +553,51 @@ internal static class SeekInputCheck
             await WaitForProgress(visible: true);
             await OnUi(queue!, () => Pass("real_main_mode_switch_during_progress_show_snaps_visible", () =>
                 Require(Find<FrameworkElement>("ExpandedRoot").Visibility == Visibility.Visible && Find<ProgressSeekButton>("ProgressSeek").IsEnabled, "real_main_mode_switch_retained_old_show")));
+            step = "real_main_progress_preserves_source_across_layouts";
+            PlayerProgressBar? wideBar = null, narrowBar = null;
+            ProgressSeekButton? crossingSeek = null;
+            double crossingSeekWidth = 0;
+            void RequireProgressInBothLayouts(double percentage, string position)
+            {
+                Require(ReferenceEquals(wideBar, Find<PlayerProgressBar>("Progress"))
+                    && ReferenceEquals(narrowBar, Find<PlayerProgressBar>("MiniProgress"))
+                    && Math.Abs(wideBar!.Value - percentage) < .01 && Math.Abs(narrowBar!.Value - percentage) < .01
+                    && Find<PlayerText>("PositionText").Text == position && Find<PlayerText>("MiniPosition").Text == position,
+                    "layout_switch_reset_or_replaced_progress");
+            }
+            await OnUi(queue!, () =>
+            {
+                AcceptMain(initial);
+                wideBar = Find<PlayerProgressBar>("Progress"); narrowBar = Find<PlayerProgressBar>("MiniProgress");
+                RequireProgressInBothLayouts(25, "0:50");
+                crossingSeek = Find<ProgressSeekButton>("ProgressSeek");
+                crossingSeekWidth = crossingSeek.ActualWidth;
+                Require(crossingSeek.BeginPointer(45, crossingSeekWidth * .7, crossingSeekWidth, true), "crossing_seek_fixture_not_captured");
+                WindowSizing.ResizeContent(main!, 420, 420);
+            });
+            await Settle(queue!);
+            await OnUi(queue!, () => Pass("real_main_narrow_progress_keeps_source_and_rejects_old_release", () =>
+            {
+                ArrangeMain(420, 420);
+                AcceptMain(initial with { PositionMs = 60_000 });
+                RequireProgressInBothLayouts(30, "1:00");
+                Require(!crossingSeek!.ReleasePointer(45, crossingSeekWidth * .7, crossingSeekWidth) && !mainTimeline!.IsPending,
+                    "layout_switch_committed_stale_drag");
+                Require(mainTimeline!.Begin(new SeekRequest(120_000, initial.TrackId, initial.Title)) != 0, "crossing_pending_seek_fixture_rejected");
+                AcceptMain(initial with { PositionMs = 60_500 });
+                RequireProgressInBothLayouts(60, "2:00");
+                WindowSizing.ResizeContent(main!, 820, 480);
+            }));
+            await Settle(queue!);
+            await OnUi(queue!, () => Pass("real_main_wide_progress_keeps_pending_seek_until_confirmation", () =>
+            {
+                ArrangeMain(820, 480);
+                Require(mainTimeline!.IsPending, "layout_switch_discarded_pending_seek");
+                RequireProgressInBothLayouts(60, "2:00");
+                AcceptMain(initial with { PositionMs = 120_500 });
+                Require(!mainTimeline.IsPending, "layout_switch_prevented_seek_confirmation");
+                RequireProgressInBothLayouts(60.25, "2:00");
+            }));
             await OnUi(queue!, () => Pass("player_caption_button_preferences_keep_shortcuts", () =>
             {
                 controller!.Preferences.Update(controller.Preferences.Value with { ShowSettingsButton = false, ShowFullScreenButton = false });

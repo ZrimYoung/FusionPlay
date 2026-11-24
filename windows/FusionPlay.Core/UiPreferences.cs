@@ -18,6 +18,7 @@ public sealed record UiPreferences
     public bool ShowPlayerProgress => (NarrowPlayerLayout == "album" ? AlbumShowProgress : CoverShowProgress) ?? ShowProgress;
     public string LyricsDisplayMode { get; init; } = "automatic";
     public string LyricsBackgroundMode { get; init; } = "album";
+    public int AlbumBlurStrength { get; init; } = 100;
     public int LyricsTextScalePercent { get; init; } = 100;
     public bool LyricsStaggerEnabled { get; init; } = true;
     public int LyricsStaggerMilliseconds { get; init; } = 140;
@@ -35,8 +36,10 @@ public sealed record UiPreferences
     public bool ShowPinButton { get; init; }
     public bool ShowSettingsButton { get; init; } = true;
     public bool ShowFullScreenButton { get; init; } = true;
+    public bool ShowLyricsButton { get; init; } = true;
     public bool ShowTaskbarIcon { get; init; } = true;
     public bool ShowTrayIcon { get; init; } = true;
+    public bool AutoStartReceiving { get; init; } = true;
     public string ProgressColorMode { get; init; } = "system";
     public string ProgressCustomColor { get; init; } = "#FFFFFF";
     public string UiFontFamily { get; init; } = "";
@@ -44,7 +47,7 @@ public sealed record UiPreferences
     public string PlayerTextRendering { get; init; } = "enhanced";
 }
 
-/// <summary>Portable presentation preferences, independent of receiver identity and audio settings.</summary>
+/// <summary>Portable application preferences, independent of receiver identity and audio settings.</summary>
 public sealed class UiPreferencesStore
 {
     private readonly string path;
@@ -120,6 +123,8 @@ public sealed class UiPreferencesStore
             throw new ArgumentException("Unsupported cover lyrics pane state.", nameof(preferences));
         if (preferences.LyricsBackgroundMode is not ("album" or "acrylic"))
             throw new ArgumentException("Unsupported lyrics background mode.", nameof(preferences));
+        if (preferences.AlbumBlurStrength is < 0 or > 100)
+            throw new ArgumentException("Invalid album blur strength.", nameof(preferences));
         if (preferences.LyricsTextScalePercent is < 75 or > 200)
             throw new ArgumentException("Invalid lyrics text scale.", nameof(preferences));
         if (preferences.LyricsStaggerMilliseconds is < 0 or > 1000

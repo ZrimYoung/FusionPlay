@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using FusionPlay.Core;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -19,15 +20,17 @@ public sealed partial class LyricsView
     private bool followRowsNeedLayout;
     private CompositionPropertySet? followClock, followScroll;
     private ReadingAnchor? readingAnchor, resizeAnchor;
+    private ReadingPosition? incomingReadingPosition;
     private (int Revision, LyricsRowItem Item, bool ExplicitRequest)? pendingFollowRealization;
     private bool nativeViewportResize, viewportReflow, followAfterReflow, restoreQueued, realizeAnchorRequested;
     private (double Target, long Started)? requestedAnchorOffset;
-    private bool correctingAnchor, retryFinalAnchor, resizePaddingHeld;
+    private bool correctingAnchor, retryFinalAnchor, resizePaddingHeld, restoringIncomingPosition;
     private bool allowFollowMotion;
     private LyricsFollowMotion? followMotion;
     private double? heldResizeBodySize;
 
     private readonly record struct ReadingAnchor(LyricsRowItem Item, double Top);
+    internal readonly record struct ReadingPosition(LyricsDocument Document, int Index, double Top, long BrowseUntil);
 
     internal bool InteractiveResize { get; private set; }
     internal string? FollowCompositorFailure { get; private set; }
@@ -59,8 +62,64 @@ public sealed partial class LyricsView
     internal void CancelFollowAnimation()
     {
         allowFollowMotion = false;
+        if (incomingReadingPosition != null) ClearReadingAnchor();
         ++followRevision;
         StopFollowMotion();
+    }
+
+    internal ReadingPosition? CaptureReadingPosition()
+    {
+        if (disposed || WindowSizing.ScreenReaderActive) return null;
+        if (incomingReadingPosition is { } incoming) return incoming;
+        if (!PresentationLoaded || !connected || !document.HasLyrics) return null;
+        if ((resizeAnchor ?? CaptureReadingAnchor()) is not { } anchor) return null;
+        double top = anchor.Top;
+        if (resizeAnchor == null && scroller != null && followMotion is { } motion)
+        {
+            long now = Stopwatch.GetTimestamp();
+            top += scroller.VerticalOffset - motion.ScrollOffset(now);
+        }
+        long browseUntil = browsing ? browsingDeadline : 0;
+        return new(document, anchor.Item.Index, top, browseUntil);
+    }
+
+    internal void ReceiveReadingPosition(ReadingPosition position)
+    {
+        if (disposed || !connected || WindowSizing.ScreenReaderActive || !ReferenceEquals(document, position.Document)
+            || position.Index < 0 || position.Index >= items.Length) return;
+        ClearReadingAnchor();
+        incomingReadingPosition = position;
+        pendingFollowRealization = null;
+        followAfterReflow = false;
+        resizeQuietTimer.Stop();
+        ++followRevision;
+    }
+
+    private void BeginIncomingReadingPosition()
+    {
+        if (restoringIncomingPosition || incomingReadingPosition is not { } position || !PresentationLoaded || scroller == null) return;
+        if (WindowSizing.ScreenReaderActive)
+        {
+            incomingReadingPosition = null;
+            return;
+        }
+
+        restoringIncomingPosition = viewportReflow = true;
+        resizeAnchor = new(items[position.Index], position.Top);
+        followAfterReflow = false;
+        UpdateRowTransitions();
+        StopFollowMotion();
+
+        browsingTimer.Stop();
+        long remaining = position.BrowseUntil - Stopwatch.GetTimestamp();
+        browsing = remaining > 0;
+        if (browsing)
+        {
+            browsingDeadline = position.BrowseUntil;
+            browsingTimer.Interval = TimeSpan.FromSeconds(Math.Max(.001, remaining / (double)Stopwatch.Frequency));
+            browsingTimer.Start();
+        }
+        if (!nativeViewportResize) RestartResizeQuietTimer();
     }
 
     internal void BeginViewportResize()
@@ -139,13 +198,14 @@ public sealed partial class LyricsView
         bool follow = followAfterReflow;
         viewportReflow = followAfterReflow = false;
         UpdateRowTransitions();
-        ClearReadingAnchor();
+        ClearReadingAnchor(preserveIncoming: !restoringIncomingPosition);
         RememberReadingAnchor();
         if (follow) ScheduleFollow(animated: true);
     }
 
     private void ReadingLayoutUpdated(object? sender, object args)
     {
+        BeginIncomingReadingPosition();
         ResumeRealizedFollow();
         if (followRowsNeedLayout && followMotion != null) AttachFollowRows();
         // The narrow and wide views can trade places during the same drag. Pin
@@ -267,11 +327,13 @@ public sealed partial class LyricsView
         QueueReadingAnchorRestore();
     }
 
-    private void ClearReadingAnchor()
+    private void ClearReadingAnchor(bool preserveIncoming = false)
     {
         readingAnchor = resizeAnchor = null;
         requestedAnchorOffset = null;
         realizeAnchorRequested = false;
+        restoringIncomingPosition = false;
+        if (!preserveIncoming) incomingReadingPosition = null;
     }
 
     private void ResetViewportMotion()
@@ -281,7 +343,7 @@ public sealed partial class LyricsView
         viewportReflow = followAfterReflow = resizePaddingHeld = false;
         if (!disposed) UpdateRowTransitions();
         pendingFollowRealization = null;
-        ClearReadingAnchor();
+        ClearReadingAnchor(preserveIncoming: !disposed);
         StopFollowMotion();
     }
 

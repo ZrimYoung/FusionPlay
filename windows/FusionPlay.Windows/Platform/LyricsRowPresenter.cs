@@ -42,6 +42,7 @@ public sealed class LyricsRowPresenter : Button
     private const int WrapDurationMs = 180;
     private const int LiveGlyphIntervalMs = 144;
     private const double LiveGlyphWidthStep = 16;
+    private const int MaximumLiveGlyphSourceLength = 96;
     private CanvasRenderTarget? glyphs => plane?.Glyphs;
     private CompositionDrawingSurface? surface => plane?.Surface;
     private SpriteVisual? sprite => plane?.Sprite;
@@ -366,8 +367,8 @@ public sealed class LyricsRowPresenter : Button
                     return;
                 }
             }
-            // Width changes while held use a bounded two-plane fade. The final
-            // layout can use the detailed cluster animation in the viewport.
+            // Reuse the two row planes. A short, fully visible row can also
+            // animate its shaped clusters inside the live upload budget.
             bool animateWrap = !urgentGlyphs && sameScale && owner.MotionEnabled && !WindowSizing.ScreenReaderActive
                 && (glyphReflow != null || layoutChanged);
             var continuation = animateWrap ? glyphReflow?.Sample() : null;
@@ -416,11 +417,15 @@ public sealed class LyricsRowPresenter : Button
             {
                 glyphReflowStatus = previous.Layouts.Length == 0 || target.Layouts.Length != previous.Layouts.Length
                     ? "missing_matching_layouts" : "edge_mask_needed";
-                if (!owner.InteractiveResize && previous.Layouts.Length > 0 && target.Layouts.Length == previous.Layouts.Length
-                    && CanShowClusterMotion(owner, Math.Max(previous.ContentHeight, height)))
+                bool resize = owner.InteractiveResize;
+                bool actualWrap = previous.OriginalBreaks != firstBreaks || previous.TranslationBreaks != secondBreaks;
+                if (previous.Layouts.Length > 0 && target.Layouts.Length == previous.Layouts.Length
+                    && CanShowClusterMotion(owner, Math.Max(previous.ContentHeight, height))
+                    && (!resize || actualWrap && original.Text.Length + translation.Text.Length <= MaximumLiveGlyphSourceLength
+                        && owner.CanStartLiveGlyphReflow(this)))
                 {
                     glyphReflow = LyricsGlyphReflow.TryStart(resources, previous.Surface!, target.Surface!, previous.Layouts,
-                        target.Layouts, (float)bleed, (float)scale, continuation, out glyphReflowStatus);
+                        target.Layouts, (float)bleed, (float)scale, continuation, out glyphReflowStatus, liveResize: resize);
                 }
                 StartWrap(previous);
             }

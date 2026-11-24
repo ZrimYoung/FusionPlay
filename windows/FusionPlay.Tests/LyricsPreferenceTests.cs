@@ -65,6 +65,30 @@ internal static class LyricsPreferenceTests
                 Require(store.Value == before && File.ReadAllBytes(path).AsSpan().SequenceEqual(saved), "invalid timing modified preferences");
             }
         });
+        check("launch and player appearance: legacy defaults, persistence and album blur limits", () =>
+        {
+            using var temporary = new TemporaryDirectory();
+            string path = Path.Combine(temporary.Path, "ui-preferences.json");
+            const string old = """{"lyrics_background_mode":"acrylic","show_progress":false}""";
+            File.WriteAllText(path, old);
+            var store = new UiPreferencesStore(temporary.Path);
+            Require(store.Value is { AutoStartReceiving: true, ShowLyricsButton: true, AlbumBlurStrength: 100 }
+                && File.ReadAllText(path) == old, "old files did not inherit unchanged startup and player behavior");
+            foreach (int strength in new[] { 0, 37, 100 })
+            {
+                store.Update(store.Value with { AutoStartReceiving = false, ShowLyricsButton = false, AlbumBlurStrength = strength });
+                Require(new UiPreferencesStore(temporary.Path).Value == store.Value && !store.Value.ShowProgress
+                    && store.Value.LyricsBackgroundMode == "acrylic", "new choices lost independently stored display settings");
+            }
+            byte[] saved = File.ReadAllBytes(path);
+            foreach (int rejected in new[] { -1, 101 })
+            {
+                try { store.Update(store.Value with { AlbumBlurStrength = rejected }); throw new InvalidOperationException("invalid blur strength accepted"); }
+                catch (ArgumentException) { }
+                Require(store.Value.AlbumBlurStrength == 100 && File.ReadAllBytes(path).AsSpan().SequenceEqual(saved),
+                    "invalid blur strength replaced preferences");
+            }
+        });
         check("compact player layouts: retain legacy paging, inherit shared controls and persist independent mode options", () =>
         {
             using var temporary = new TemporaryDirectory();

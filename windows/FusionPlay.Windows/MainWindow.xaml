@@ -1,6 +1,13 @@
 <Window x:Class="FusionPlay.Windows.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:FusionPlay.Windows" xmlns:platform="using:FusionPlay.Windows.Platform" Title="FusionPlay">
  <local:PlayerRootGrid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}" KeyboardAcceleratorPlacementMode="Hidden" SizeChanged="Root_SizeChanged" PointerEntered="Root_PointerEntered" PointerExited="Root_PointerExited" GotFocus="Root_GotFocus" LostFocus="Root_LostFocus">
-  <Grid.ContextFlyout><MenuFlyout><MenuFlyoutItem x:Name="FullScreenMenuItem" Click="FullScreen_Click" Text="全屏" KeyboardAcceleratorTextOverride="F11"/></MenuFlyout></Grid.ContextFlyout>
+  <Grid.ContextFlyout>
+   <MenuFlyout Opening="PlayerMenu_Opening">
+    <MenuFlyoutItem x:Name="FullScreenMenuItem" Click="FullScreen_Click" Text="全屏" KeyboardAcceleratorTextOverride="F11"/>
+    <MenuFlyoutSeparator/>
+    <MenuFlyoutItem x:Name="CopyTrackTitleMenuItem" Click="CopyTrackTitle_Click" Text="复制歌名"/>
+    <MenuFlyoutItem x:Name="CopyTrackInfoMenuItem" Click="CopyTrackInfo_Click" Text="复制曲目信息" KeyboardAcceleratorTextOverride="Ctrl+C"/>
+   </MenuFlyout>
+  </Grid.ContextFlyout>
   <Grid x:Name="SceneBacking" IsHitTestVisible="False" Background="#FF152136" Visibility="Collapsed"><Grid x:Name="SceneBackingLayer"/><Border x:Name="SceneBackingShade"/></Grid>
   <Grid x:Name="ExpandedRoot" Visibility="Collapsed">
    <Grid x:Name="BackdropLayer" IsHitTestVisible="False"/><Grid x:Name="ExpandedLyricsBackground" IsHitTestVisible="False"/><Border x:Name="BackdropShade" Background="#99000000" IsHitTestVisible="False"/>
@@ -95,5 +102,9 @@
    </Grid>
   </Grid>
   <FontIcon x:Name="IdlePlaceholder" Glyph="&#xEC4F;" FontSize="64" Opacity="0.24" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.AccessibilityView="Raw"/>
+  <Border x:Name="CoverResizeHint" Width="34" Height="5" Margin="0,0,0,6"
+          HorizontalAlignment="Center" VerticalAlignment="Bottom" CornerRadius="3"
+          Background="#FFFFFFFF" BorderBrush="#66000000" BorderThickness="1" Opacity="0"
+          IsHitTestVisible="False" AutomationProperties.AccessibilityView="Raw"/>
  </local:PlayerRootGrid>
 </Window>
