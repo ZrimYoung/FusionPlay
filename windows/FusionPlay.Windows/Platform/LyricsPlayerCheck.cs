@@ -111,6 +111,13 @@ internal static class LyricsPlayerCheck
             return new(box.X, box.Y, box.Width, box.Height);
         }
         bool LyricsVisible() => Field(main!, "lyricsVisible") is true;
+        bool TryToggleCurrentLyrics() => typeof(MainWindow).GetMethod("ToggleCurrentLyrics", Private)!.Invoke(main, null) is true;
+        bool Presented(UIElement element)
+        {
+            for (DependencyObject? current = element; current != null; current = VisualTreeHelper.GetParent(current))
+                if (current is UIElement { Visibility: Visibility.Collapsed }) return false;
+            return true;
+        }
         string MetadataTypography() => string.Join("|", new[] { "MiniTitle", "MiniArtist", "TitleText", "ArtistText" }
             .Select(name => Find<PlayerText>(name)).Select(text => $"{text.FontFamily.Source}:{text.FontWeight.Weight}:{text.FontSize}"));
         async Task WaitLyrics()
@@ -324,9 +331,10 @@ internal static class LyricsPlayerCheck
         {
             var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
             bool lyricPage = pager.Active && pager.ShowingLyrics;
+            bool lyricsAvailable = model!.Preferences.Value.LyricsDisplayMode == "automatic" && model.LyricsAvailable;
             Require(Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible == !lyricPage
-                && Find<Grid>("MiniLyricsHost").IsHitTestVisible == (!pager.Active || lyricPage)
-                && Find<Grid>("ExpandedDetails").IsHitTestVisible && Find<Grid>("ExpandedLyricsHost").IsHitTestVisible
+                && Find<Grid>("MiniLyricsHost").IsHitTestVisible == (lyricsAvailable && (!pager.Active || lyricPage))
+                && Find<Grid>("ExpandedDetails").IsHitTestVisible && Find<Grid>("ExpandedLyricsHost").IsHitTestVisible == lyricsAvailable
                 && Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled && Find<ProgressSeekButton>("ProgressSeek").IsEnabled,
                 "main_lyrics_transition_left_interaction_disabled");
         }
@@ -532,7 +540,7 @@ internal static class LyricsPlayerCheck
             {
                 model!.Preferences.Update(model.Preferences.Value with
                 {
-                    LyricsDisplayMode = "always", CoverLyricsPane = "automatic", PlayerTextRendering = "enhanced", AlwaysShowControls = true
+                    LyricsDisplayMode = "automatic", CoverLyricsPane = "automatic", PlayerTextRendering = "enhanced", AlwaysShowControls = true
                 });
                 Accept(source with
                 {
@@ -769,7 +777,7 @@ internal static class LyricsPlayerCheck
             {
                 model!.Preferences.Update(model.Preferences.Value with
                 {
-                    NarrowPlayerLayout = "cover", CoverLyricsPane = "expanded", LyricsDisplayMode = "always"
+                    NarrowPlayerLayout = "cover", CoverLyricsPane = "expanded", LyricsDisplayMode = "automatic"
                 });
                 Accept(source with
                 {
@@ -854,6 +862,76 @@ internal static class LyricsPlayerCheck
                 Require(samples.Count == 4 && samples.Max() <= 2, "responsive_reading_position_did_not_survive_reverse_resize")));
         }
 
+        async Task CheckUnavailableLyricRoutes()
+        {
+            const string rememberedPane = "expanded";
+            foreach (var (mode, lyrics) in new[] { ("automatic", ""), ("never", timed) })
+            {
+                await OnUi(queue!, () =>
+                {
+                    Accept(new ReceiverSnapshot { Phase = ReceiverPhase.Ready });
+                    model!.Preferences.Update(model.Preferences.Value with
+                    {
+                        LyricsDisplayMode = mode, CoverLyricsPane = rememberedPane, LyricsBackgroundMode = "acrylic"
+                    });
+                    Accept(source with { TrackId = "unavailable-lyric-routes-" + mode, Phase = ReceiverPhase.Paused, LyricsText = lyrics });
+                });
+                await WaitLyrics();
+
+                foreach (var (layout, width, height) in new[] { ("cover", 840, 600), ("cover", 360, 360), ("album", 400, 275) })
+                {
+                    await OnUi(queue!, () =>
+                    {
+                        model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = layout });
+                        WindowSizing.ResizeContent(main!, width, height);
+                    });
+                    await Task.Delay(180);
+                    await OnUi(queue!, () => Pass($"unavailable_lyric_routes_{mode}_{layout}_{width}", () =>
+                    {
+                        var dimensions = MainSize(); Arrange(Root(), dimensions.Width, dimensions.Height);
+                        Require(!model!.LyricsLoading && model.Lyrics.HasLyrics == (lyrics.Length > 0), "unavailable_lyric_routes_fixture_did_not_settle");
+                        var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
+                        Require(!LyricsVisible() && !Presented(Find<Grid>("ExpandedLyricsHost")) && !Presented(Find<Grid>("MiniLyricsHost"))
+                            && !pager.Active && !pager.Navigate(true) && !TryToggleCurrentLyrics(), "unavailable_lyrics_retained_a_visible_route");
+                        Require(Field(main!, "acrylic") is PlayerAcrylic { IsRequested: false }, "unavailable_lyrics_requested_acrylic");
+                        if (layout == "album")
+                            Require(Presented(Find<ScrollViewer>("MiniAlbumScroll")) && !Presented(Find<Button>("AlbumLyricSummary")),
+                                "unavailable_lyrics_replaced_album_playback_or_retained_summary");
+                        if (layout == "cover" && width < 600)
+                        {
+                            Require(GetWindowRect(mainHwnd, out var proposed), "unavailable_lyrics_window_bounds_missing");
+                            proposed.Bottom += (int)Math.Round(100 * GetDpiForWindow(mainHwnd) / 96d);
+                            _ = SendMessage(mainHwnd, 0x0231, 0, 0);
+                            try
+                            {
+                                _ = SendSizing(mainHwnd, 0x0214, 6, ref proposed);
+                                Require(Field(main!, "coverLyricsResizing") is false, "unavailable_lyrics_allowed_bottom_edge_preview");
+                            }
+                            finally { _ = SendMessage(mainHwnd, 0x0232, 0, 0); }
+                        }
+                        Require(model.Preferences.Value.CoverLyricsPane == rememberedPane
+                            && new UiPreferencesStore(store.Data).Value.CoverLyricsPane == rememberedPane, "unavailable_lyric_routes_changed_the_saved_cover_pane");
+                    }));
+                }
+            }
+
+            await OnUi(queue!, () =>
+            {
+                model!.Preferences.Update(model.Preferences.Value with
+                {
+                    NarrowPlayerLayout = "cover", LyricsDisplayMode = "automatic", LyricsBackgroundMode = "album"
+                });
+                WindowSizing.ResizeContent(main!, 360, 540);
+            });
+            await Task.Delay(220);
+            await OnUi(queue!, () => Pass("remembered_cover_pane_restored_when_lyrics_become_available", () =>
+            {
+                var size = MainSize(); Arrange(Root(), size.Width, size.Height);
+                Require(LyricsVisible() && Presented(Find<Grid>("MiniLyricsHost")) && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 2
+                    && model!.Preferences.Value.CoverLyricsPane == rememberedPane, "automatic_lyrics_did_not_restore_remembered_cover_pane");
+            }));
+        }
+
         try
         {
             Require(queue != null, "lyrics_dispatcher_unavailable");
@@ -894,14 +972,16 @@ internal static class LyricsPlayerCheck
             step = "settings_display_modes";
             string metadataTypography = "";
             await OnUi(queue!, () => metadataTypography = MetadataTypography());
-            await Mode("always"); await OnUi(queue!, () => Pass("always_shows_empty_state_without_changing_metadata_typography", () =>
+            await OnUi(queue!, () => Accept(source with { TrackId = "display-mode-fixture", LyricsText = timed }));
+            await WaitLyrics();
+            await OnUi(queue!, () => Pass("automatic_displays_received_lyrics_without_changing_metadata_typography", () =>
             {
-                Require(LyricsVisible() && !model!.Lyrics.HasLyrics, "always_mode_did_not_show_empty_state");
+                Require(LyricsVisible() && model!.Lyrics.HasLyrics, "automatic_mode_did_not_show_received_lyrics");
                 Require(MetadataTypography() == metadataTypography, "enabling_lyrics_changed_metadata_typography");
             }));
             await Mode("never"); await OnUi(queue!, () => Pass("never_hides_lyric_panel_without_changing_metadata_typography", () =>
             {
-                Require(!LyricsVisible(), "never_mode_kept_lyrics_panel");
+                Require(model!.Lyrics.HasLyrics && !LyricsVisible() && !TryToggleCurrentLyrics(), "never_mode_kept_a_lyrics_entry");
                 Require(MetadataTypography() == metadataTypography, "disabling_lyrics_changed_metadata_typography");
             }));
             await OnUi(queue!, () => { settings!.Close(); SetProperty(model!, nameof(ReceiverController.Initialized), false); settings = new SettingsWindow(model!); Track(settings); SetProperty(model!, nameof(ReceiverController.Initialized), true); });
@@ -930,7 +1010,7 @@ internal static class LyricsPlayerCheck
             step = "current_track_lyrics_toggle";
             await OnUi(queue!, () => WindowSizing.ResizeContent(main!, 840, 640));
             await Task.Delay(220);
-            void ToggleLyrics() => Require(typeof(MainWindow).GetMethod("ToggleCurrentLyrics", Private)!.Invoke(main, null) is true,
+            void ToggleLyrics() => Require(TryToggleCurrentLyrics(),
                 "current_track_lyrics_toggle_unavailable");
             var nextSource = source with { TrackId = "lyrics-toggle-next-track" };
             await OnUi(queue!, () => Pass("current_track_lyric_override_keeps_preferences_and_survives_caption_updates", () =>
@@ -947,20 +1027,23 @@ internal static class LyricsPlayerCheck
             await OnUi(queue!, () => Pass("current_track_lyric_override_resets_on_track_mode_change_and_disconnect", () =>
             {
                 Require(LyricsVisible(), "lyrics_override_leaked_into_next_track");
-                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
                 ToggleLyrics();
-                Require(LyricsVisible() && model.Preferences.Value.LyricsDisplayMode == "never", "lyrics_toggle_did_not_temporarily_show_lyrics");
-                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
-                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
-                Require(!LyricsVisible(), "changing_global_mode_kept_lyrics_override");
+                Require(!LyricsVisible(), "lyrics_toggle_did_not_hide_next_track");
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
+                Require(!LyricsVisible() && !TryToggleCurrentLyrics(), "never_mode_allowed_a_temporary_lyrics_override");
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
+                Require(LyricsVisible(), "changing_global_mode_kept_the_old_lyrics_override");
                 ToggleLyrics();
                 Accept(new ReceiverSnapshot { Phase = ReceiverPhase.Ready });
                 Require(!LyricsVisible() && Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Collapsed, "lyrics_shortcut_retained_when_disconnected");
                 Accept(nextSource);
-                Require(!LyricsVisible(), "lyrics_override_survived_disconnect_and_reconnect");
-                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
-                Accept(source);
             }));
+            await WaitLyrics();
+            await OnUi(queue!, () =>
+            {
+                Require(LyricsVisible(), "lyrics_override_survived_disconnect_and_reconnect");
+                Accept(source);
+            });
             await WaitLyrics();
             await Task.Delay(400);
             step = "real_player_layouts";
@@ -1130,7 +1213,7 @@ internal static class LyricsPlayerCheck
                 cases.Add("never_lyrics_mode_does_not_enable_lyric_acrylic");
                 model.Preferences.Update(model.Preferences.Value with { LyricsBackgroundMode = "album" });
                 main!.AnimateHiddenLayoutForCheck = true; mainMotionEnabled = Backdrop.AnimationsEnabled;
-                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
                 if (mainMotionEnabled)
                     Require(Field(main, "lyricsLayoutTransitioning") is true && !Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled
                         && !Find<Grid>("MiniControlsTransitionLayer").IsHitTestVisible, "main_transition_did_not_immediately_suspend_seek");
@@ -1151,16 +1234,16 @@ internal static class LyricsPlayerCheck
                 RequireMainSettled(false, completedNormally: true);
                 animationSamples.Add(new { stage = "main_motion_scope", system_animations_enabled = mainMotionEnabled, production_state_machine_exercised = true, native_height_intermediate_frames = expansionHeights.Count(height => height > 422 && height < 691), visible_presentation_verified = false });
             }));
-            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" }));
+            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" }));
             await Task.Delay(45);
             await OnUi(queue!, () => { model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" }); MainTransitionFrame("reverse_to_never_at_45ms"); });
             await Task.Delay(70);
-            await OnUi(queue!, () => { model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" }); MainTransitionFrame("reverse_to_always_after_70ms"); });
+            await OnUi(queue!, () => { model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" }); MainTransitionFrame("reverse_to_automatic_after_70ms"); });
             await TraceMainTransition("rapid_reverse_settling", 700);
             await OnUi(queue!, () => Pass("actual_hidden_main_rapid_reversal_keeps_latest_lyrics_request", () =>
             {
                 RequireMainSettled(true, completedNormally: true);
-                Require(model!.Preferences.Value.LyricsDisplayMode == "always", "main_rapid_reverse_lost_latest_mode");
+                Require(model!.Preferences.Value.LyricsDisplayMode == "automatic", "main_rapid_reverse_lost_latest_mode");
             }));
             await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" }));
             await Task.Delay(70);
@@ -1699,20 +1782,23 @@ internal static class LyricsPlayerCheck
             await CheckNativeResizeTypography();
             step = "responsive_reading_position";
             await CheckResponsiveReadingPosition();
+            step = "unavailable_lyric_routes";
+            await CheckUnavailableLyricRoutes();
             step = "native_cover_bottom_paging";
             await OnUi(queue!, () =>
             {
-                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", CoverLyricsPane = "collapsed", LyricsDisplayMode = "never" });
+                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", CoverLyricsPane = "collapsed", LyricsDisplayMode = "automatic" });
                 Accept(source with { Phase = ReceiverPhase.Paused });
                 WindowSizing.ResizeContent(main!, 360, 360);
             });
             await WaitLyrics();
             await Task.Delay(180);
-            await OnUi(queue!, () => Pass("collapsed_cover_opens_lyrics_page_even_with_global_visibility_off", () =>
+            await OnUi(queue!, () => Pass("collapsed_cover_can_page_when_automatic_lyrics_are_available", () =>
             {
                 var pager = (CompactLyricsPager)Field(main!, "miniPager")!;
                 Require(pager.Active && pager.Navigate(true), "collapsed_cover_lyrics_page_unreachable");
-                Require(!LyricsVisible(), "cover_paging_changed_lyric_visibility_preference");
+                Require(model!.Preferences.Value is { LyricsDisplayMode: "automatic", CoverLyricsPane: "collapsed" }
+                    && Grid.GetRow(Find<Grid>("MiniLyricsHost")) == 0, "cover_paging_changed_lyric_visibility_preference");
                 Require(pager.Navigate(false), "cover_bottom_preview_requires_the_playback_page");
             }));
             async Task DragCoverPane(int height, bool expanded)
@@ -1747,7 +1833,7 @@ internal static class LyricsPlayerCheck
                     string pane = expanded ? "expanded" : "collapsed";
                     Require(!pager.ShowingLyrics && pager.Active != expanded && Math.Abs(size.Height - (expanded ? 496 : 360)) <= 2,
                         "native_cover_settle_height_or_paging_wrong");
-                    Require(model!.Preferences.Value.LyricsDisplayMode == "never" && new UiPreferencesStore(store.Data).Value.CoverLyricsPane == pane,
+                    Require(model!.Preferences.Value.LyricsDisplayMode == "automatic" && new UiPreferencesStore(store.Data).Value.CoverLyricsPane == pane,
                         "native_cover_gesture_lost_pane_or_changed_global_lyrics_mode");
                 }));
             }

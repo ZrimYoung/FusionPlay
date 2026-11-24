@@ -428,8 +428,8 @@ internal sealed class SettingsWindow : Window
         ConfigureCard(albumLyricsTrackInfo, "歌曲信息", "Track information", (p, value) => p with { AlbumLyricsTrackInfo = value });
         albumLyricsHeader = Group("专辑模式歌词页", "Album lyrics page", Cards(albumLyricsArtwork, albumLyricsTrackInfo));
         page.Children.Add(Group("窄窗布局", "Compact player layout", Surface(narrowPlayerLayout), coverControlsSurface,
-            Text("封面模式可拖动底边收展歌词，收起后左右翻页。专辑模式有独立的播放页和歌词页。",
-                "Drag the bottom edge in Cover mode to show or fold the lyrics, then swipe between pages when folded. Album mode has separate player and lyrics pages.", true)));
+            Text("有歌词时，封面模式可拖动底边收展歌词，收起后左右翻页。专辑模式有独立的播放页和歌词页。",
+                "With lyrics available, drag the bottom edge in Cover mode to show or fold the lyrics and swipe between pages when folded. Album mode has separate player and lyrics pages.", true)));
         page.Children.Add(albumLyricsHeader);
         ConfigureCard(transport, "播放控制", "Playback controls", (p, value) => p.NarrowPlayerLayout == "album"
             ? p with { AlbumShowTransport = value } : p with { CoverShowTransport = value });
@@ -437,21 +437,17 @@ internal sealed class SettingsWindow : Window
             ? p with { AlbumShowProgress = value } : p with { CoverShowProgress = value });
         ConfigureCard(pinButton, "置顶按钮", "Pin button", (p, value) => p with { ShowPinButton = value });
         AddSegment(lyricsDisplayMode, "automatic", "自动", "Automatic");
-        AddSegment(lyricsDisplayMode, "always", "始终开启", "Always on");
         AddSegment(lyricsDisplayMode, "never", "始终关闭", "Always off");
         Label(() => AutomationProperties.SetName(lyricsDisplayMode, L.Text("显示歌词", "Show lyrics")));
         lyricsDisplayMode.SelectionChanged += (_, _) =>
         {
             if (!renderingPreferences && SegmentKey(lyricsDisplayMode) is string key && key != model.Preferences.Value.LyricsDisplayMode)
-                UpdatePreferences(p => p with
-                {
-                    LyricsDisplayMode = key,
-                    CoverLyricsPane = key == "automatic" || p.CoverLyricsPane == "expanded" ? "automatic" : p.CoverLyricsPane
-                });
+                UpdatePreferences(p => p with { LyricsDisplayMode = key });
         };
         var lyricsLabel = new StackPanel { Spacing = 4 };
         lyricsLabel.Children.Add(Text("显示歌词", "Show lyrics"));
-        lyricsLabel.Children.Add(Text("控制宽窗歌词和封面模式的下拉歌词。分页时可横滑查看歌词。", "Controls the lyrics in wide windows and the stacked pane in Cover mode. In paged layouts, swipe to view lyrics.", true));
+        lyricsLabel.Children.Add(Text("自动仅在有歌词时提供歌词入口。始终关闭会在所有布局中隐藏歌词和入口。",
+            "Automatic makes lyrics available when provided. Always off hides lyrics and their controls in every layout.", true));
         AddSegment(lyricsBackgroundMode, "album", "专辑模糊", "Album blur");
         AddSegment(lyricsBackgroundMode, "acrylic", "亚克力", "Acrylic");
         Label(() => AutomationProperties.SetName(lyricsBackgroundMode, L.Text("歌词背景", "Lyrics background")));

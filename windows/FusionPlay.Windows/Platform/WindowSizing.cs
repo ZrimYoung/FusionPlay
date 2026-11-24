@@ -193,7 +193,12 @@ internal static class WindowSizing
                 double scale = Scale(handle);
                 BeginResize(argument, client, scale);
                 if (argument == BottomEdge && coverDrag is { } drag)
-                    return SizeCoverBottom(drag, next, pointer);
+                {
+                    if (allowCoverBottomResize) return SizeCoverBottom(drag, next, pointer);
+                    coverDrag = null;
+                    if (drag.Started) CancelCoverBottomResize();
+                    RefreshCoverResizeCue();
+                }
                 if (independentAlbum) return DefSubclassProc(handle, message, argument, pointer);
                 var frame = Frame(handle);
                 int width = Width(next) - frame.Width, height = Height(next) - frame.Height;
@@ -330,7 +335,7 @@ internal static class WindowSizing
             resizeWorkArea = WorkArea(outer);
             // Choose the gesture once. A page change during native sizing must
             // not turn an existing square resize into a lyric-pane drag.
-            if (edge != BottomEdge || !allowCoverBottomAtGestureStart) return;
+            if (edge != BottomEdge || !allowCoverBottomAtGestureStart || !allowCoverBottomResize) return;
             int frameHeight = Math.Max(0, Height(outer) - height);
             int maximumHeight = Math.Max(Math.Max(width, height), resizeWorkArea.Bottom - outer.Top - frameHeight);
             coverDrag = new(outer, frameHeight, width, height, maximumHeight, scale, lyricsVisible && !compactPaging);
@@ -356,7 +361,7 @@ internal static class WindowSizing
             if (drag is not { Started: true } resize) return;
             // Windows can restore the original rectangle on a cancelled
             // native resize. Discard its temporary preview without persisting it.
-            if (fullScreen || independentAlbum || !coverBottomResize || !GetClientRect(hwnd, out var client)
+            if (fullScreen || independentAlbum || !coverBottomResize || !allowCoverBottomResize || !GetClientRect(hwnd, out var client)
                 || Math.Abs(Height(client) - resize.StartHeight) <= 1)
             {
                 CancelCoverBottomResize();

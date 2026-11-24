@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Runtime.InteropServices;
 using Microsoft.Graphics.Canvas;
 using Microsoft.Graphics.Canvas.Effects;
@@ -15,6 +16,7 @@ internal sealed class AlbumBackdropCache(DispatcherQueue dispatcher) : IDisposab
     internal static ReadOnlySpan<float> ProgressiveRadii => [6, 14, 26, 40];
     private static readonly float[] radii = [6, 12, 14, 26, 34, 40, 48];
     private const int SurfaceSide = 512;
+    private const float RasterDpi = 96;
 
     private sealed class Request(byte[] artwork, int strength)
     {
@@ -141,7 +143,7 @@ internal sealed class AlbumBackdropCache(DispatcherQueue dispatcher) : IDisposab
         _ = Task.Run(async () =>
         {
             Dictionary<float, IRandomAccessStream>? streams = null;
-            try { streams = await RenderAsync(request, cancellation.Token); }
+            try { streams = await RenderAsync(request.Artwork, request.Strength, cancellation.Token); }
             catch (Exception error) when (error is COMException or ArgumentException or InvalidOperationException
                 or IOException or NotSupportedException or OperationCanceledException)
             {
@@ -182,9 +184,9 @@ internal sealed class AlbumBackdropCache(DispatcherQueue dispatcher) : IDisposab
         }
     }
 
-    private static async Task<Dictionary<float, IRandomAccessStream>> RenderAsync(Request request, CancellationToken cancellation)
+    internal static async Task<Dictionary<float, IRandomAccessStream>> RenderAsync(byte[] artwork, int strength, CancellationToken cancellation)
     {
-        using var input = new MemoryStream(request.Artwork, writable: false).AsRandomAccessStream();
+        using var input = new MemoryStream(artwork, writable: false).AsRandomAccessStream();
         var decoder = await BitmapDecoder.CreateAsync(input);
         cancellation.ThrowIfCancellationRequested();
         double scale = Math.Min(1, (double)SurfaceSide / Math.Max(decoder.PixelWidth, decoder.PixelHeight));
@@ -194,14 +196,20 @@ internal sealed class AlbumBackdropCache(DispatcherQueue dispatcher) : IDisposab
             ScaledHeight = (uint)Math.Max(1, Math.Round(decoder.PixelHeight * scale)),
             InterpolationMode = BitmapInterpolationMode.Linear
         };
-        using var softenedSource = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
+        using var decoded = await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied,
             transform, ExifOrientationMode.RespectExifOrientation, ColorManagementMode.ColorManageToSRgb);
         cancellation.ThrowIfCancellationRequested();
+        // CreateFromSoftwareBitmap inherits file DPI. Each layer must instead map the
+        // same normalized source pixels to the same output rectangle as the original art.
+        using var writable = decoded.IsReadOnly ? SoftwareBitmap.Copy(decoded) : null;
+        var source = writable ?? decoded;
+        source.DpiX = source.DpiY = RasterDpi;
         var device = CanvasDevice.GetSharedDevice();
-        using var bitmap = CanvasBitmap.CreateFromSoftwareBitmap(device, softenedSource);
-        using var target = new CanvasRenderTarget(device, softenedSource.PixelWidth, softenedSource.PixelHeight, 96);
+        using var bitmap = CanvasBitmap.CreateFromSoftwareBitmap(device, source);
+        using var target = new CanvasRenderTarget(device, source.PixelWidth, source.PixelHeight, RasterDpi);
+        var artworkBounds = new Rect(0, 0, source.PixelWidth, source.PixelHeight);
         // Keep proportional blur for small artwork that will stretch to the same visual size.
-        float radiusScale = Math.Max(softenedSource.PixelWidth, softenedSource.PixelHeight) / (float)SurfaceSide;
+        float radiusScale = Math.Max(source.PixelWidth, source.PixelHeight) / (float)SurfaceSide;
         using var gaussian = new GaussianBlurEffect
         {
             Source = bitmap,
@@ -214,11 +222,11 @@ internal sealed class AlbumBackdropCache(DispatcherQueue dispatcher) : IDisposab
             foreach (float radius in radii)
             {
                 cancellation.ThrowIfCancellationRequested();
-                gaussian.BlurAmount = radius * radiusScale * (request.Strength / 100f);
+                gaussian.BlurAmount = radius * radiusScale * (strength / 100f);
                 using (var drawing = target.CreateDrawingSession())
                 {
                     drawing.Clear(Microsoft.UI.Colors.Transparent);
-                    drawing.DrawImage(gaussian);
+                    drawing.DrawImage(gaussian, Vector2.Zero, artworkBounds);
                 }
                 var stream = new InMemoryRandomAccessStream();
                 streams.Add(radius, stream);

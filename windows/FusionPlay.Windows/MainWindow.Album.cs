@@ -39,7 +39,7 @@ public sealed partial class MainWindow
                 if (MiniAlbumScroll.VerticalOffset > 0) MiniAlbumScroll.ChangeView(null, 0, null, disableAnimation: true);
             }
             MiniCoverEffects.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
-            AlbumLyricSummary.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+            if (!active) AlbumLyricSummary.Visibility = Visibility.Collapsed;
             MiniControlsTransitionLayer.VerticalAlignment = active ? VerticalAlignment.Stretch : VerticalAlignment.Bottom;
             MiniControls.VerticalAlignment = active ? VerticalAlignment.Stretch : VerticalAlignment.Bottom;
             MiniControls.Padding = active ? new Thickness(0) : new Thickness(18, 20, 18, 14);
@@ -64,7 +64,10 @@ public sealed partial class MainWindow
     {
         if (!albumLayoutActive || !compact || idle) return;
 
-        var options = (Artwork: preferences.AlbumLyricsArtwork, TrackInfo: preferences.AlbumLyricsTrackInfo);
+        bool lyricsPageAvailable = miniPager.Active && CanPresentLyrics;
+        AlbumLyricSummary.Visibility = lyricsPageAvailable ? Visibility.Visible : Visibility.Collapsed;
+        var options = (Artwork: lyricsPageAvailable && preferences.AlbumLyricsArtwork,
+            TrackInfo: lyricsPageAvailable && preferences.AlbumLyricsTrackInfo);
         if (albumHeaderOptions != options)
         {
             albumHeaderOptions = options;
@@ -73,6 +76,7 @@ public sealed partial class MainWindow
             AlbumLyricsMetadata.Visibility = options.TrackInfo ? Visibility.Visible : Visibility.Collapsed;
             if (!options.Artwork) AlbumLyricsArtwork.Source = null;
         }
+        if (!lyricsPageAvailable) return;
         if (albumHeaderLanguage != L.Language)
         {
             albumHeaderLanguage = L.Language;

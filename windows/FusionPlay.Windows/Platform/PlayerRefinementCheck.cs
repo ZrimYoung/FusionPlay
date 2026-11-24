@@ -133,7 +133,7 @@ internal static class PlayerRefinementCheck
                 anchor = new Window { Content = new Grid(), Title = "FusionPlay Hidden Refinement Anchor" }; Track(anchor);
                 originalPreferences = File.Exists(preferencesPath) ? File.ReadAllBytes(preferencesPath) : null; preferencesCaptured = true;
                 model = new ReceiverController(queue!);
-                model.Preferences.Update(new UiPreferences { ShowProgress = true, ShowTransport = true, AlwaysShowControls = true, LyricsDisplayMode = "always" });
+                model.Preferences.Update(new UiPreferences { ShowProgress = true, ShowTransport = true, AlwaysShowControls = true, LyricsDisplayMode = "automatic" });
                 main = new MainWindow(model, () => { }); Track(main); hwnd = WinRT.Interop.WindowNative.GetWindowHandle(main);
                 tray = new TrayWindow(model, () => { }, () => { }, () => { }, () => null); Track(tray);
                 typeof(ReceiverController).GetProperty(nameof(ReceiverController.Initialized))!.SetValue(model, true);
@@ -145,7 +145,7 @@ internal static class PlayerRefinementCheck
                 Require(!model!.HasCurrentTrack && Field(main!, "idle") is true && Visible(Find<FontIcon>("IdlePlaceholder")), "idle_note_missing");
                 Require(!LyricsVisible() && !Visible(Find<PlayerText>("MiniTitle")) && !Visible(Find<ProgressSeekButton>("MiniProgressSeek"))
                     && !Visible(Find<Button>("MiniPlayButton")), "idle_retained_track_content");
-                Require(model.Preferences.Value is { ShowProgress: true, ShowTransport: true, LyricsDisplayMode: "always" }, "idle_modified_preferences");
+                Require(model.Preferences.Value is { ShowProgress: true, ShowTransport: true, LyricsDisplayMode: "automatic" }, "idle_modified_preferences");
                 Require(!Find<ProgressSeekButton>("MiniProgressSeek").IsEnabled, "idle_seek_enabled");
                 var caption = InputNonClientPointerSource.GetForWindowId(main!.AppWindow.Id).GetRegionRects(NonClientRegionKind.Caption);
                 Require(caption.Length > 0, "idle_lost_native_drag_regions");
@@ -184,6 +184,8 @@ internal static class PlayerRefinementCheck
                 Require(clipboardText.Invoke(main, [true]) is "A Synthetic Question"
                     && clipboardText.Invoke(main, [false]) is string info && info.StartsWith("A Synthetic Question · Example Artist", StringComparison.Ordinal),
                     "copy_track_did_not_use_displayed_metadata");
+                model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
+                Require(LyricsVisible() && Visible(Find<Button>("LyricsToggleButton")), "lyrics_button_fixture_not_available");
                 model.Preferences.Update(model.Preferences.Value with { ShowLyricsButton = false });
                 Require(Find<Button>("LyricsToggleButton").Visibility == Visibility.Collapsed
                     && Find<Button>("MiniLyricsToggleButton").Visibility == Visibility.Collapsed
@@ -191,7 +193,10 @@ internal static class PlayerRefinementCheck
                         key.Key == global::Windows.System.VirtualKey.L
                         && key.Modifiers == (global::Windows.System.VirtualKeyModifiers.Control | global::Windows.System.VirtualKeyModifiers.Shift)),
                     "hiding_lyrics_button_removed_existing_input");
-                model.Preferences.Update(model.Preferences.Value with { ShowLyricsButton = true });
+                var toggleLyrics = typeof(MainWindow).GetMethod("ToggleCurrentLyrics", Private)!;
+                Require(toggleLyrics.Invoke(main, null) is true && !LyricsVisible()
+                    && toggleLyrics.Invoke(main, null) is true && LyricsVisible(), "hiding_lyrics_button_disabled_keyboard_action");
+                model.Preferences.Update(model.Preferences.Value with { ShowLyricsButton = true, LyricsDisplayMode = "never" });
                 var request = Seeking.AtFraction(model.State, .5);
                 Require(model.State == song && request != null && request.ExpectedTitle == song.Title && request.ExpectedTrackId == song.TrackId && request.PositionMs == 90_000, "display_correction_changed_control_source");
                 Accept(song with { Phase = ReceiverPhase.Paused }); model.Preferences.Update(model.Preferences.Value with { CorrectLyricTitles = false });
@@ -240,7 +245,7 @@ internal static class PlayerRefinementCheck
                 Accept(song with { ControlsAvailable = false, DurationMs = null, PositionMs = null }); Arrange();
                 Require(model.HasCurrentTrack && Field(main!, "idle") is false && Visible(Find<ProgressSeekButton>("ProgressSeek"))
                     && !Find<Button>("PlayButton").IsEnabled, "control_gap_collapsed_content");
-                Accept(song); model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" });
+                Accept(song); model.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" });
                 WindowSizing.ResizeContent(main!, 320, 600);
             }));
             await Parsed();
@@ -263,7 +268,7 @@ internal static class PlayerRefinementCheck
                 model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
             }));
             await Settle();
-            await OnUi(queue!, () => { Require(Math.Abs(Size().Height - initialWidth) <= 2, "hide_did_not_restore_square"); model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" }); });
+            await OnUi(queue!, () => { Require(Math.Abs(Size().Height - initialWidth) <= 2, "hide_did_not_restore_square"); model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" }); });
             await Settle();
             await OnUi(queue!, () => Pass("lyrics_toggle_restores_custom_pane_height", () =>
             {
@@ -272,7 +277,7 @@ internal static class PlayerRefinementCheck
                 model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "never" });
             }));
             await Settle(); await OnUi(queue!, () => WindowSizing.ResizeContent(main!, 360, 360)); await Settle();
-            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always" })); await Settle();
+            await OnUi(queue!, () => model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic" })); await Settle();
             await OnUi(queue!, () => Pass("pane_height_is_independent_of_cover_width", () =>
             {
                 Require(Math.Abs(Size().Height - (360 + rememberedPane)) <= 3, "cover_width_changed_saved_lyric_pane_height");
@@ -305,7 +310,7 @@ internal static class PlayerRefinementCheck
             await OnUi(queue!, () =>
             {
                 var material = (PlayerAcrylic)Field(main!, "acrylic")!;
-                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "always", LyricsBackgroundMode = "acrylic" });
+                model!.Preferences.Update(model.Preferences.Value with { LyricsDisplayMode = "automatic", LyricsBackgroundMode = "acrylic" });
                 Require(!material.IsRequested && !material.IsActive, "lyrics_material_requested_while_idle");
                 idleMaterial = main!.SystemBackdrop;
                 Accept(song);
@@ -346,6 +351,10 @@ internal static class PlayerRefinementCheck
             });
             await Parsed();
             var pagingStep = step;
+            step = "cached_artwork_pixel_registration";
+            var artworkRegistration = await ArtworkBackdropCheck.VerifyProgressiveRegistration();
+            cases.Add(step);
+            samples.Add(new { mode = step, artwork = artworkRegistration });
             step = "shared_album_backdrop_cache";
             var appearance = new global::Windows.UI.ViewManagement.UISettings();
             bool checkAlbumBlur = appearance.AdvancedEffectsEnabled && !new global::Windows.UI.ViewManagement.AccessibilitySettings().HighContrast;
@@ -355,6 +364,23 @@ internal static class PlayerRefinementCheck
                 object BackdropLayer(string name) => Field(BackdropFor(name), "layer") ?? throw new CheckFailure("album_backdrop_layer_missing");
                 object? LayerMember(object layer, string name) => layer.GetType().GetField(name)!.GetValue(layer);
                 var names = new[] { "miniBackdrop", "lyricsBackdrop", "expandedLyricsBackdrop", "sceneBackdrop" };
+
+                void CheckMiniArtworkPlacement(Stretch expectedImageStretch, CompositionStretch expectedBrushStretch)
+                {
+                    var artwork = Find<Grid>("MiniArtworkLayer");
+                    var blur = Find<Grid>("MiniBackdropLayer");
+                    var cover = Find<Grid>("MiniCoverPanel");
+                    var artworkOrigin = artwork.TransformToVisual(cover).TransformPoint(new Point());
+                    var blurOrigin = blur.TransformToVisual(cover).TransformPoint(new Point());
+                    Require(Math.Abs(artworkOrigin.X - blurOrigin.X) < .5 && Math.Abs(artworkOrigin.Y - blurOrigin.Y) < .5
+                        && Math.Abs(artwork.ActualWidth - blur.ActualWidth) < .5 && Math.Abs(artwork.ActualHeight - blur.ActualHeight) < .5,
+                        "progressive_artwork_and_blur_viewports_differ");
+                    Require(Find<Image>("MiniCover").Stretch == expectedImageStretch, "compact_artwork_stretch_unexpected");
+                    var sprites = (IEnumerable<(float Radius, SpriteVisual Sprite, CompositionMaskBrush? Mask)>)LayerMember(BackdropLayer("miniBackdrop"), "Sprites")!;
+                    Require(sprites.Count() == 4 && sprites.All(entry => entry.Mask?.Source is CompositionSurfaceBrush brush
+                        && brush.Stretch == expectedBrushStretch && brush.HorizontalAlignmentRatio == .5f && brush.VerticalAlignmentRatio == .5f),
+                        "cached_blur_stretch_or_alignment_differs_from_artwork");
+                }
 
                 async Task CheckStrength(int strength, bool setPreference)
                 {
@@ -393,6 +419,18 @@ internal static class PlayerRefinementCheck
                 await CheckStrength(0, setPreference: true);
                 await CheckStrength(60, setPreference: true);
                 await CheckStrength(100, setPreference: true);
+                await OnUi(queue!, () =>
+                {
+                    CheckMiniArtworkPlacement(Stretch.UniformToFill, CompositionStretch.UniformToFill);
+                    model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "expanded" });
+                });
+                await Settle();
+                await OnUi(queue!, () =>
+                {
+                    CheckMiniArtworkPlacement(Stretch.Uniform, CompositionStretch.Uniform);
+                    model!.Preferences.Update(model.Preferences.Value with { CoverLyricsPane = "collapsed" });
+                });
+                await Settle();
                 object[]? beforeResize = null;
                 await OnUi(queue!, () =>
                 {
@@ -519,7 +557,7 @@ internal static class PlayerRefinementCheck
             step = "independent_album_player";
             await OnUi(queue!, () =>
             {
-                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "album", LyricsDisplayMode = "never" });
+                model!.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "album", LyricsDisplayMode = "automatic" });
                 WindowSizing.ResizeContent(main!, 400, 275);
                 Accept(song);
             });
@@ -535,7 +573,8 @@ internal static class PlayerRefinementCheck
                     "album_player_short_window_or_current_line_missing");
                 Require(ReferenceEquals(Find<Grid>("MiniLyricsHost").Children[0], compactLyrics), "album_replaced_existing_lyrics_view");
                 typeof(MainWindow).GetMethod("AlbumLyricSummary_Click", Private)!.Invoke(main, [Find<Button>("AlbumLyricSummary"), null]);
-                Require(Pager().ShowingLyrics && !LyricsVisible(), "album_summary_did_not_open_independent_lyrics");
+                Require(Pager().ShowingLyrics && Visible(Find<Grid>("MiniLyricsHost")) && !Visible(scroll) && !Visible(Find<Grid>("ExpandedLyricsHost")),
+                    "album_summary_did_not_open_independent_lyrics");
             }));
             await Settle();
             await Capture("album-lyrics-400x275");
@@ -547,7 +586,7 @@ internal static class PlayerRefinementCheck
                 Require(!Visible(Find<Border>("AlbumLyricsArtworkFrame")) && Visible(Find<StackPanel>("AlbumLyricsMetadata")), "album_artwork_preference_changed_header_text");
                 typeof(MainWindow).GetMethod("AlbumLyricsHeader_Click", Private)!.Invoke(main, [Find<Button>("AlbumLyricsHeader"), null]);
                 Require(!Pager().ShowingLyrics, "album_lyrics_header_did_not_return_to_playback");
-                model.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", LyricsDisplayMode = "always" });
+                model.Preferences.Update(model.Preferences.Value with { NarrowPlayerLayout = "cover", LyricsDisplayMode = "automatic" });
             }));
             step = "independent_lyrics_scale_and_wrapped_track";
             double titleHeight = 0, titleFontSize = 0, originalSize = 0, translationSize = 0;
@@ -626,11 +665,11 @@ internal static class PlayerRefinementCheck
 
     private static async Task<(BitmapImage Artwork, byte[] Bytes)> MakeCoverArtwork()
     {
-        const uint side = 32;
-        var pixels = new byte[side * side * 4];
+        const uint width = 48, height = 32;
+        var pixels = new byte[width * height * 4];
         for (int i = 0; i < pixels.Length; i += 4)
         {
-            bool warm = i % (side * 4) >= side * 2;
+            bool warm = i % (width * 4) >= width * 2;
             pixels[i] = warm ? (byte)45 : (byte)210;
             pixels[i + 1] = warm ? (byte)160 : (byte)105;
             pixels[i + 2] = warm ? (byte)230 : (byte)50;
@@ -638,7 +677,7 @@ internal static class PlayerRefinementCheck
         }
         using var stream = new InMemoryRandomAccessStream();
         var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, stream);
-        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, side, side, 96, 96, pixels);
+        encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Premultiplied, width, height, 72, 72, pixels);
         await encoder.FlushAsync();
         var bytes = new byte[checked((int)stream.Size)];
         using var reader = new DataReader(stream.GetInputStreamAt(0));

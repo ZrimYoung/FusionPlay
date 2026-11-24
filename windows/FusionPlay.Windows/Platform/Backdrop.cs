@@ -63,6 +63,7 @@ internal sealed class Backdrop : IDisposable
     private int currentStrength, failedStrength;
     private Layer? layer, previous;
     private ContainerVisual? root;
+    private CompositionStretch artworkStretch = CompositionStretch.UniformToFill;
     private double coverage = 0.65;
     private bool disposed;
     public event Action? Changed;
@@ -169,7 +170,7 @@ internal sealed class Backdrop : IDisposable
         }
     }
 
-    private static void BuildLiveArtwork(Layer value, byte[] bytes, int strength)
+    private void BuildLiveArtwork(Layer value, byte[] bytes, int strength)
     {
         var compositor = value.Visual.Compositor;
         value.Stream = new MemoryStream(bytes, writable: false).AsRandomAccessStream();
@@ -177,7 +178,7 @@ internal sealed class Backdrop : IDisposable
         value.Surface = LoadedImageSurface.StartLoadFromStream(value.Stream, new global::Windows.Foundation.Size(1024, 1024));
         var image = compositor.CreateSurfaceBrush(value.Surface);
         value.LiveResources.Add(image);
-        image.Stretch = CompositionStretch.UniformToFill;
+        ConfigureArtworkBrush(image);
         foreach (var (radius, sprite, mask) in value.Sprites)
         {
             CompositionBrush brush = image;
@@ -226,7 +227,7 @@ internal sealed class Backdrop : IDisposable
             {
                 var brush = compositor.CreateSurfaceBrush(prepared.Surface(radius));
                 brushes.Add(brush);
-                brush.Stretch = CompositionStretch.UniformToFill;
+                ConfigureArtworkBrush(brush);
             }
             for (int index = 0; index < brushes.Count; index++)
             {
@@ -252,6 +253,35 @@ internal sealed class Backdrop : IDisposable
         value.Prepared = prepared;
         value.ReleaseLiveArtwork();
         return true;
+    }
+
+    private void ConfigureArtworkBrush(CompositionSurfaceBrush brush)
+    {
+        brush.Stretch = artworkStretch;
+        brush.HorizontalAlignmentRatio = .5f;
+        brush.VerticalAlignmentRatio = .5f;
+    }
+
+    public void SetArtworkStretch(CompositionStretch value)
+    {
+        if (disposed || artworkStretch == value) return;
+        artworkStretch = value;
+        try
+        {
+            Apply(layer);
+            Apply(previous);
+        }
+        catch (Exception error) when (error is COMException or ObjectDisposedException)
+        {
+            Report("stretch", error);
+        }
+
+        void Apply(Layer? artwork)
+        {
+            if (artwork == null) return;
+            foreach (var brush in artwork.LiveResources.OfType<CompositionSurfaceBrush>()) brush.Stretch = value;
+            foreach (var brush in artwork.Resources.OfType<CompositionSurfaceBrush>()) brush.Stretch = value;
+        }
     }
 
     private void ShowReadyLayer(Layer value)

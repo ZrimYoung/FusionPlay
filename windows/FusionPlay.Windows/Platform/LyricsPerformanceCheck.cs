@@ -249,7 +249,7 @@ internal static class LyricsPerformanceCheck
                 // Seed before constructing the controller: never parse a user's presentation
                 // configuration in this fixture. Restore the exact prior bytes in finally.
                 var fixture = new UiPreferencesStore(fixtureDirectory);
-                var value = new UiPreferences { AlwaysShowControls = true, ShowTransport = true, ShowProgress = true, LyricsDisplayMode = "always" };
+                var value = new UiPreferences { AlwaysShowControls = true, ShowTransport = true, ShowProgress = true, LyricsDisplayMode = "automatic" };
                 fixture.Update(value);
                 Directory.CreateDirectory(store.Data); File.Copy(fixturePreferenceFile, preferenceFile, overwrite: true);
             });
@@ -303,7 +303,7 @@ internal static class LyricsPerformanceCheck
                 int height = 550 + (int)Math.Round(Math.Cos(frame * Math.PI / 40) * 70);
                 WindowSizing.ResizeContent(main!, width, height);
             });
-            await OnUi(queue!, () => controller!.Preferences.Update(controller.Preferences.Value with { LyricsDisplayMode = "always" }));
+            await OnUi(queue!, () => controller!.Preferences.Update(controller.Preferences.Value with { LyricsDisplayMode = "automatic" }));
             await Prepare(840, 600);
             step = "source_position_and_automatic_follow";
             await Measure(step, 180, View(false), frame => Publish((ulong)frame * 100));

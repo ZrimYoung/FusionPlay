@@ -248,6 +248,10 @@ internal static class SettingsLayoutCheck
                     && description.Contains(language == "en" ? "expanded" : "展开"), "window_button_scope_or_shortcut_description_missing");
                 Require(new ToggleButtonAutomationPeer(Find<ToggleButton>("CorrectLyricTitles")).GetName() == L.Text("修正歌词标题", "Correct lyric titles"), "title_correction_choice_name_not_localized");
                 Require(Find<TextBlock>("TitleCorrectionDescription").Text.Contains(language == "en" ? "verifiable" : "可信"), "title_correction_evidence_requirement_missing");
+                var displayMode = Find<SelectorBar>("LyricsDisplayMode");
+                Require(displayMode.Items.Select(item => item.Tag as string).SequenceEqual(new[] { "automatic", "never" })
+                    && displayMode.Items.Select(item => item.Text).SequenceEqual(new[] { L.Text("自动", "Automatic"), L.Text("始终关闭", "Always off") }),
+                    "lyrics_display_modes_not_limited_to_automatic_and_off");
                 var background = Find<SelectorBar>("LyricsBackgroundMode");
                 Require(background.Items.Select(item => item.Tag as string).SequenceEqual(new[] { "album", "acrylic" })
                     && background.Items.Select(item => item.Text).SequenceEqual(new[] { L.Text("专辑模糊", "Album blur"), L.Text("亚克力", "Acrylic") })
@@ -426,7 +430,7 @@ internal static class SettingsLayoutCheck
                 Require(!Visible(Find<FrameworkElement>("ProgressColorGroup")) && controller.Preferences.Value.ProgressCustomColor == "#F17E91", "hidden_progress_lost_color_or_editor_remained");
                 Require(new UiPreferencesStore(store.Data).Value.ProgressCustomColor == "#F17E91", "pending_color_not_persisted_when_hiding_progress");
                 Toggle("ShowProgress");
-                foreach (string mode in new[] { "always", "never", "automatic" })
+                foreach (string mode in new[] { "never", "automatic" })
                 {
                     SelectSegment("LyricsDisplayMode", mode);
                     Require(controller.Preferences.Value.LyricsDisplayMode == mode && new UiPreferencesStore(store.Data).Value.LyricsDisplayMode == mode, "lyrics_mode_not_saved");
@@ -454,17 +458,16 @@ internal static class SettingsLayoutCheck
                 var preferences = controller!.Preferences;
                 Require(preferences.Value.NarrowPlayerLayout == "cover" && Visible(Find<SelectorBar>("MiniControlsVisibility"))
                     && !Visible(Find<ToggleButton>("AlbumLyricsArtwork")), "cover_controls_not_scoped");
-                preferences.Update(preferences.Value with { CoverLyricsPane = "collapsed" });
-                SelectSegment("LyricsDisplayMode", "always");
-                SelectSegment("LyricsDisplayMode", "never");
-                Require(preferences.Value.CoverLyricsPane == "collapsed", "explicit_lyrics_mode_reopened_folded_pane");
-                SelectSegment("LyricsDisplayMode", "automatic");
-                Require(preferences.Value.CoverLyricsPane == "automatic", "automatic_did_not_release_folded_pane");
-                preferences.Update(preferences.Value with { CoverLyricsPane = "expanded" });
-                SelectSegment("LyricsDisplayMode", "never");
-                Require(preferences.Value.CoverLyricsPane == "automatic", "mode_change_retained_forced_expansion");
-                SelectSegment("LyricsDisplayMode", "automatic");
-                preferences.Update(preferences.Value with { CoverLyricsPane = "expanded" });
+                foreach (string pane in new[] { "collapsed", "expanded" })
+                {
+                    preferences.Update(preferences.Value with { CoverLyricsPane = pane });
+                    foreach (string mode in new[] { "never", "automatic" })
+                    {
+                        SelectSegment("LyricsDisplayMode", mode);
+                        Require(preferences.Value.CoverLyricsPane == pane
+                            && new UiPreferencesStore(store.Data).Value.CoverLyricsPane == pane, "lyrics_mode_changed_saved_cover_pane");
+                    }
+                }
 
                 SelectSegment("NarrowPlayerLayout", "album");
                 Require(preferences.Value is { NarrowPlayerLayout: "album", CoverLyricsPane: "automatic", ShowPlayerTransport: true, ShowPlayerProgress: true }

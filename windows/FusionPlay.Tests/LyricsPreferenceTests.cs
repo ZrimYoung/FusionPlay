@@ -11,16 +11,19 @@ internal static class LyricsPreferenceTests
             File.WriteAllText(path, "{\"show_progress\":false,\"progress_custom_color\":\"#83BFE3\"}");
             var store = new UiPreferencesStore(temporary.Path);
             Require(store.Value.LyricsDisplayMode == "automatic" && store.Value.LyricsBackgroundMode == "album" && !store.Value.ShowProgress, "old preferences changed");
-            foreach (string mode in new[] { "automatic", "always", "never" })
+            foreach (string mode in new[] { "automatic", "never" })
             {
                 store.Update(store.Value with { LyricsDisplayMode = mode });
                 Require(new UiPreferencesStore(temporary.Path).Value.LyricsDisplayMode == mode, "lyrics mode did not persist");
                 Require(store.Value.ProgressCustomColor == "#83BFE3" && !store.Value.ShowProgress, "other preferences changed");
             }
             byte[] before = File.ReadAllBytes(path);
-            try { store.Update(store.Value with { LyricsDisplayMode = "unsupported" }); throw new InvalidOperationException("invalid mode accepted"); }
-            catch (ArgumentException) { }
-            Require(File.ReadAllBytes(path).AsSpan().SequenceEqual(before) && store.Value.LyricsDisplayMode == "never", "invalid mode replaced preferences");
+            foreach (string invalid in new[] { "always", "unsupported" })
+            {
+                try { store.Update(store.Value with { LyricsDisplayMode = invalid }); throw new InvalidOperationException("invalid mode accepted"); }
+                catch (ArgumentException) { }
+                Require(File.ReadAllBytes(path).AsSpan().SequenceEqual(before) && store.Value.LyricsDisplayMode == "never", "invalid mode replaced preferences");
+            }
             foreach (string mode in new[] { "acrylic", "album", "acrylic" })
             {
                 store.Update(store.Value with { LyricsBackgroundMode = mode });
@@ -96,16 +99,17 @@ internal static class LyricsPreferenceTests
             const string legacy = """{"narrow_lyrics_paging":true,"show_progress":false,"lyrics_display_mode":"always"}""";
             File.WriteAllText(path, legacy);
             var store = new UiPreferencesStore(temporary.Path);
-            Require(store.Value is { NarrowPlayerLayout: "cover", CoverLyricsPane: "collapsed", LyricsDisplayMode: "always",
+            Require(store.Value is { NarrowPlayerLayout: "cover", CoverLyricsPane: "collapsed", LyricsDisplayMode: "automatic",
                 ShowPlayerProgress: false, ShowPlayerTransport: true, AlbumLyricsArtwork: true, AlbumLyricsTrackInfo: true },
-                "legacy paging or shared controls did not migrate");
+                "legacy lyrics mode, paging or shared controls did not migrate");
             Require(File.ReadAllText(path) == legacy, "loading changed the original preferences file");
 
             var cover = store.Value with { CoverLyricsPane = "expanded", CoverShowTransport = false, CoverShowProgress = true };
             store.Update(cover);
             var reopened = new UiPreferencesStore(temporary.Path);
-            Require(reopened.Value == cover && !reopened.Value.ShowPlayerTransport && reopened.Value.ShowPlayerProgress,
-                "cover state or independent controls did not persist");
+            Require(reopened.Value == cover && reopened.Value.LyricsDisplayMode == "automatic"
+                && !reopened.Value.ShowPlayerTransport && reopened.Value.ShowPlayerProgress,
+                "migrated lyrics mode, cover state or independent controls did not persist");
             Require(!File.ReadAllText(path).Contains("narrow_lyrics_paging", StringComparison.Ordinal), "the legacy flag was written again");
             var album = cover with { NarrowPlayerLayout = "album", AlbumShowProgress = true, AlbumLyricsArtwork = false, AlbumLyricsTrackInfo = false };
             store.Update(album);
@@ -140,12 +144,11 @@ internal static class LyricsPreferenceTests
             Require(Math.Abs(shortFullScreen.ArtworkSide - (340 - 2 * shortFullScreen.VerticalInset - 225)) < .01,
                 "cover did not leave room for wrapped metadata and playback controls");
         });
-        check("lyrics display: automatic follows parsed availability, explicit choices stay stable", () =>
+        check("lyrics display: automatic follows parsed availability and always off hides lyrics", () =>
         {
             foreach (bool available in new[] { false, true })
             {
                 Require(LyricsDisplayModes.IsVisible("automatic", available) == available, "automatic visibility incorrect");
-                Require(LyricsDisplayModes.IsVisible("always", available), "always-on visibility incorrect");
                 Require(!LyricsDisplayModes.IsVisible("never", available), "always-off visibility incorrect");
             }
         });

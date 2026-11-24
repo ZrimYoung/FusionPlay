@@ -65,6 +65,8 @@ public sealed class UiPreferencesStore
             using var document = JsonDocument.Parse(File.ReadAllText(path));
             Value = document.RootElement.Deserialize<UiPreferences>(WireJson.Options)
                 ?? throw new JsonException("UI preferences are empty.");
+            if (Value.LyricsDisplayMode == "always")
+                Value = Value with { LyricsDisplayMode = "automatic" };
             if (Value.NarrowLyricsPaging)
             {
                 bool hasPanePreference = document.RootElement.EnumerateObject().Any(property =>
@@ -115,7 +117,7 @@ public sealed class UiPreferencesStore
             throw new ArgumentException("Invalid interface font weight.", nameof(preferences));
         if (preferences.PlayerTextRendering is not ("system" or "enhanced"))
             throw new ArgumentException("Unsupported player text rendering.", nameof(preferences));
-        if (preferences.LyricsDisplayMode is not ("automatic" or "always" or "never"))
+        if (preferences.LyricsDisplayMode is not ("automatic" or "never"))
             throw new ArgumentException("Unsupported lyrics display mode.", nameof(preferences));
         if (preferences.NarrowPlayerLayout is not ("cover" or "album"))
             throw new ArgumentException("Unsupported mini player layout.", nameof(preferences));
