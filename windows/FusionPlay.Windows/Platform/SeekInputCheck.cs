@@ -251,7 +251,8 @@ internal static class SeekInputCheck
                 Background();
                 originalPreferencesFile = File.Exists(preferencesPath) ? File.ReadAllBytes(preferencesPath) : null;
                 preferencesCaptured = true;
-                controller = new ReceiverController(queue!); controllerCreated = true;
+                // Hold the playback clock while verifying exact percentages across layout waits.
+                controller = new ReceiverController(queue!, static () => TimeSpan.Zero); controllerCreated = true;
                 originalPreferences = controller.Preferences.Value;
                 controller.Preferences.Update(originalPreferences with
                 {
