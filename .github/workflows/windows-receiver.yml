@@ -31,8 +31,8 @@ jobs:
         with:
           name: FusionPlay-Windows-x64-test-build
           path: |
-            artifacts/FusionPlay-Windows-0.1.0-test-x64.zip
-            artifacts/FusionPlay-Windows-0.1.0-test-x64.zip.sha256
+            artifacts/FusionPlay-Windows-*-x64.zip
+            artifacts/FusionPlay-Windows-*-x64.zip.sha256
           if-no-files-found: error
   mac-regression:
     runs-on: macos-15
